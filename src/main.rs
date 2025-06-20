@@ -28,20 +28,14 @@ use lsp_server::{Connection, ExtractError, Message, Notification, Request, Reque
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     if true {
-        let s = std::fs::read_to_string("test.lua")?;
-        let l = full_moon::parse_fallible(s.as_str(), LuaVersion::lua51());
-        println!("{:#?}", l.ast().nodes());
+        let s = std::fs::read_to_string("CheckItem.lua")?;
+        let l = full_moon::tokenizer::Lexer::new(s.as_str(), LuaVersion::lua51());
+        let start = std::time::Instant::now();
+        let res = l.collect();
+        let finish = std::time::Instant::now() - start;
+        println!("{:#?}", res);
         println!("\n");
-        for item in l.errors() {
-            match item {
-                full_moon::Error::TokenizerError(t) => {
-                    print!("{}", t.to_string());
-                }
-                full_moon::Error::AstError(a) => {
-                    print!("{}", a.to_string());
-                }
-            }
-        }
+        println!("{:#?}", finish);
         return Ok(())
     }
     // Note that  we must have our logging only write out to stderr.
