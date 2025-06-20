@@ -17,6 +17,7 @@
 
 use std::error::Error;
 
+use full_moon::LuaVersion;
 use lsp_types::{
     notification, request, ClientCapabilities, GotoDefinitionResponse, InitializeParams,
     ServerCapabilities,
@@ -25,14 +26,23 @@ use lsp_types::{TextDocumentSyncCapability, TextDocumentSyncKind};
 
 use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
 
-mod syntax_kind;
-mod lexer;
-
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     if true {
         let s = std::fs::read_to_string("test.lua")?;
-        let l = crate::lexer::LuaLexer::new(&s);
-        l.process();
+        let l = full_moon::parse_fallible(s.as_str(), LuaVersion::lua51());
+        println!("{:#?}", l.ast().nodes());
+        println!("\n");
+        for item in l.errors() {
+            match item {
+                full_moon::Error::TokenizerError(t) => {
+                    print!("{}", t.to_string());
+                }
+                full_moon::Error::AstError(a) => {
+                    print!("{}", a.to_string());
+                }
+            }
+        }
+        return Ok(())
     }
     // Note that  we must have our logging only write out to stderr.
     eprintln!("Starting wow_ls");
