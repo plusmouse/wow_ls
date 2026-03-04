@@ -42,7 +42,8 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         println!("{:#?}", a.errors());
         //println!("{:?}", numbers.from_offset(a.errors()[0].start));
         println!("syntax: {:?}", dur);
-        variables::get_types(res, filename);
+        let type_env = variables::get_types(res, filename);
+        variables::print_types(&type_env);
         Ok(())
     } else {
         lsp::start_ls()
