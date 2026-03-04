@@ -22,6 +22,7 @@ pub enum Statement {
     ForCountLoop(ForCountLoop),
     ForInLoop(ForInLoop),
     FunctionDefinition(FunctionDefinition),
+    Return(ReturnStatement),
 }
 
 impl AstNode for Statement {
@@ -37,6 +38,7 @@ impl AstNode for Statement {
             SyntaxKind::ForCountLoop => Some(Self::ForCountLoop(ForCountLoop{node})),
             SyntaxKind::ForInLoop => Some(Self::ForInLoop(ForInLoop{node})),
             SyntaxKind::FunctionDefinition => Some(Self::FunctionDefinition(FunctionDefinition{node})),
+            SyntaxKind::ReturnStatement => Some(Self::Return(ReturnStatement{node})),
             _ => None,
         }
     }
@@ -52,6 +54,7 @@ impl AstNode for Statement {
             Self::ForCountLoop(x) => x.syntax(),
             Self::ForInLoop(x) => x.syntax(),
             Self::FunctionDefinition(x) => x.syntax(),
+            Self::Return(x) => x.syntax(),
         }
     }
 }
@@ -351,7 +354,7 @@ pub struct UnaryExpression {
 impl AstNode for UnaryExpression {
     fn cast(node: SyntaxNode) -> Option<Self> {
         match node.kind() {
-            SyntaxKind::ExpressionList => Some(Self{node}),
+            SyntaxKind::UnaryExpression => Some(Self{node}),
             _ => None,
         }
     }
@@ -388,7 +391,7 @@ pub struct BinaryExpression {
 impl AstNode for BinaryExpression {
     fn cast(node: SyntaxNode) -> Option<Self> {
         match node.kind() {
-            SyntaxKind::ExpressionList => Some(Self{node}),
+            SyntaxKind::BinaryExpression => Some(Self{node}),
             _ => None,
         }
     }
@@ -398,6 +401,9 @@ impl AstNode for BinaryExpression {
 }
 
 impl BinaryExpression {
+    pub fn get_terms(&self) -> Vec<Expression> {
+        self.node.children().filter_map(Expression::cast).collect()
+    }
     pub fn kind(&self) -> Operator {
         let some_op = self.node.children_with_tokens().find_map(|node|
             match node.kind() {
@@ -754,5 +760,84 @@ impl AstNode for TableConstructor {
 impl TableConstructor {
     pub fn expression_list(&self) -> Option<ExpressionList> {
         self.node.children().find_map(ExpressionList::cast)
+    }
+    pub fn field_list(&self) -> Option<FieldList> {
+        self.node.children().find_map(FieldList::cast)
+    }
+}
+
+pub struct ReturnStatement {
+    node: SyntaxNode
+}
+
+impl AstNode for ReturnStatement {
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::ReturnStatement => Some(Self{node}),
+            _ => None,
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.node
+    }
+}
+
+impl ReturnStatement {
+    pub fn expression_list(&self) -> Option<ExpressionList> {
+        self.node.children().find_map(ExpressionList::cast)
+    }
+}
+
+pub struct FieldList {
+    node: SyntaxNode
+}
+
+impl AstNode for FieldList {
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::FieldList => Some(Self{node}),
+            _ => None,
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.node
+    }
+}
+
+impl FieldList {
+    pub fn fields(&self) -> Vec<Field> {
+        self.node.children().filter_map(Field::cast).collect()
+    }
+}
+
+pub struct Field {
+    node: SyntaxNode
+}
+
+impl AstNode for Field {
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::Field => Some(Self{node}),
+            _ => None,
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.node
+    }
+}
+
+impl Field {
+    pub fn name(&self) -> Option<String> {
+        self.node.children_with_tokens().find_map(|n|
+            match n {
+                NodeOrToken::Token(t) => match t.kind() {
+                    SyntaxKind::Name => Some(t.text().to_string()),
+                    _ => None
+                }
+                _ => None,
+            })
+    }
+    pub fn expression(&self) -> Option<Expression> {
+        self.node.children().find_map(Expression::cast)
     }
 }
