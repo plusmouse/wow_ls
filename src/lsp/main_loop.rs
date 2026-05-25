@@ -16,8 +16,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use lsp_types::{
-    notification, request, ClientCapabilities, GotoDefinitionResponse, InitializeParams,
-    ServerCapabilities,
+    ClientCapabilities, Hover, HoverContents, HoverProviderCapability, InitializeParams, MarkedString, Position, Range, ServerCapabilities, notification, request
 };
 use lsp_types::{TextDocumentSyncCapability, TextDocumentSyncKind};
 
@@ -27,7 +26,7 @@ use crate::lsp::diagnostics;
 
 pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
     // Note that  we must have our logging only write out to stderr.
-    eprintln!("Starting wow_ls");
+    //eprintln!("Starting wow_ls");
     // Create the transport. Includes the stdio (stdin and stdout) versions but this could
     // also be implemented to use sockets or HTTP.
     let (connection, _io_threads) = Connection::stdio();
@@ -39,6 +38,7 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
     let _client_capabilities: ClientCapabilities = init_params.capabilities;
     let server_capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
         ..ServerCapabilities::default()
     };
 
@@ -57,19 +57,35 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
 
 fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>> {
     let mut language: HashMap<String, String> = HashMap::new();
+    let mut text: HashMap<String, String> = HashMap::new();
+
     for msg in &connection.receiver {
-        eprintln!("got msg: {msg:?}");
+        //eprintln!("got msg: {msg:?}");
         match msg {
             Message::Request(req) => {
                 if connection.handle_shutdown(&req)? {
                     return Ok(());
                 }
-                eprint!("got req {}", &*req.method);
+                //eprint!("got req {}", &*req.method);
                 match &*req.method {
-                    "textDocument/definition" => {
-                        if let Ok((id, params)) = cast_req::<request::GotoDefinition>(req) {
-                            eprintln!("got gotoDefinition request #{id}: {params:?}");
-                            let result = Some(GotoDefinitionResponse::Array(Vec::new()));
+                    "textDocument/hover" => {
+                        if let Ok((id, params)) = cast_req::<request::HoverRequest>(req) {
+                            let s = text.get(&params.text_document_position_params.text_document.uri.to_string()).expect("missing");
+                            let mut lexer = crate::syntax::lexer::Generator::new(&s);
+                            let all = lexer.process_all();
+                            let numbers = line_numbers::LinePositions::from(s.as_str());
+                            let pos = params.text_document_position_params.position;
+                            let mut output = String::from("Unknown");
+                            let mut range: Option<Range> = None;
+                            for t in all {
+                                let start = numbers.from_offset(t.start);
+                                let end = numbers.from_offset(t.end);
+                                if start.0.0 <= pos.line && start.1 <= pos.character.try_into().unwrap() && end.0.0 >= pos.line && end.1 >= pos.character.try_into().unwrap() {
+                                    output = format!("{:?}", t.kind);
+                                    range = Some(Range{start: Position{line: start.0.0, character: start.1.try_into().unwrap()}, end: Position{line: end.0.0, character: end.1.try_into().unwrap()}});
+                                }
+                            }
+                            let result = Some(Hover{contents: HoverContents::Scalar(MarkedString::String(output)), range});
                             let result = serde_json::to_value(&result).unwrap();
                             let resp = Response {
                                 id,
@@ -77,7 +93,6 @@ fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>>
                                 error: None,
                             };
                             connection.sender.send(Message::Response(resp))?;
-                            continue;
                         }
                     }
                     _ => {
@@ -86,10 +101,10 @@ fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>>
                 // ...
             }
             Message::Response(resp) => {
-                eprintln!("got response: {resp:?}");
+                //eprintln!("got response: {resp:?}");
             }
             Message::Notification(not) => {
-                eprint!("got not {}", &*not.method);
+                //eprint!("got not {}", &*not.method);
                 match &*not.method {
                     "textDocument/didChange" => {
                         if let Ok(params) = cast_not::<notification::DidChangeTextDocument>(not) {
@@ -103,13 +118,14 @@ fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>>
                     "textDocument/didOpen" => {
                         if let Ok(params) = cast_not::<notification::DidOpenTextDocument>(not) {
                             language.insert(params.text_document.uri.to_string(), params.text_document.language_id.clone());
+                            text.insert(params.text_document.uri.to_string(), params.text_document.text.clone());
                             if params.text_document.language_id == "lua" {
                                 diagnostics::get(&connection, params.text_document.uri, &params.text_document.text);
                             }
                         }
                     }
                     _ => {
-                        eprintln!("fallback")
+                        //eprintln!("fallback")
                     }
                 }
             }

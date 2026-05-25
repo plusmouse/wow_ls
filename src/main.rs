@@ -28,7 +28,7 @@ mod ast;
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && args[1] == "evaluate" {
-        let filename = "tests/type-scans.lua";
+        let filename = "tests/functioncall.lua";
         //let s = std::fs::read_to_string("../wow-ui-source/full.lua")?;
         let s = std::fs::read_to_string(filename)?;
         let mut a = syntax::syntax::Generator::new(&s);
@@ -37,12 +37,12 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         let res = a.process_all();
         let root = syntax::syntax::SyntaxNode::new_root(res.clone());
         let dur  = std::time::Instant::now() - before;
-        syntax::debug::print_tree(&res);
-        println!("{:#?}", res);
+        //syntax::debug::print_tree(&res);
+        //println!("{:#?}", res);
         println!("{:#?}", a.errors());
         //println!("{:?}", numbers.from_offset(a.errors()[0].start));
-        println!("syntax: {:?}", dur);
-        variables::get_types(res, filename);
+        //println!("syntax: {:?}", dur);
+        //variables::get_types(res, filename);
         Ok(())
     } else {
         lsp::start_ls()

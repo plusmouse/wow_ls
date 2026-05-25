@@ -1274,15 +1274,13 @@ impl<'a> Generator<'a> {
                     }
                     self.builder.finish_node();
                     self.builder.finish_node();
-                } else {
-                    self.errors.push(Error { start: t.start, end: t.end, kind: ErrorKind::ExpectingOperator });
                 }
             } else {
                 let end = self.get_current_position();
+                println!("{}", text);
                 self.errors.push(Error { start: end, end: end, kind: ErrorKind::ExpectingOperator });
             }
         }
-
     }
 
     fn scan_indexing_variable(&mut self, token: &Token) {
