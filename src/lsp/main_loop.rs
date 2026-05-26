@@ -14,6 +14,9 @@
 //along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::collections::HashMap;
+use crate::syntax::{
+    syntax, SyntaxNode, SyntaxKind
+};
 use std::error::Error;
 use lsp_types::{
     ClientCapabilities, Hover, HoverContents, HoverProviderCapability, InitializeParams, MarkedString, Position, Range, ServerCapabilities, notification, request
@@ -21,6 +24,7 @@ use lsp_types::{
 use lsp_types::{TextDocumentSyncCapability, TextDocumentSyncKind};
 
 use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
+use rowan::{TextSize, TokenAtOffset};
 
 use crate::lsp::diagnostics;
 
@@ -70,21 +74,51 @@ fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>>
                 match &*req.method {
                     "textDocument/hover" => {
                         if let Ok((id, params)) = cast_req::<request::HoverRequest>(req) {
-                            let s = text.get(&params.text_document_position_params.text_document.uri.to_string()).expect("missing");
-                            let mut lexer = crate::syntax::lexer::Generator::new(&s);
-                            let all = lexer.process_all();
-                            let numbers = line_numbers::LinePositions::from(s.as_str());
                             let pos = params.text_document_position_params.position;
-                            let mut output = String::from("Unknown");
-                            let mut range: Option<Range> = None;
-                            for t in all {
-                                let start = numbers.from_offset(t.start);
-                                let end = numbers.from_offset(t.end);
-                                if start.0.0 <= pos.line && start.1 <= pos.character.try_into().unwrap() && end.0.0 >= pos.line && end.1 >= pos.character.try_into().unwrap() {
-                                    output = format!("{:?}", t.kind);
-                                    range = Some(Range{start: Position{line: start.0.0, character: start.1.try_into().unwrap()}, end: Position{line: end.0.0, character: end.1.try_into().unwrap()}});
+                            let s = text.get(&params.text_document_position_params.text_document.uri.to_string()).expect("missing");
+                            let lines: Vec<_> = s.lines().collect();
+                            let mut offset = 0;
+                            let wanted_line = usize::try_from(pos.line).unwrap();
+                            for i in 0..lines.len() {
+                                if i == wanted_line {
+                                    offset = offset + pos.character;
+                                    break
+                                } else {
+                                    offset = offset + u32::try_from(lines[i].len()).unwrap() + 1;
                                 }
                             }
+                            let mut lexer = syntax::Generator::new(&s);
+                            let all = SyntaxNode::new_root(lexer.process_all());
+                            let token = all.token_at_offset(TextSize::from(offset));
+                            let numbers = line_numbers::LinePositions::from(s.as_str());
+                            let node;
+                            match token.clone() {
+                                TokenAtOffset::Single(t) => {
+                                    node = t.parent().unwrap();
+                                }
+                                TokenAtOffset::Between(t1, t2) => {
+                                    node = t2.parent().unwrap();
+                                }
+                                TokenAtOffset::None => {
+                                    let result = Some(Hover{contents: HoverContents::Scalar(MarkedString::String(String::from("ERROR: UNKNOWN"))), range: None});
+                                    let result = serde_json::to_value(&result).unwrap();
+                                    let resp = Response {
+                                        id,
+                                        result: Some(result),
+                                        error: None,
+                                    };
+                                    connection.sender.send(Message::Response(resp))?;
+                                    continue;
+                                }
+                            }
+                            let tree: Vec<_> = node.ancestors().take_while(|a| a.kind() != SyntaxKind::Block).collect();
+                            let output = match tree.last() {
+                                Some(n) => format!("{:?} {:?}", n.kind(), n.text()),
+                                None => String::from("")
+                            };
+                            let (start, end) = (node.text_range().start(), node.text_range().end());
+                            let (start, end) = (numbers.from_offset(usize::from(start)), numbers.from_offset(usize::from(end)));
+                            let range: Option<Range> = Some(Range{start: Position{line: start.0.0, character: start.1.try_into().unwrap()}, end: Position{line: end.0.0, character: end.1.try_into().unwrap()}});
                             let result = Some(Hover{contents: HoverContents::Scalar(MarkedString::String(output)), range});
                             let result = serde_json::to_value(&result).unwrap();
                             let resp = Response {
