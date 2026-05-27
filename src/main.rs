@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         let res = a.process_all();
         let root = syntax::syntax::SyntaxNode::new_root(res.clone());
         let dur  = std::time::Instant::now() - before;
-        //syntax::debug::print_tree(&res);
+        syntax::debug::print_tree(&res);
         //println!("{:#?}", res);
         println!("{:#?}", a.errors());
         //println!("{:?}", numbers.from_offset(a.errors()[0].start));

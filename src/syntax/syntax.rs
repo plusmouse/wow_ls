@@ -90,7 +90,7 @@ pub enum SyntaxKind {
     IfBranch,
     ElseBranch,
     Field,
-    //IndexingVariable,
+    IndexingVariable,
     Literal,
 
     AndKeyword,
@@ -134,6 +134,7 @@ pub enum ErrorKind {
     ExpectingToken,
     ExpectingName,
     ExpectingClosingBracket,
+    ExpectingClosingSquareBracket,
     ExpectingFunctionCall,
     ExpectingExpression,
     ExpectingOperator,
@@ -1296,9 +1297,12 @@ impl<'a> Generator<'a> {
                     let text = &self.text[t.start..t.end];
                     self.builder.token(to_raw(SyntaxKind::RightSquareBracket), text);
                     self.next_raw_token();
+                    return
                 }
             }
         }
+        let pos = self.get_current_position();
+        self.errors.push(Error { start: token.start, end: pos, kind: ErrorKind::ExpectingClosingSquareBracket})
     }
 
     fn scan_block(&mut self, terminator: Option<SyntaxKind>, start_token: &Token) {

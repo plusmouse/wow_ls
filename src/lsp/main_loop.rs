@@ -19,7 +19,8 @@ use crate::syntax::{
 };
 use std::error::Error;
 use lsp_types::{
-    ClientCapabilities, Hover, HoverContents, HoverProviderCapability, InitializeParams, MarkedString, Position, Range, ServerCapabilities, notification, request
+    ClientCapabilities, Hover, HoverContents, HoverProviderCapability, InitializeParams, MarkedString, Position, Range, ServerCapabilities, notification, request,
+    MarkupKind, MarkupContent,
 };
 use lsp_types::{TextDocumentSyncCapability, TextDocumentSyncKind};
 
@@ -111,15 +112,15 @@ fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>>
                                     continue;
                                 }
                             }
-                            let tree: Vec<_> = node.ancestors().take_while(|a| a.kind() != SyntaxKind::Block).collect();
-                            let output = match tree.last() {
-                                Some(n) => format!("{:?} {:?}", n.kind(), n.text()),
+                            let n = node.ancestors().filter(|a| a.kind() != SyntaxKind::Identifier).nth(0);
+                            let output = match n {
+                                Some(n) => format!("{:?} {}", n.kind(), n.text()),
                                 None => String::from("")
                             };
                             let (start, end) = (node.text_range().start(), node.text_range().end());
                             let (start, end) = (numbers.from_offset(usize::from(start)), numbers.from_offset(usize::from(end)));
                             let range: Option<Range> = Some(Range{start: Position{line: start.0.0, character: start.1.try_into().unwrap()}, end: Position{line: end.0.0, character: end.1.try_into().unwrap()}});
-                            let result = Some(Hover{contents: HoverContents::Scalar(MarkedString::String(output)), range});
+                            let result = Some(Hover{contents: HoverContents::Markup(MarkupContent{kind: MarkupKind::PlainText, value: output}), range});
                             let result = serde_json::to_value(&result).unwrap();
                             let resp = Response {
                                 id,
@@ -144,6 +145,8 @@ fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>>
                         if let Ok(params) = cast_not::<notification::DidChangeTextDocument>(not) {
                             if let Some(l) = language.get(&params.text_document.uri.to_string()) {
                                 if l == "lua" {
+                                    text.remove(&params.text_document.uri.to_string());
+                                    text.insert(params.text_document.uri.to_string(), params.content_changes[0].text.clone());
                                     diagnostics::get(&connection, params.text_document.uri, &params.content_changes[0].text);
                                 }
                             }
