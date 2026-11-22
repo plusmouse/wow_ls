@@ -244,49 +244,63 @@ impl NamedRef {
     }
 }
 
-/// A value's possible types, which function it is if it can be one, and which
-/// named type if it can be a table or userdata. `function` is None exactly when
-/// `set` doesn't contain FUNCTION, and `named` exactly when it has neither TABLE
-/// nor OTHER
+/// A value's possible types, which function it is if it can be one, which
+/// named type if it can be a table or userdata, and which named number type
+/// (an enum like `Enum.ItemQuality`) if it can be a number. `function` is None
+/// exactly when `set` doesn't contain FUNCTION, `named` exactly when it has
+/// neither TABLE nor OTHER, and `numeric` exactly when it has no NUMBER.
+/// `numeric` is Unknown for a plain number
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Type {
     pub set: TypeSet,
     pub function: FunctionRef,
     pub named: NamedRef,
+    pub numeric: NamedRef,
 }
 
 /// The types a named type can be based on
 const OBJECTS: TypeSet = TypeSet(TypeSet::TABLE.0 | TypeSet::OTHER.0);
 
 impl Type {
-    pub const NIL: Type = Type { set: TypeSet::NIL, function: FunctionRef::None, named: NamedRef::None };
-    pub const UNKNOWN: Type = Type { set: TypeSet::UNKNOWN, function: FunctionRef::Unknown, named: NamedRef::Unknown };
+    pub const NIL: Type = Type { set: TypeSet::NIL, function: FunctionRef::None, named: NamedRef::None, numeric: NamedRef::None };
+    pub const UNKNOWN: Type = Type {
+        set: TypeSet::UNKNOWN,
+        function: FunctionRef::Unknown,
+        named: NamedRef::Unknown,
+        numeric: NamedRef::Unknown,
+    };
 
     /// A type with no known function or named-type identity
     pub fn of(set: TypeSet) -> Type {
         let function = if set.contains(TypeSet::FUNCTION) { FunctionRef::Unknown } else { FunctionRef::None };
         let named = if set.intersection(OBJECTS) != TypeSet::NEVER { NamedRef::Unknown } else { NamedRef::None };
-        Type { set, function, named }
+        let numeric = if set.contains(TypeSet::NUMBER) { NamedRef::Unknown } else { NamedRef::None };
+        Type { set, function, named, numeric }
     }
     pub fn function(id: FunctionId) -> Type {
-        Type { set: TypeSet::FUNCTION, function: FunctionRef::One(id), named: NamedRef::None }
+        Type { function: FunctionRef::One(id), ..Type::of(TypeSet::FUNCTION) }
     }
     pub fn builtin(id: BuiltinId) -> Type {
-        Type { set: TypeSet::FUNCTION, function: FunctionRef::Builtin(id), named: NamedRef::None }
+        Type { function: FunctionRef::Builtin(id), ..Type::of(TypeSet::FUNCTION) }
     }
     /// A table made in the file
     pub fn table(id: TableId) -> Type {
-        Type { set: TypeSet::TABLE, function: FunctionRef::None, named: NamedRef::Table(id) }
+        Type { named: NamedRef::Table(id), ..Type::of(TypeSet::TABLE) }
     }
-    /// A value of a named type, which is a table or userdata (`base`)
+    /// A value of a named type: a table or userdata, or a number for an enum
     pub fn named(id: NamedId, base: TypeSet) -> Type {
-        Type { set: base, function: FunctionRef::None, named: NamedRef::One(id) }
+        if base == TypeSet::NUMBER {
+            Type { numeric: NamedRef::One(id), ..Type::of(base) }
+        } else {
+            Type { named: NamedRef::One(id), ..Type::of(base) }
+        }
     }
     pub fn union(self, other: Type) -> Type {
         Type {
             set: self.set | other.set,
             function: self.function.union(other.function),
             named: self.named.union(other.named),
+            numeric: self.numeric.union(other.numeric),
         }
     }
     /// Functions, tables and userdata are always truthy, so they're kept
@@ -300,7 +314,8 @@ impl Type {
         let set = self.set.without(other);
         let function = if set.contains(TypeSet::FUNCTION) { self.function } else { FunctionRef::None };
         let named = if set.intersection(OBJECTS) != TypeSet::NEVER { self.named } else { NamedRef::None };
-        Type { set, function, named }
+        let numeric = if set.contains(TypeSet::NUMBER) { self.numeric } else { NamedRef::None };
+        Type { set, function, named, numeric }
     }
 }
 
@@ -500,6 +515,10 @@ impl Analysis {
             NamedRef::One(id) => self.definitions.named_type(id).filter(|named| !named.namespace),
             _ => None,
         };
+        let numeric = match ty.numeric {
+            NamedRef::One(id) => self.definitions.named_type(id),
+            _ => None,
+        };
         // A single type that can also be nil is written `T?`
         let optional = names.len() == 2 && names[1] == "nil" && !names[0].starts_with("unknown");
         let wrap = names.len() > 1;
@@ -509,6 +528,7 @@ impl Analysis {
                 (Some(s), _, "function") if wrap && s.contains(" -> ") => format!("({s})"),
                 (Some(s), _, "function") => s.clone(),
                 (_, Some(named), "table" | "userdata") if named.base.names() == [name] => named.name.clone(),
+                (_, _, "number") if numeric.is_some() => numeric.map_or_else(String::new, |n| n.name.clone()),
                 _ => name.to_string(),
             })
             .collect();
@@ -1028,7 +1048,7 @@ impl<'a> Walker<'a> {
                                     named => {
                                         let set = owner.set.intersection(OBJECTS);
                                         let set = if set == TypeSet::NEVER { TypeSet::TABLE } else { set };
-                                        Type { set, function: FunctionRef::None, named }
+                                        Type { named, ..Type::of(set) }
                                     }
                                 }
                             });
@@ -1857,6 +1877,42 @@ mod tests {
         assert_eq!(builtin_types_of("local x = tostring() tostring = nil", "x"), ["unknown"]);
         assert_eq!(builtin_types_of("local function tostring() return {} end local x = tostring()", "x"), ["table"]);
         assert_eq!(builtin_types_of("string = {} local x = string.format()", "x"), ["unknown"]);
+    }
+
+    fn enums() -> Arc<Definitions> {
+        Arc::new(Definitions::from_json(r#"{
+            "types": {"Enum.Quality": {"base": "number"}, "Enum.Layer": {"base": "number"}},
+            "tables": {"Enum": {"tables": {
+                "Quality": {"values": {"Poor": "Enum.Quality", "Good": "Enum.Quality"}},
+                "Layer": {"values": {"Top": "Enum.Layer"}}
+            }}},
+            "functions": {"GetQuality": {"returns": ["Enum.Quality|nil"]}}
+        }"#).unwrap())
+    }
+
+    fn enum_types_of(source: &str, name: &str) -> Vec<String> {
+        describe_uses(&analyse_with(source, &enums()), name)
+    }
+
+    #[test]
+    fn enum_members() {
+        assert_eq!(enum_types_of("local q = Enum.Quality.Poor", "q"), ["Enum.Quality"]);
+        assert_eq!(enum_types_of("local q = c and Enum.Quality.Poor or Enum.Quality.Good", "q"), ["Enum.Quality"]);
+        assert_eq!(enum_types_of("local Q = Enum.Quality local q = Q.Good", "q"), ["Enum.Quality"]);
+        assert_eq!(enum_types_of("local q = GetQuality()", "q"), ["Enum.Quality?"]);
+        // The enum's own table, and its parent, are plain tables
+        assert_eq!(enum_types_of("local Q = Enum.Quality", "Q"), ["table"]);
+    }
+
+    #[test]
+    fn enums_mix_into_plain_numbers() {
+        // Arithmetic gives a plain number
+        assert_eq!(enum_types_of("local n = Enum.Quality.Poor + 1", "n"), ["number"]);
+        // So does mixing with a plain number, or another enum
+        assert_eq!(enum_types_of("local n = c and Enum.Quality.Poor or 5", "n"), ["number"]);
+        assert_eq!(enum_types_of("local n = c and Enum.Quality.Poor or Enum.Layer.Top", "n"), ["number"]);
+        // Other types alongside keep the enum
+        assert_eq!(enum_types_of("local n = c and Enum.Quality.Poor or 's'", "n"), ["Enum.Quality|string"]);
     }
 
     #[test]

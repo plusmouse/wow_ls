@@ -24,8 +24,9 @@
 -- below; any name they don't cover becomes `unknown` and is reported on stderr,
 -- so new documentation shows what needs mapping.
 --
--- Only functions are generated for now. Widget methods (the ScriptObject
--- tables) and events are skipped, as wow_ls can't use them yet.
+-- Generated: functions, the `Enum` table (each enumeration's members typed as
+-- that enumeration, `Enum.X`), and the `Constants` table. Widget methods (the
+-- ScriptObject tables) and events are skipped, as wow_ls can't use them yet.
 
 local output_path = arg[1]
 if not output_path or #arg < 2 then
@@ -39,8 +40,8 @@ end
 ------------------------------------------------------------------------------
 
 -- Names that stand for a plain Lua type, shown as that type (`cstring` is just
--- a string). Declared enumerations are numbers and callback types are
--- functions; those are handled by rule rather than listed.
+-- a string). Declared enumerations are their `Enum.X` number type and callback
+-- types are functions; those are handled by rule rather than listed.
 local LUA_TYPES = {
 	number = {
 		"number", "luaIndex", "fileID", "BigUInteger", "BigInteger", "time_t", "Seconds", "Milliseconds",
@@ -176,11 +177,21 @@ for _, name in ipairs(MIXIN_TABLES) do add_named(name, name, "table") end
 for _, name in ipairs(UNDECLARED_STRUCTURES) do add_named(name, name, "table") end
 
 local declared = {}
+-- Name -> the documentation table, for the `Enum` and `Constants` tables
+local enumerations, constants = {}, {}
 for _, document in ipairs(documents) do
 	for _, declaration in ipairs(document.Tables or {}) do
 		declared[declaration.Name] = declaration.Type
 		if declaration.Type == "Structure" then
 			add_named(declaration.Name, declaration.Name, "table")
+		elseif declaration.Type == "Enumeration" then
+			enumerations[declaration.Name] = declaration
+			-- A number type, for its members and for arguments and returns
+			local name = "Enum." .. declaration.Name
+			if named_types[name] then error(name .. " is declared twice") end
+			named_types[name] = "number"
+		elseif declaration.Type == "Constants" then
+			constants[declaration.Name] = declaration
 		end
 	end
 end
@@ -203,7 +214,7 @@ local function convert(documentation_name)
 	if named[documentation_name] then return named[documentation_name] end
 	if lua_types[documentation_name] then return lua_types[documentation_name] end
 	local kind = declared[documentation_name]
-	if kind == "Enumeration" then return "number" end
+	if kind == "Enumeration" then return "Enum." .. documentation_name end
 	if kind == "CallbackType" then return "function" end
 	unmapped[documentation_name] = (unmapped[documentation_name] or 0) + 1
 	return "unknown"
@@ -313,7 +324,27 @@ local function function_lines(scope, indent)
 	return table.concat(lines, ",\n")
 end
 
+-- A table of tables of values, one inner table per line:
+-- "Enum": {"tables": {"X": {"values": {"A": "Enum.X", ...}}, ...}}
+local function value_tables(entries, member_type)
+	local lines = {}
+	for _, name in ipairs(sorted_keys(entries)) do
+		local values = {}
+		for _, member in ipairs(entries[name].Fields or entries[name].Values or {}) do
+			values[#values + 1] = ("%s: %s"):format(json_string(member.Name), json_string(member_type(name, member)))
+		end
+		lines[#lines + 1] = ('        %s: {"values": {%s}}'):format(json_string(name), table.concat(values, ", "))
+	end
+	return '{\n      "tables": {\n' .. table.concat(lines, ",\n") .. "\n      }\n    }"
+end
+
+for _, global in ipairs({ "Enum", "Constants" }) do
+	if namespaces[global] or functions[global] then error(global .. " is also documented as functions") end
+end
+
 local table_blocks = {}
+table_blocks[#table_blocks + 1] = '    "Constants": ' .. value_tables(constants, function(_, value) return convert(value.Type) end)
+table_blocks[#table_blocks + 1] = '    "Enum": ' .. value_tables(enumerations, function(name) return "Enum." .. name end)
 for _, namespace in ipairs(sorted_keys(namespaces)) do
 	table_blocks[#table_blocks + 1] = ('    %s: {\n      "functions": {\n%s\n      }\n    }')
 		:format(json_string(namespace), function_lines(namespaces[namespace], "        "))
@@ -330,8 +361,8 @@ file:close()
 
 local count = #sorted_keys(functions)
 for _, scope in pairs(namespaces) do count = count + #sorted_keys(scope) end
-io.stderr:write(("wrote %d functions and %d named types to %s (skipped %d secure-only, %d duplicates)\n")
-	:format(count, #sorted_keys(named_types), output_path, skipped.secure, skipped.duplicate))
+io.stderr:write(("wrote %d functions, %d enumerations, %d constants tables and %d named types to %s (skipped %d secure-only, %d duplicates)\n")
+	:format(count, #sorted_keys(enumerations), #sorted_keys(constants), #sorted_keys(named_types), output_path, skipped.secure, skipped.duplicate))
 local names = sorted_keys(unmapped)
 if #names > 0 then
 	table.sort(names, function(a, b) return unmapped[a] > unmapped[b] end)

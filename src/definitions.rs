@@ -49,9 +49,11 @@
 //!   after those, for functions returning a variable number; it defaults to nil.
 //! * A type is names joined with `|`: nil, false, true, boolean, number, string,
 //!   function, table, userdata, thread, unknown, or a named type.
+//! * `values` are members that aren't functions, each with a type, like
+//!   `"values": { "Immediate": "Enum.StatusBarInterpolation" }`.
 //! * Named types (`types`) are tables or userdata with their own name, like WoW's
-//!   `Frame`, shown by that name instead of `table`. Any file can use a named type
-//!   declared in any other.
+//!   `Frame`, shown by that name instead of `table`, or numbers with a name (an
+//!   enum). Any file can use a named type declared in any other.
 //!
 //! Every `.json` file in the directory is loaded, in filename order, and a later
 //! file's definition of a name replaces an earlier one. Tables are merged member
@@ -71,7 +73,7 @@ pub type NamedId = u32;
 pub struct NamedType {
     /// For a namespace, its path (`string`, `C_AddOns`)
     pub name: String,
-    /// TABLE or OTHER (userdata)
+    /// TABLE, OTHER (userdata) or NUMBER (an enum)
     pub base: TypeSet,
     /// Known members
     pub fields: HashMap<String, Type>,
@@ -176,7 +178,8 @@ impl Definitions {
             let base = match definition.get("base").and_then(Value::as_str) {
                 Some("table") => TypeSet::TABLE,
                 Some("userdata") => TypeSet::OTHER,
-                _ => return Err(format!("{name}: `base` should be \"table\" or \"userdata\"")),
+                Some("number") => TypeSet::NUMBER,
+                _ => return Err(format!("{name}: `base` should be \"table\", \"userdata\" or \"number\"")),
             };
             if parse_builtin_type(name).is_some() {
                 return Err(format!("{name}: can't redefine a built-in type"));
@@ -209,6 +212,14 @@ impl Definitions {
                 let id = self.functions.len() as BuiltinId;
                 self.functions.push(function);
                 self.set_member(namespace, name, Type::builtin(id));
+            }
+        }
+        if let Some(values) = object(scope, "values")? {
+            for (name, ty) in values {
+                check_name(name)?;
+                let ty = ty.as_str().ok_or_else(|| format!("{}: a value's type should be a string", qualified(name)))?;
+                let ty = self.parse_type(ty).map_err(|e| format!("{}: {e}", qualified(name)))?;
+                self.set_member(namespace, name, ty);
             }
         }
         if let Some(tables) = object(scope, "tables")? {
@@ -411,6 +422,7 @@ mod tests {
         assert_eq!(f.returns.values, [Type::named(frame, TypeSet::TABLE) | Type::NIL]);
 
         assert!(Definitions::from_json(r#"{"types": {"Frame": {"base": "string"}}}"#).is_err());
+        assert!(Definitions::from_json(r#"{"types": {"E": {"base": "number"}}}"#).is_ok());
         assert!(Definitions::from_json(r#"{"types": {"table": {"base": "table"}}}"#).is_err());
         assert!(Definitions::from_json(r#"{"functions": {"f": {"returns": ["Missing"]}}}"#).is_err());
     }
@@ -433,6 +445,21 @@ mod tests {
         let string = definitions.global("string").unwrap();
         assert_eq!(string.set, TypeSet::TABLE);
         assert!(definitions.field(string, "format").is_some());
+    }
+
+    #[test]
+    fn values() {
+        let definitions = Definitions::from_json(r#"{
+            "types": {"Enum.Quality": {"base": "number"}},
+            "values": {"VERSION": "string"},
+            "tables": {"Enum": {"tables": {"Quality": {"values": {"Poor": "Enum.Quality"}}}}}
+        }"#).unwrap();
+        assert_eq!(definitions.global("VERSION"), Some(Type::of(TypeSet::STRING)));
+        let quality = definitions.named_type_id("Enum.Quality").unwrap();
+        let table = definitions.field(definitions.global("Enum").unwrap(), "Quality").unwrap();
+        assert_eq!(definitions.field(table, "Poor"), Some(Type::named(quality, TypeSet::NUMBER)));
+        assert!(Definitions::from_json(r#"{"values": {"x": 1}}"#).is_err());
+        assert!(Definitions::from_json(r#"{"values": {"x": "nubmer"}}"#).is_err());
     }
 
     #[test]

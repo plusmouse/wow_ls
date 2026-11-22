@@ -36,8 +36,11 @@ filename order; a later file's entry for a name replaces an earlier one.
   straight to it gets that type for the parameter.
 - A type is names joined with `|`: `nil`, `false`, `true`, `boolean`, `number`,
   `string`, `function`, `table`, `userdata`, `thread`, `unknown`, or a named type.
+- `values` (at the top level or in a table) are members that aren't functions,
+  each with a type: `"values": { "Immediate": "Enum.StatusBarInterpolation" }`.
 - `types` declares named types: tables or userdata shown by their own name
-  (`Frame`) rather than `table`. Any file can use a type declared in any other.
+  (`Frame`) rather than `table`, or numbers with a name, for enums (`"base":
+  "number"`). Any file can use a type declared in any other.
 
 wow_ls looks for this directory in order: the `definitionsPath` initialization
 option from the editor, the `WOW_LS_DEFINITIONS` environment variable, then a
