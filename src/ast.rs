@@ -2,6 +2,7 @@ use rowan::NodeOrToken;
 
 use crate::syntax::SyntaxNode;
 use crate::syntax::SyntaxKind;
+use crate::syntax::SyntaxToken;
 
 pub trait AstNode {
     fn cast(node: SyntaxNode) -> Option<Self>
@@ -22,12 +23,13 @@ pub enum Statement {
     ForCountLoop(ForCountLoop),
     ForInLoop(ForInLoop),
     FunctionDefinition(FunctionDefinition),
+    Return(ReturnStatement),
 }
 
 impl AstNode for Statement {
     fn cast(node: SyntaxNode) -> Option<Self> {
         match node.kind() {
-            SyntaxKind::Assign => Some(Self::Assign(Assign{node})),
+            SyntaxKind::AssignStatement => Some(Self::Assign(Assign{node})),
             SyntaxKind::LocalAssignStatement => Some(Self::LocalAssign(LocalAssign{node})),
             SyntaxKind::FunctionCall => Some(Self::FunctionCall(FunctionCall{node})),
             SyntaxKind::DoBlock => Some(Self::Do(DoGroup{node})),
@@ -37,6 +39,7 @@ impl AstNode for Statement {
             SyntaxKind::ForCountLoop => Some(Self::ForCountLoop(ForCountLoop{node})),
             SyntaxKind::ForInLoop => Some(Self::ForInLoop(ForInLoop{node})),
             SyntaxKind::FunctionDefinition => Some(Self::FunctionDefinition(FunctionDefinition{node})),
+            SyntaxKind::ReturnStatement => Some(Self::Return(ReturnStatement{node})),
             _ => None,
         }
     }
@@ -52,6 +55,7 @@ impl AstNode for Statement {
             Self::ForCountLoop(x) => x.syntax(),
             Self::ForInLoop(x) => x.syntax(),
             Self::FunctionDefinition(x) => x.syntax(),
+            Self::Return(x) => x.syntax(),
         }
     }
 }
@@ -79,6 +83,13 @@ impl FunctionDefinition {
     }
     pub fn identifier(&self) -> Option<Identifier> {
         self.node.children().find_map(Identifier::cast)
+    }
+    /// `local function name()` stores the name as a bare token rather than an Identifier
+    pub fn local_name(&self) -> Option<SyntaxToken> {
+        self.node.children_with_tokens().find_map(|t| match t {
+            NodeOrToken::Token(t) if t.kind() == SyntaxKind::Name => Some(t),
+            _ => None,
+        })
     }
     pub fn params(&self) -> Option<ParameterList> {
         self.node.children().find_map(ParameterList::cast)
@@ -108,6 +119,12 @@ impl ParameterList {
     pub fn parameters(&self) -> Vec<String> {
         self.node.children_with_tokens().filter_map(|t| match t  {
             NodeOrToken::Token(t) => if t.kind() == SyntaxKind::Parameter { Some(t.text().to_string()) } else { None },
+            _ => None,
+        }).collect()
+    }
+    pub fn parameter_tokens(&self) -> Vec<SyntaxToken> {
+        self.node.children_with_tokens().filter_map(|t| match t {
+            NodeOrToken::Token(t) if t.kind() == SyntaxKind::Parameter => Some(t),
             _ => None,
         }).collect()
     }
@@ -156,6 +173,15 @@ impl Identifier {
     }
     pub fn is_indexed_expression(&self) -> bool {
         self.node.children().any(|n| n.kind() == SyntaxKind::Expression)
+    }
+    /// The token if this is a plain variable name (`x`), not `x.y`, `x[1]` or `x:y`
+    pub fn simple_name(&self) -> Option<SyntaxToken> {
+        let mut significant = self.node.children_with_tokens()
+            .filter(|t| !matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment));
+        match (significant.next(), significant.next()) {
+            (Some(NodeOrToken::Token(t)), None) if t.kind() == SyntaxKind::Name => Some(t),
+            _ => None,
+        }
     }
     pub fn final_expression(&self) -> Option<Expression> {
         self.node.children().find_map(Expression::cast)
@@ -306,8 +332,11 @@ pub enum Expression {
     Literal(Literal),
     Function(FunctionDefinition),
     TableConstructor(TableConstructor),
+    FunctionCall(FunctionCall),
+    VarArgs(SyntaxNode),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
     Or, And, Not,
     LessThan, GreaterThan, LessThanOrEquals, GreaterThanOrEquals, NotEquals, Equals,
@@ -328,6 +357,15 @@ impl AstNode for Expression {
             SyntaxKind::Literal => Some(Self::Literal(Literal{node})),
             SyntaxKind::FunctionDefinition => Some(Self::Function(FunctionDefinition{node})),
             SyntaxKind::TableConstructor => Some(Self::TableConstructor(TableConstructor{node})),
+            SyntaxKind::FunctionCall => Some(Self::FunctionCall(FunctionCall{node})),
+            // Wrapper nodes: `...` is a bare token, otherwise look through to the real expression
+            SyntaxKind::Expression | SyntaxKind::Condition => {
+                if node.children_with_tokens().any(|t| t.kind() == SyntaxKind::TripleDot) {
+                    Some(Self::VarArgs(node))
+                } else {
+                    node.children().find_map(Expression::cast)
+                }
+            }
             _ => None,
         }
     }
@@ -340,6 +378,8 @@ impl AstNode for Expression {
             Self::Literal(x) => x.syntax(),
             Self::Function(x) => x.syntax(),
             Self::TableConstructor(x) => x.syntax(),
+            Self::FunctionCall(x) => x.syntax(),
+            Self::VarArgs(x) => x,
         }
     }
 }
@@ -351,7 +391,7 @@ pub struct UnaryExpression {
 impl AstNode for UnaryExpression {
     fn cast(node: SyntaxNode) -> Option<Self> {
         match node.kind() {
-            SyntaxKind::ExpressionList => Some(Self{node}),
+            SyntaxKind::UnaryExpression => Some(Self{node}),
             _ => None,
         }
     }
@@ -361,23 +401,18 @@ impl AstNode for UnaryExpression {
 }
 
 impl UnaryExpression {
+    /// The outermost operator. The parser nests chained operators (`-#t`, `not not x`)
+    /// as UnaryExpression[UnaryExpression[op], op, operand], so it is the first token.
     pub fn kind(&self) -> Operator {
-        let some_op = self.node.children_with_tokens().find_map(|token|
-            match token.kind() {
-                SyntaxKind::NotKeyword => Some(Operator::Not),
-                SyntaxKind::Minus => Some(Operator::Subtract),
-                SyntaxKind::Hash => Some(Operator::ArrayLength),
-                SyntaxKind::Hat => Some(Operator::Hat),
-                _ => None,
-            }
-        );
-        match some_op {
-            Some(y) => y,
-            None => Operator::None,
-        }
+        self.node.descendants_with_tokens().find_map(|t| match t.kind() {
+            SyntaxKind::NotKeyword => Some(Operator::Not),
+            SyntaxKind::Minus => Some(Operator::Subtract),
+            SyntaxKind::Hash => Some(Operator::ArrayLength),
+            _ => None,
+        }).unwrap_or(Operator::None)
     }
-    pub fn get_terms(&self) -> Vec<Expression> {
-        self.node.children().filter_map(Expression::cast).collect()
+    pub fn operand(&self) -> Option<Expression> {
+        self.node.children().filter_map(Expression::cast).last()
     }
 }
 
@@ -388,7 +423,7 @@ pub struct BinaryExpression {
 impl AstNode for BinaryExpression {
     fn cast(node: SyntaxNode) -> Option<Self> {
         match node.kind() {
-            SyntaxKind::ExpressionList => Some(Self{node}),
+            SyntaxKind::BinaryExpression => Some(Self{node}),
             _ => None,
         }
     }
@@ -397,30 +432,61 @@ impl AstNode for BinaryExpression {
     }
 }
 
+pub enum BinaryPart {
+    Operand(Expression),
+    Operator(Operator),
+}
+
+fn token_to_binary_operator(kind: SyntaxKind) -> Option<Operator> {
+    match kind {
+        SyntaxKind::OrKeyword => Some(Operator::Or),
+        SyntaxKind::AndKeyword => Some(Operator::And),
+        SyntaxKind::LessThan => Some(Operator::LessThan),
+        SyntaxKind::GreaterThan => Some(Operator::GreaterThan),
+        SyntaxKind::LessThanOrEquals => Some(Operator::LessThanOrEquals),
+        SyntaxKind::GreaterThanOrEquals => Some(Operator::GreaterThanOrEquals),
+        SyntaxKind::NotEqualsBoolean => Some(Operator::NotEquals),
+        SyntaxKind::EqualsBoolean => Some(Operator::Equals),
+        SyntaxKind::DoubleDot => Some(Operator::Concatenate),
+        SyntaxKind::Plus => Some(Operator::Add),
+        SyntaxKind::Minus => Some(Operator::Subtract),
+        SyntaxKind::Asterisk => Some(Operator::Multiply),
+        SyntaxKind::Slash => Some(Operator::Divide),
+        SyntaxKind::Modulo => Some(Operator::Modulo),
+        SyntaxKind::Hat => Some(Operator::Hat),
+        _ => None,
+    }
+}
+
 impl BinaryExpression {
     pub fn kind(&self) -> Operator {
-        let some_op = self.node.children_with_tokens().find_map(|node|
-            match node.kind() {
-                SyntaxKind::OrKeyword => Some(Operator::Or),
-                SyntaxKind::AndKeyword => Some(Operator::And),
-                SyntaxKind::LessThan => Some(Operator::LessThan),
-                SyntaxKind::GreaterThan => Some(Operator::GreaterThan),
-                SyntaxKind::LessThanOrEquals => Some(Operator::LessThanOrEquals),
-                SyntaxKind::GreaterThanOrEquals => Some(Operator::GreaterThanOrEquals),
-                SyntaxKind::NotEqualsBoolean => Some(Operator::NotEquals),
-                SyntaxKind::EqualsBoolean => Some(Operator::Equals),
-                SyntaxKind::DoubleDot => Some(Operator::Concatenate),
-                SyntaxKind::Plus => Some(Operator::Add),
-                SyntaxKind::Minus => Some(Operator::Subtract),
-                SyntaxKind::Asterisk => Some(Operator::Multiply),
-                SyntaxKind::Slash => Some(Operator::Divide),
-                SyntaxKind::Modulo => Some(Operator::Modulo),
-                _ => None,
+        self.node.children_with_tokens().find_map(|t| token_to_binary_operator(t.kind())).unwrap_or(Operator::None)
+    }
+    /// Operands and operators in source order, with nested (unparenthesised)
+    /// binary expressions flattened. The parser doesn't encode precedence
+    /// (`1 + 2 * 3` parses as `1 [+ 2 * 3]`), so consumers re-apply it.
+    pub fn flatten(&self) -> Vec<BinaryPart> {
+        let mut parts = Vec::new();
+        flatten_into(&self.node, &mut parts);
+        parts
+    }
+}
+
+fn flatten_into(node: &SyntaxNode, parts: &mut Vec<BinaryPart>) {
+    for child in node.children_with_tokens() {
+        match child {
+            NodeOrToken::Token(t) => {
+                if let Some(op) = token_to_binary_operator(t.kind()) {
+                    parts.push(BinaryPart::Operator(op));
+                }
             }
-        );
-        match some_op {
-            Some(x) => x,
-            None => Operator::None,
+            NodeOrToken::Node(n) => {
+                if n.kind() == SyntaxKind::BinaryExpression {
+                    flatten_into(&n, parts);
+                } else if let Some(e) = Expression::cast(n) {
+                    parts.push(BinaryPart::Operand(e));
+                }
+            }
         }
     }
 }
@@ -492,6 +558,12 @@ impl AstNode for NameList {
 }
 
 impl NameList {
+    pub fn name_tokens(&self) -> Vec<SyntaxToken> {
+        self.node.children_with_tokens().filter_map(|t| match t {
+            NodeOrToken::Token(t) if t.kind() == SyntaxKind::Name => Some(t),
+            _ => None,
+        }).collect()
+    }
     pub fn names(&self) -> Vec<String> {
         self.node.children_with_tokens().filter_map(|t| match t  {
             NodeOrToken::Token(t) => if t.kind() == SyntaxKind::Name { Some(t.text().to_string()) } else { None },
@@ -517,11 +589,22 @@ impl AstNode for FunctionCall {
 }
 
 impl FunctionCall {
-    pub fn identifier(&self) -> Option<Identifier> {
-        self.node.children().find_map(Identifier::cast)
+    /// What's being called: `f` in `f(x)`, `a` in `a:m(x)`, `f()` in `f()()`
+    pub fn callee(&self) -> Option<Expression> {
+        self.node.children().find_map(Expression::cast)
     }
-    pub fn arguments(&self) -> Option<ExpressionList> {
-        self.node.children().find_map(ExpressionList::cast)
+    /// `m` in `a:m(x)`
+    pub fn method_name(&self) -> Option<SyntaxToken> {
+        self.node.children_with_tokens().find_map(|t| match t {
+            NodeOrToken::Token(t) if t.kind() == SyntaxKind::Name => Some(t),
+            _ => None,
+        })
+    }
+    pub fn arguments(&self) -> Vec<Expression> {
+        self.node.children()
+            .find(|n| n.kind() == SyntaxKind::ArgumentList)
+            .map(|n| n.children().filter_map(Expression::cast).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -614,6 +697,12 @@ impl AstNode for ForCountLoop {
 }
 
 impl ForCountLoop {
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        self.node.children_with_tokens().find_map(|t| match t {
+            NodeOrToken::Token(t) if t.kind() == SyntaxKind::Name => Some(t),
+            _ => None,
+        })
+    }
     pub fn name(&self) -> Option<String> {
         self.node.children_with_tokens().find_map(|n|
             match n {
@@ -754,5 +843,27 @@ impl AstNode for TableConstructor {
 impl TableConstructor {
     pub fn expression_list(&self) -> Option<ExpressionList> {
         self.node.children().find_map(ExpressionList::cast)
+    }
+}
+
+pub struct ReturnStatement {
+    node: SyntaxNode
+}
+
+impl AstNode for ReturnStatement {
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::ReturnStatement => Some(Self{node}),
+            _ => None,
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.node
+    }
+}
+
+impl ReturnStatement {
+    pub fn expressions(&self) -> Vec<Expression> {
+        self.node.children().filter_map(Expression::cast).collect()
     }
 }

@@ -28,6 +28,7 @@ use lsp_server::{Connection, ExtractError, Message, Notification, Request, Reque
 use rowan::{TextSize, TokenAtOffset};
 
 use crate::lsp::diagnostics;
+use crate::types;
 
 pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
     // Note that  we must have our logging only write out to stderr.
@@ -112,12 +113,22 @@ fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>>
                                     continue;
                                 }
                             }
-                            let n = node.ancestors().filter(|a| a.kind() != SyntaxKind::Identifier).nth(0);
-                            let output = match n {
-                                Some(n) => format!("{:?} {}", n.kind(), n.text()),
-                                None => String::from("")
+                            let file_types = types::FileTypes::analyse(&all);
+                            let (output, text_range) = match file_types.reference_at(TextSize::from(offset)) {
+                                Some(r) => {
+                                    let binding = file_types.binding(r);
+                                    (format!("{} {}: {}", binding.kind, binding.name, r.types), r.range)
+                                }
+                                None => {
+                                    let n = node.ancestors().filter(|a| a.kind() != SyntaxKind::Identifier).nth(0);
+                                    let output = match n {
+                                        Some(n) => format!("{:?} {}", n.kind(), n.text()),
+                                        None => String::from("")
+                                    };
+                                    (output, node.text_range())
+                                }
                             };
-                            let (start, end) = (node.text_range().start(), node.text_range().end());
+                            let (start, end) = (text_range.start(), text_range.end());
                             let (start, end) = (numbers.from_offset(usize::from(start)), numbers.from_offset(usize::from(end)));
                             let range: Option<Range> = Some(Range{start: Position{line: start.0.0, character: start.1.try_into().unwrap()}, end: Position{line: end.0.0, character: end.1.try_into().unwrap()}});
                             let result = Some(Hover{contents: HoverContents::Markup(MarkupContent{kind: MarkupKind::PlainText, value: output}), range});

@@ -22,13 +22,13 @@ mod syntax;
 mod lsp;
 mod state;
 mod diagnostics;
-mod variables;
+mod types;
 mod ast;
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && args[1] == "evaluate" {
-        let filename = "tests/functioncall.lua";
+        let filename = args.get(2).map(String::as_str).unwrap_or("tests/functioncall.lua");
         //let s = std::fs::read_to_string("../wow-ui-source/full.lua")?;
         let s = std::fs::read_to_string(filename)?;
         let mut a = syntax::syntax::Generator::new(&s);
@@ -42,7 +42,21 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         println!("{:#?}", a.errors());
         //println!("{:?}", numbers.from_offset(a.errors()[0].start));
         //println!("syntax: {:?}", dur);
-        //variables::get_types(res, filename);
+        Ok(())
+    } else if args.len() > 2 && args[1] == "types" {
+        let s = std::fs::read_to_string(&args[2])?;
+        let numbers = line_numbers::LinePositions::from(s.as_str());
+        let root = syntax::syntax::SyntaxNode::new_root(syntax::syntax::Generator::new(&s).process_all());
+        let before = std::time::Instant::now();
+        let file = types::FileTypes::analyse(&root);
+        let dur = std::time::Instant::now() - before;
+        for r in &file.references {
+            let binding = file.binding(r);
+            let (line, column) = numbers.from_offset(usize::from(r.range.start()));
+            let access = if r.write { "=" } else { ":" };
+            println!("{}:{} {} {}{} {}", line.0 + 1, column + 1, binding.kind, binding.name, access, r.types);
+        }
+        eprintln!("{} bindings, {} references in {:?}", file.bindings.len(), file.references.len(), dur);
         Ok(())
     } else {
         lsp::start_ls()
