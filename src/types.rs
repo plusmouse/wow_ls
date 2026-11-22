@@ -52,12 +52,21 @@
 //!   Otherwise they're unknown.
 //! * Tables and userdata can be a named type from the definitions, like `Frame`
 //!   or `ItemKey` (a [`NamedRef`]), so WoW objects aren't just `table`.
+//! * Tables made in the file have an internal identity (never shown), so their
+//!   fields are tracked: each `{ ... }` is one table, and a local or parameter
+//!   holding a table of unknown origin (`local _, ns = ...`) gets a pseudo
+//!   identity of its own. A field's type is the union of every value assigned to
+//!   it anywhere in the file (`{ x = 1 }`, `t.x = 2`, `function t:x() end`), so
+//!   a read before the first write isn't shown as nil. Writes through a table
+//!   whose identity isn't known (or a WoW object, shared by every `Frame`) are
+//!   kept by field name and used when nothing more specific is known.
 //! * Globals the file never assigns can have preset types from [`Definitions`]
 //!   (the Lua standard library, the WoW API), including dotted fields of those
 //!   globals like `string.format`.
 //!
-//! Known gaps: table fields aren't tracked, so method calls (`a:m()`) and
-//! calls through fields (`t.f()`) return unknown. Recursive calls return unknown.
+//! Known gaps: indexing with brackets (`t[k]`) isn't tracked, and globals the
+//! file doesn't assign (like saved variables) have no table identity. Recursive
+//! calls return unknown.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -197,9 +206,16 @@ pub enum NamedRef {
     #[default]
     None,
     One(NamedId),
+    /// A table made in this file: its identity, for tracking its fields. Shown
+    /// as a plain table
+    Table(TableId),
     /// A plain table, or one of several named types
     Unknown,
 }
+
+/// Where a table was made (its `{`), or where the variable given a pseudo
+/// identity was declared. The same across walks
+pub type TableId = TextSize;
 
 impl NamedRef {
     fn union(self, other: NamedRef) -> NamedRef {
@@ -240,6 +256,10 @@ impl Type {
     }
     pub fn builtin(id: BuiltinId) -> Type {
         Type { set: TypeSet::FUNCTION, function: FunctionRef::Builtin(id), named: NamedRef::None }
+    }
+    /// A table made in the file
+    pub fn table(id: TableId) -> Type {
+        Type { set: TypeSet::TABLE, function: FunctionRef::None, named: NamedRef::Table(id) }
     }
     /// A value of a named type, which is a table or userdata (`base`)
     pub fn named(id: NamedId, base: TypeSet) -> Type {
@@ -401,6 +421,10 @@ pub struct FileTypes {
     pub references: Vec<Reference>,
     pub functions: HashMap<FunctionId, FunctionInfo>,
     pub definitions: Arc<Definitions>,
+    /// Every value assigned to each field of each table made in the file
+    pub fields: HashMap<TableId, HashMap<String, Type>>,
+    /// Values assigned to fields of tables whose identity wasn't known, by name
+    pub any_table_fields: HashMap<String, Type>,
 }
 
 impl FileTypes {
@@ -408,9 +432,11 @@ impl FileTypes {
         let mut result = Walker::new(None, definitions).walk(root);
         for _ in 1..MAX_WALKS {
             let next = Walker::new(Some(&result), definitions).walk(root);
-            let settled = next.functions.iter().all(|(id, f)| {
-                result.functions.get(id).is_some_and(|before| before.parameters == f.parameters)
-            });
+            let settled = next.fields == result.fields
+                && next.any_table_fields == result.any_table_fields
+                && next.functions.iter().all(|(id, f)| {
+                    result.functions.get(id).is_some_and(|before| before.parameters == f.parameters)
+                });
             result = next;
             if settled {
                 break
@@ -527,6 +553,10 @@ struct Walker<'a> {
     mandates: HashMap<BindingId, Option<Type>>,
     /// The local each function literal was directly assigned to
     assigned_to: HashMap<FunctionId, BindingId>,
+    /// Field writes seen on this walk. Reads use the previous walk's, as a
+    /// field can be written after (or in another function from) a read
+    fields: HashMap<TableId, HashMap<String, Type>>,
+    any_table_fields: HashMap<String, Type>,
 }
 
 /// How much had been recorded before a loop pass, to discard that pass
@@ -576,7 +606,14 @@ impl<'a> Walker<'a> {
             self.references[index].types = self.bindings[binding].types;
         }
         self.references.sort_by_key(|r| r.range.start());
-        FileTypes { bindings: self.bindings, references: self.references, functions: self.functions, definitions: self.definitions }
+        FileTypes {
+            bindings: self.bindings,
+            references: self.references,
+            functions: self.functions,
+            definitions: self.definitions,
+            fields: self.fields,
+            any_table_fields: self.any_table_fields,
+        }
     }
 
     /// Each parameter's type for the next walk: what the body requires, else the
@@ -680,7 +717,11 @@ impl<'a> Walker<'a> {
         id
     }
 
-    fn declare(&mut self, token: &SyntaxToken, kind: BindingKind, types: Type) -> BindingId {
+    fn declare(&mut self, token: &SyntaxToken, kind: BindingKind, mut types: Type) -> BindingId {
+        if types.named == NamedRef::Unknown {
+            // A table we can't identify: track its fields under this variable
+            types.named = NamedRef::Table(token.text_range().start());
+        }
         let depth = self.scopes.len() - 1;
         let id = self.new_binding(token.text(), kind, Some(token.text_range()), types, self.function, depth);
         self.bindings[id].assigned = true;
@@ -805,8 +846,14 @@ impl<'a> Walker<'a> {
                                 self.assigned_to.insert(function_id(def), binding);
                             }
                         }
-                        // `t.x = 1` reads `t`. Field types aren't tracked yet
-                        None => self.identifier_parts(target.syntax()),
+                        None => match field_access(target.syntax()) {
+                            Some((base, field)) => {
+                                let base = self.expression(&base);
+                                self.field_write(base, field.text(), types);
+                            }
+                            // `t[k] = v` isn't tracked, but still reads `t` and `k`
+                            None => self.identifier_parts(target.syntax()),
+                        },
                     }
                 }
             }
@@ -893,18 +940,35 @@ impl<'a> Walker<'a> {
                         let binding = self.declare(&name, BindingKind::Local, Type::function(function_id(def)));
                         self.assigned_to.insert(function_id(def), binding);
                     }
-                    self.function_body(def, false);
+                    self.function_body(def, None);
                 } else if let Some(identifier) = def.identifier() {
                     match identifier.simple_name() {
                         Some(name) => {
                             self.write(&name, Type::function(function_id(def)));
                             let binding = self.resolve(name.text());
                             self.assigned_to.insert(function_id(def), binding);
-                            self.function_body(def, false);
+                            self.function_body(def, None);
                         }
+                        // `function a.b:c()` assigns field `c` of `a.b`
                         None => {
-                            self.identifier_parts(identifier.syntax());
-                            self.function_body(def, identifier.is_call_to_self());
+                            let owner = self.function_name_owner(&identifier);
+                            if let Some((owner, field)) = &owner {
+                                self.field_write(*owner, field, Type::function(function_id(def)));
+                            }
+                            // `self` is the table the method is defined on
+                            let self_type = identifier.is_call_to_self().then(|| {
+                                let owner = owner.map_or(Type::UNKNOWN, |(owner, _)| owner);
+                                match owner.named {
+                                    // Unknown, so assume a table, with fields of its own
+                                    NamedRef::None | NamedRef::Unknown => Type::table(function_id(def)),
+                                    named => {
+                                        let set = owner.set.intersection(OBJECTS);
+                                        let set = if set == TypeSet::NEVER { TypeSet::TABLE } else { set };
+                                        Type { set, function: FunctionRef::None, named }
+                                    }
+                                }
+                            });
+                            self.function_body(def, self_type);
                         }
                     }
                 }
@@ -931,7 +995,52 @@ impl<'a> Walker<'a> {
         (matches!(name, "pairs" | "ipairs") && self.is_global(name)).then(|| name.to_string())
     }
 
-    fn function_body(&mut self, def: &FunctionDefinition, has_self: bool) -> FunctionId {
+    /// The table and field a `function a.b:c()` statement assigns: `a.b` and `c`
+    fn function_name_owner(&mut self, identifier: &Identifier) -> Option<(Type, String)> {
+        let names: Vec<SyntaxToken> = identifier.syntax().children_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() == SyntaxKind::Name)
+            .collect();
+        let (first, rest) = names.split_first()?;
+        let (last, middle) = rest.split_last()?;
+        let mut owner = self.read(first);
+        for name in middle {
+            owner = self.field_read(owner, name.text());
+        }
+        Some((owner, last.text().to_string()))
+    }
+
+    /// The type of field `name` of a value of type `base`
+    fn field_read(&self, base: Type, name: &str) -> Type {
+        if let Some(declared) = self.definitions.field(base, name) {
+            return declared
+        }
+        // Writes can come later in the file, so only a previous walk knows them all
+        let Some(prior) = self.prior else { return Type::UNKNOWN };
+        let own = match base.named {
+            NamedRef::Table(id) => prior.fields.get(&id).and_then(|fields| fields.get(name)).copied(),
+            NamedRef::One(_) => None,
+            // Not a table we know, so nothing to go on
+            NamedRef::None | NamedRef::Unknown => return Type::UNKNOWN,
+        };
+        let any = prior.any_table_fields.get(name).copied();
+        match (own, any) {
+            (None, None) => Type::UNKNOWN,
+            (own, any) => own.unwrap_or_default() | any.unwrap_or_default(),
+        }
+    }
+
+    fn field_write(&mut self, base: Type, name: &str, value: Type) {
+        let field = match base.named {
+            NamedRef::Table(id) => self.fields.entry(id).or_default().entry(name.to_string()).or_default(),
+            // Could be any table, or shared by every object of a WoW type
+            NamedRef::One(_) | NamedRef::Unknown => self.any_table_fields.entry(name.to_string()).or_default(),
+            NamedRef::None => return,
+        };
+        *field |= value;
+    }
+
+    fn function_body(&mut self, def: &FunctionDefinition, self_type: Option<Type>) -> FunctionId {
         let id = function_id(def);
         let outer_function = self.function;
         self.function_count += 1;
@@ -940,10 +1049,10 @@ impl<'a> Walker<'a> {
         let outer_function_scope = std::mem::replace(&mut self.function_scope, self.scopes.len() - 1);
         let outer_short_circuit = std::mem::take(&mut self.short_circuit_depth);
         self.returns.push(None);
-        if has_self {
+        if let Some(self_type) = self_type {
             let depth = self.scopes.len() - 1;
             // Implicit, so there's no token to declare it at
-            let id = self.new_binding("self", BindingKind::Parameter, None, Type::of(TypeSet::TABLE), self.function, depth);
+            let id = self.new_binding("self", BindingKind::Parameter, None, self_type, self.function, depth);
             self.bindings[id].assigned = true;
             self.scopes[depth].names.insert("self".to_string(), id);
         }
@@ -1076,11 +1185,8 @@ impl<'a> Walker<'a> {
             } else {
                 TypeSet::UNKNOWN
             }),
-            Expression::Function(def) => Type::function(self.function_body(def, false)),
-            Expression::TableConstructor(t) => {
-                self.table_constructor(t.syntax());
-                Type::of(TypeSet::TABLE)
-            }
+            Expression::Function(def) => Type::function(self.function_body(def, None)),
+            Expression::TableConstructor(t) => self.table_constructor(t.syntax()),
             // `f()` in the middle of an expression only gives its first value
             Expression::FunctionCall(call) => self.function_call(call).first(),
             Expression::Identifier(identifier) => match identifier.simple_name() {
@@ -1089,7 +1195,7 @@ impl<'a> Walker<'a> {
                     // `a.b`: field `b` of whatever `a` is
                     Some((base, field)) => {
                         let base = self.expression(&base);
-                        self.definitions.field(base, field.text()).unwrap_or(Type::UNKNOWN)
+                        self.field_read(base, field.text())
                     }
                     None => {
                         self.identifier_parts(identifier.syntax());
@@ -1127,10 +1233,14 @@ impl<'a> Walker<'a> {
             }
             types
         });
+        // `a:m()` calls field `m` of `a`
+        let callee = match (callee, call.method_name()) {
+            (Some(base), Some(method)) => Some(self.field_read(base, method.text())),
+            (callee, _) => callee,
+        };
         let arguments = call.arguments();
         let argument_types = self.expression_values(&arguments);
-        // `a:m()` calls a field of `a`, and fields aren't tracked yet
-        let Some(callee) = callee.filter(|c| !is_method && c.set.contains(TypeSet::FUNCTION)) else {
+        let Some(callee) = callee.filter(|c| c.set.contains(TypeSet::FUNCTION)) else {
             return Values::unknown()
         };
         let Some(function) = self.known_function(callee.function) else { return Values::unknown() };
@@ -1179,26 +1289,37 @@ impl<'a> Walker<'a> {
         }
     }
 
-    fn table_constructor(&mut self, node: &SyntaxNode) {
+    /// A new table, with the types of its `name = value` fields recorded
+    fn table_constructor(&mut self, node: &SyntaxNode) -> Type {
+        let table = Type::table(node.text_range().start());
         for field in node.children().filter(|n| n.kind() == SyntaxKind::Field) {
             let mut in_brackets = false;
+            let mut after_assign = false;
+            let mut key = None;
             for child in field.children_with_tokens() {
                 match child {
                     NodeOrToken::Token(t) => match t.kind() {
                         SyntaxKind::LeftSquareBracket => in_brackets = true,
                         SyntaxKind::RightSquareBracket => in_brackets = false,
+                        SyntaxKind::Assign => after_assign = true,
                         _ => {}
                     },
                     // `{name = value}`: the name is a key, not a variable
-                    NodeOrToken::Node(n) if n.kind() == SyntaxKind::Identifier && !in_brackets => {}
+                    NodeOrToken::Node(n) if n.kind() == SyntaxKind::Identifier && !in_brackets && !after_assign => {
+                        key = Identifier::cast(n).and_then(|i| i.simple_name());
+                    }
                     NodeOrToken::Node(n) => {
                         if let Some(e) = Expression::cast(n) {
-                            self.expression(&e);
+                            let value = self.expression(&e);
+                            if let (Some(key), true) = (&key, after_assign) {
+                                self.field_write(table, key.text(), value);
+                            }
                         }
                     }
                 }
             }
         }
+        table
     }
 
     fn binary_expression(&mut self, b: &BinaryExpression) -> Type {
@@ -1428,7 +1549,7 @@ mod tests {
         let file = analyse(&source);
         let y = file.references.iter().find(|r| file.binding(r).name == "y").unwrap();
         assert!(y.types.set.contains(TypeSet::NUMBER | TypeSet::STRING), "{}", y.types.set);
-        assert_eq!(y.types, Type::UNKNOWN);
+        assert_eq!(y.types.set, TypeSet::UNKNOWN);
         assert_eq!(file.bindings.iter().filter(|b| b.name == "y").count(), 1);
     }
 
@@ -1563,7 +1684,6 @@ mod tests {
     fn unknown_calls() {
         assert_eq!(types_of("local y = print()", "y"), ["unknown"]);
         assert_eq!(types_of("local function f(g) return g() end local y = f()", "y"), ["unknown"]);
-        assert_eq!(types_of("local t = {} function t:m() return 1 end local y = t:m()", "y"), ["unknown"]);
         assert_eq!(types_of("local f = c and function() return 1 end or function() return 2 end local y = f()", "y"), ["unknown"]);
         // Recursion converges on the first walk's unknown
         let source = "local function f(n) if n then return f(n) end return 1 end local y = f()";
@@ -1787,6 +1907,87 @@ mod tests {
     fn named_parameter_requirements() {
         assert_eq!(object_types_of("function F(t) SetPortrait(t) end", "t"), ["Texture", "Texture"]);
         assert_eq!(object_types_of("local function f(t) end f(CreateFrame('Frame'))", "t"), ["Frame"]);
+    }
+
+    #[test]
+    fn constructor_fields() {
+        assert_eq!(types_of("local t = { count = 1, name = 'x' } local a = t.count", "a"), ["number"]);
+        assert_eq!(types_of("local t = { count = 1, name = 'x' } local a = t.name", "a"), ["string"]);
+        assert_eq!(types_of("local t = { f = function() return true end } local a = t.f()", "a"), ["true"]);
+        // Positional and bracketed entries aren't fields by name
+        assert_eq!(types_of("local t = { 1, ['k'] = 2 } local a = t.k", "a"), ["unknown"]);
+        assert_eq!(types_of("local t = {} local a = t.missing", "a"), ["unknown"]);
+        // Tables never show their identity
+        assert_eq!(types_of("local t = { count = 1 }", "t"), ["table"]);
+    }
+
+    #[test]
+    fn assigned_fields() {
+        assert_eq!(types_of("local t = {} t.extra = true local a = t.extra", "a"), ["true"]);
+        // Every assignment counts, wherever it is
+        assert_eq!(types_of("local t = { n = 1 } if c then t.n = 's' end local a = t.n", "a"), ["number|string"]);
+        assert_eq!(types_of("local t = {} local function set() t.x = 1 end local a = t.x", "a"), ["number"]);
+        // Including after the read
+        assert_eq!(types_of("local t = {} local a = t.x t.x = {}", "a"), ["table"]);
+        // Nested tables
+        assert_eq!(types_of("local t = { inner = { x = 1 } } local a = t.inner.x", "a"), ["number"]);
+        assert_eq!(types_of("local t = {} t.inner = {} t.inner.x = 's' local a = t.inner.x", "a"), ["string"]);
+    }
+
+    #[test]
+    fn fields_follow_the_table_not_the_variable() {
+        assert_eq!(types_of("local t = {} local u = t u.x = 1 local a = t.x", "a"), ["number"]);
+        assert_eq!(types_of("local t, u = {}, {} t.x = 1 u.x = 's' local a = t.x", "a"), ["number"]);
+        // A function given the table writes to it too
+        assert_eq!(types_of("local function init(tbl) tbl.x = 1 end local t = {} init(t) local a = t.x", "a"), ["number"]);
+    }
+
+    #[test]
+    fn methods() {
+        let source = "local Addon = {} function Addon:Name() return 's' end function Addon.Count() return 1 end
+            local a = Addon:Name() local b = Addon.Count()";
+        assert_eq!(types_of(source, "a"), ["string"]);
+        assert_eq!(types_of(source, "b"), ["number"]);
+        assert_eq!(types_of("local Addon = {} function Addon:Name() end", "Name"), Vec::<String>::new());
+        // `self` is the table, so fields set in one method are seen in another
+        let source = "local Addon = {} function Addon:Init() self.count = 0 end function Addon:Get() local c = self.count end";
+        assert_eq!(types_of(source, "c"), ["number"]);
+        let source = "local Addon = {} function Addon:Init() self.count = 0 end local c = Addon.count";
+        assert_eq!(types_of(source, "c"), ["number"]);
+        // Nested owners
+        let source = "local A = { B = {} } function A.B:M() return 1 end local x = A.B:M()";
+        assert_eq!(types_of(source, "x"), ["number"]);
+        // Globals made in the file work too
+        let source = "MyAddon = {} function MyAddon:M() return {} end local function f() local x = MyAddon:M() end";
+        assert_eq!(types_of(source, "x"), ["table"]);
+    }
+
+    #[test]
+    fn pseudo_identities() {
+        // The usual addon namespace, which comes from outside the file
+        let source = "local _, ns = ... ns.Version = '1.0' function ns:Get() return 1 end local a, b = ns.Version, ns:Get()";
+        assert_eq!(types_of(source, "a"), ["string"]);
+        assert_eq!(types_of(source, "b"), ["number"]);
+        // But it's still unknown what the variable itself is
+        assert_eq!(types_of("local _, ns = ...", "ns"), ["unknown"]);
+        // Parameters too
+        assert_eq!(types_of("local function f(opts) opts.size = 1 return opts.size end local a = f({})", "a"), ["number"]);
+    }
+
+    #[test]
+    fn fields_of_unidentified_tables() {
+        // Writing through an expression that could be either table keeps the write by name
+        let source = "local u = {}; (c and {} or u).x = 1 local a = u.x";
+        assert_eq!(types_of(source, "a"), ["number"]);
+        // A variable holding either one gets a pseudo identity of its own
+        let source = "local t = c and {} or {} t.x = 1 local a = t.x local u = {} local b = u.x";
+        assert_eq!(types_of(source, "a"), ["number"]);
+        assert_eq!(types_of(source, "b"), ["unknown"]);
+        // WoW objects share fields by name
+        assert_eq!(object_types_of("local f = CreateFrame('Frame') f.value = 5 local a = f.value", "a"), ["number"]);
+        assert_eq!(object_types_of("local f = CreateFrame('Frame') function f:OnEvent() return 1 end local a = f:OnEvent()", "a"), ["number"]);
+        // Reading from something unknown stays unknown
+        assert_eq!(types_of("local t = {} t.x = 1 local a = (c and {} or t).x", "a"), ["unknown"]);
     }
 
     #[test]
