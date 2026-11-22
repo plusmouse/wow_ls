@@ -117,7 +117,7 @@ fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>>
                             let (output, text_range) = match file_types.reference_at(TextSize::from(offset)) {
                                 Some(r) => {
                                     let binding = file_types.binding(r);
-                                    (format!("{} {}: {}", binding.kind, binding.name, r.types), r.range)
+                                    (format!("{} {}: {}", binding.kind, binding.name, file_types.describe(r.types)), r.range)
                                 }
                                 None => {
                                     let n = node.ancestors().filter(|a| a.kind() != SyntaxKind::Identifier).nth(0);

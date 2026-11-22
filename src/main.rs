@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
             let binding = file.binding(r);
             let (line, column) = numbers.from_offset(usize::from(r.range.start()));
             let access = if r.write { "=" } else { ":" };
-            println!("{}:{} {} {}{} {}", line.0 + 1, column + 1, binding.kind, binding.name, access, r.types);
+            println!("{}:{} {} {}{} {}", line.0 + 1, column + 1, binding.kind, binding.name, access, file.describe(r.types));
         }
         eprintln!("{} bindings, {} references in {:?}", file.bindings.len(), file.references.len(), dur);
         Ok(())
