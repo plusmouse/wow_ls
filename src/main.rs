@@ -23,6 +23,7 @@ mod lsp;
 mod state;
 mod diagnostics;
 mod types;
+mod definitions;
 mod ast;
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
@@ -47,8 +48,9 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         let s = std::fs::read_to_string(&args[2])?;
         let numbers = line_numbers::LinePositions::from(s.as_str());
         let root = syntax::syntax::SyntaxNode::new_root(syntax::syntax::Generator::new(&s).process_all());
+        let definitions = std::sync::Arc::new(definitions::load(None));
         let before = std::time::Instant::now();
-        let file = types::FileTypes::analyse(&root);
+        let file = types::FileTypes::analyse(&root, &definitions);
         let dur = std::time::Instant::now() - before;
         for r in &file.references {
             let binding = file.binding(r);

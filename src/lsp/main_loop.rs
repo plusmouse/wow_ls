@@ -14,6 +14,8 @@
 //along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use crate::syntax::{
     syntax, SyntaxNode, SyntaxKind
 };
@@ -29,6 +31,7 @@ use rowan::{TextSize, TokenAtOffset};
 
 use crate::lsp::diagnostics;
 use crate::types;
+use crate::definitions::{self, Definitions};
 
 pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
     // Note that  we must have our logging only write out to stderr.
@@ -41,6 +44,11 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
     let (id, params) = connection.initialize_start()?;
 
     let init_params: InitializeParams = serde_json::from_value(params).unwrap();
+    // Editors can point at their own definitions with `initializationOptions: {"definitionsPath": "..."}`
+    let definitions_path = init_params.initialization_options.as_ref()
+        .and_then(|o| o.get("definitionsPath"))
+        .and_then(|p| p.as_str())
+        .map(PathBuf::from);
     let _client_capabilities: ClientCapabilities = init_params.capabilities;
     let server_capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -58,10 +66,12 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
 
     connection.initialize_finish(id, initialize_data)?;
 
-    main_loop(connection)
+    main_loop(connection, definitions_path)
 }
 
-fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>> {
+fn main_loop(connection: Connection, definitions_path: Option<PathBuf>) -> Result<(), Box<dyn Error + Sync + Send>> {
+    // Loaded the first time types are needed, not at startup
+    let mut loaded_definitions: Option<Arc<Definitions>> = None;
     let mut language: HashMap<String, String> = HashMap::new();
     let mut text: HashMap<String, String> = HashMap::new();
 
@@ -113,7 +123,10 @@ fn main_loop(connection: Connection) -> Result<(), Box<dyn Error + Sync + Send>>
                                     continue;
                                 }
                             }
-                            let file_types = types::FileTypes::analyse(&all);
+                            let definitions = loaded_definitions
+                                .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
+                                .clone();
+                            let file_types = types::FileTypes::analyse(&all, &definitions);
                             let (output, text_range) = match file_types.reference_at(TextSize::from(offset)) {
                                 Some(r) => {
                                     let binding = file_types.binding(r);

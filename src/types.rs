@@ -43,15 +43,21 @@
 //! walk's final types for those, which is sound because the first walk can only
 //! have over-approximated.
 //!
+//! * Globals the file never assigns can have preset types from [`Definitions`]
+//!   (the Lua standard library, the WoW API), including dotted fields of those
+//!   globals like `string.format`.
+//!
 //! Known gaps: table fields aren't tracked, so method calls (`a:m()`) and
 //! calls through fields (`t.f()`) return unknown. Recursive calls return unknown.
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use rowan::{NodeOrToken, TextRange, TextSize};
 
 use crate::ast::*;
+use crate::definitions::{BuiltinId, Definitions};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -155,6 +161,8 @@ pub enum FunctionRef {
     None,
     /// Exactly this function
     One(FunctionId),
+    /// A function from the preset definitions
+    Builtin(BuiltinId),
     /// A function we can't pin down: a parameter, an unknown call result, or one
     /// of several functions
     Unknown,
@@ -164,7 +172,7 @@ impl FunctionRef {
     fn union(self, other: FunctionRef) -> FunctionRef {
         match (self, other) {
             (FunctionRef::None, x) | (x, FunctionRef::None) => x,
-            (FunctionRef::One(a), FunctionRef::One(b)) if a == b => self,
+            (a, b) if a == b => a,
             _ => FunctionRef::Unknown,
         }
     }
@@ -189,6 +197,9 @@ impl Type {
     }
     pub fn function(id: FunctionId) -> Type {
         Type { set: TypeSet::FUNCTION, function: FunctionRef::One(id) }
+    }
+    pub fn builtin(id: BuiltinId) -> Type {
+        Type { set: TypeSet::FUNCTION, function: FunctionRef::Builtin(id) }
     }
     pub fn union(self, other: Type) -> Type {
         Type { set: self.set | other.set, function: self.function.union(other.function) }
@@ -305,12 +316,13 @@ pub struct FileTypes {
     /// Sorted by position
     pub references: Vec<Reference>,
     pub functions: HashMap<FunctionId, FunctionInfo>,
+    pub definitions: Arc<Definitions>,
 }
 
 impl FileTypes {
-    pub fn analyse(root: &SyntaxNode) -> FileTypes {
-        let first = Walker::new(None).walk(root);
-        Walker::new(Some(&first)).walk(root)
+    pub fn analyse(root: &SyntaxNode, definitions: &Arc<Definitions>) -> FileTypes {
+        let first = Walker::new(None, definitions).walk(root);
+        Walker::new(Some(&first), definitions).walk(root)
     }
 
     /// e.g. `number|nil` or `function(a, b) -> string`
@@ -318,6 +330,7 @@ impl FileTypes {
         let names = ty.set.names();
         let signature = match ty.function {
             FunctionRef::One(id) => self.functions.get(&id).map(|f| self.signature(f)),
+            FunctionRef::Builtin(id) => self.definitions.function(id).map(|f| self.signature(f)),
             _ => None,
         };
         let wrap = names.len() > 1;
@@ -368,6 +381,7 @@ struct Scope {
 struct Walker<'a> {
     /// Results of the previous walk, used where this walk doesn't know yet
     prior: Option<&'a FileTypes>,
+    definitions: Arc<Definitions>,
     bindings: Vec<Binding>,
     /// Type of each binding at the current point of the walk
     current: Vec<Type>,
@@ -402,8 +416,8 @@ const MAIN_CHUNK: usize = 0;
 const LOOP_PASSES_BEFORE_WIDENING: usize = 8;
 
 impl<'a> Walker<'a> {
-    fn new(prior: Option<&'a FileTypes>) -> Walker<'a> {
-        Walker { prior, ..Walker::default() }
+    fn new(prior: Option<&'a FileTypes>, definitions: &Arc<Definitions>) -> Walker<'a> {
+        Walker { prior, definitions: definitions.clone(), ..Walker::default() }
     }
 
     fn walk(mut self, root: &SyntaxNode) -> FileTypes {
@@ -418,7 +432,7 @@ impl<'a> Walker<'a> {
     fn finish(mut self) -> FileTypes {
         for binding in self.bindings.iter_mut() {
             if binding.kind == BindingKind::Global && !binding.assigned {
-                binding.types = Type::UNKNOWN;
+                binding.types = self.definitions.function_id(&binding.name).map_or(Type::UNKNOWN, Type::builtin);
             }
         }
         for &index in &self.deferred {
@@ -426,7 +440,7 @@ impl<'a> Walker<'a> {
             self.references[index].types = self.bindings[binding].types;
         }
         self.references.sort_by_key(|r| r.range.start());
-        FileTypes { bindings: self.bindings, references: self.references, functions: self.functions }
+        FileTypes { bindings: self.bindings, references: self.references, functions: self.functions, definitions: self.definitions }
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -541,6 +555,7 @@ impl<'a> Walker<'a> {
             self.deferred.push(index);
             self.prior_binding_types(id)
         };
+        let types = self.builtin_global(id).unwrap_or(types);
         self.references.push(Reference { range: token.text_range(), binding: id, types, write: false });
         types
     }
@@ -552,6 +567,32 @@ impl<'a> Walker<'a> {
             .and_then(|prior| prior.bindings.get(id))
             .filter(|prior| prior.name == self.bindings[id].name)
             .map_or(Type::UNKNOWN, |prior| prior.types)
+    }
+
+    /// True for a global the file never assigns (as far as this walk has seen
+    /// on the first walk, anywhere on the second), so presets can apply
+    fn is_unassigned_global(&self, id: BindingId) -> bool {
+        let binding = &self.bindings[id];
+        let prior = self.prior.and_then(|p| p.bindings.get(id)).filter(|p| p.name == binding.name);
+        binding.kind == BindingKind::Global && !binding.assigned && prior.is_none_or(|p| !p.assigned)
+    }
+
+    fn builtin_global(&self, id: BindingId) -> Option<Type> {
+        if !self.is_unassigned_global(id) {
+            return None
+        }
+        self.definitions.function_id(&self.bindings[id].name).map(Type::builtin)
+    }
+
+    /// `string.format` and similar, when `string` is an unassigned global
+    fn builtin_field(&mut self, identifier: &Identifier) -> Option<Type> {
+        let (base, fields) = dotted_path(identifier.syntax())?;
+        let id = self.resolve(base.text());
+        if fields.is_empty() || !self.is_unassigned_global(id) {
+            return None
+        }
+        let name = format!("{}.{}", base.text(), fields.join("."));
+        self.definitions.function_id(&name).map(Type::builtin)
     }
 
     fn write(&mut self, token: &SyntaxToken, types: Type) {
@@ -818,7 +859,7 @@ impl<'a> Walker<'a> {
                 Some(name) => self.read(&name),
                 None => {
                     self.identifier_parts(identifier.syntax());
-                    Type::UNKNOWN
+                    self.builtin_field(identifier).unwrap_or(Type::UNKNOWN)
                 }
             },
             Expression::GroupedExpression(g) => match g.get_expression() {
@@ -850,6 +891,9 @@ impl<'a> Walker<'a> {
         }
         match callee {
             Some(Type { set, function: FunctionRef::One(id) }) if set.contains(TypeSet::FUNCTION) => self.returns_of(id),
+            Some(Type { set, function: FunctionRef::Builtin(id) }) if set.contains(TypeSet::FUNCTION) => {
+                self.definitions.function(id).map_or_else(Values::unknown, |f| f.returns.clone())
+            }
             _ => Values::unknown(),
         }
     }
@@ -925,6 +969,24 @@ impl<'a> Walker<'a> {
     }
 }
 
+/// `a.b.c` as (a, [b, c]); None for anything with indexing, calls or methods
+fn dotted_path(node: &SyntaxNode) -> Option<(SyntaxToken, Vec<String>)> {
+    let identifier = Identifier::cast(node.clone())?;
+    if let Some(name) = identifier.simple_name() {
+        return Some((name, Vec::new()))
+    }
+    let mut significant = node.children_with_tokens()
+        .filter(|t| !matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment));
+    let (Some(NodeOrToken::Node(inner)), Some(NodeOrToken::Token(dot)), Some(NodeOrToken::Token(field)), None) =
+        (significant.next(), significant.next(), significant.next(), significant.next()) else { return None };
+    if dot.kind() != SyntaxKind::Dot || field.kind() != SyntaxKind::Name {
+        return None
+    }
+    let (base, mut fields) = dotted_path(&inner)?;
+    fields.push(field.text().to_string());
+    Some((base, fields))
+}
+
 fn function_id(def: &FunctionDefinition) -> FunctionId {
     def.syntax().text_range().start()
 }
@@ -994,14 +1056,21 @@ mod tests {
     use crate::syntax::syntax::Generator;
 
     fn analyse(source: &str) -> FileTypes {
+        analyse_with(source, &Arc::new(Definitions::default()))
+    }
+
+    fn analyse_with(source: &str, definitions: &Arc<Definitions>) -> FileTypes {
         let mut generator = Generator::new(source);
         let root = SyntaxNode::new_root(generator.process_all());
-        FileTypes::analyse(&root)
+        FileTypes::analyse(&root, definitions)
     }
 
     /// Type at each use of `name`, in source order
     fn types_of(source: &str, name: &str) -> Vec<String> {
-        let file = analyse(source);
+        describe_uses(&analyse(source), name)
+    }
+
+    fn describe_uses(file: &FileTypes, name: &str) -> Vec<String> {
         file.references.iter()
             .filter(|r| file.binding(r).name == name)
             .map(|r| file.describe(r.types))
@@ -1262,6 +1331,58 @@ mod tests {
         assert_eq!(types_of("local function f(x) if x then return 1 end end", "f"), ["function(x) -> number|nil"]);
         assert_eq!(types_of("local function f() return 1 end local g = c and f", "g"), ["false|(function() -> number)|nil"]);
         assert_eq!(types_of("local function f() return f end", "f"), ["function() -> function", "function() -> function"]);
+    }
+
+    fn builtins() -> Arc<Definitions> {
+        Arc::new(Definitions::from_json(r#"{"functions": {
+            "tostring": {"parameters": ["value"], "returns": ["string"]},
+            "tonumber": {"parameters": ["value", "base"], "returns": ["number|nil"]},
+            "select": {"parameters": ["index", "..."], "returns": ["unknown"], "rest": "unknown"},
+            "string.format": {"parameters": ["format", "..."], "returns": ["string"]},
+            "a.b.c": {"returns": ["table"]}
+        }}"#).unwrap())
+    }
+
+    fn builtin_types_of(source: &str, name: &str) -> Vec<String> {
+        describe_uses(&analyse_with(source, &builtins()), name)
+    }
+
+    #[test]
+    fn preset_globals() {
+        assert_eq!(builtin_types_of("local x = tostring(1)", "x"), ["string"]);
+        assert_eq!(builtin_types_of("local x = tonumber('1')", "x"), ["number|nil"]);
+        assert_eq!(builtin_types_of("local x = tostring", "x"), ["function(value) -> string"]);
+        assert_eq!(builtin_types_of("local x, y = select(2, 'a', 'b')", "y"), ["unknown"]);
+        assert_eq!(builtin_types_of("local x = undefined()", "x"), ["unknown"]);
+        // Inside functions too, where globals are read like upvalues
+        assert_eq!(builtin_types_of("function F() local x = tostring(1) end", "x"), ["string"]);
+    }
+
+    #[test]
+    fn localised_presets() {
+        // The usual WoW idiom of caching globals in locals
+        let source = "local tostring, tonumber = tostring, tonumber function F() local x = tostring(1) end";
+        assert_eq!(builtin_types_of(source, "x"), ["string"]);
+    }
+
+    #[test]
+    fn preset_fields() {
+        assert_eq!(builtin_types_of("local x = string.format('%d', 1)", "x"), ["string"]);
+        assert_eq!(builtin_types_of("local f = string.format local x = f()", "x"), ["string"]);
+        assert_eq!(builtin_types_of("local x = a.b.c()", "x"), ["table"]);
+        assert_eq!(builtin_types_of("local x = string.nope()", "x"), ["unknown"]);
+        assert_eq!(builtin_types_of("local x = string['format']()", "x"), ["unknown"]);
+        // A local named `string` isn't the library
+        assert_eq!(builtin_types_of("local string = {} local x = string.format()", "x"), ["unknown"]);
+    }
+
+    #[test]
+    fn files_can_replace_presets() {
+        assert_eq!(builtin_types_of("function tostring() return 1 end local x = tostring()", "x"), ["number"]);
+        // Assigned further down still counts, via the second walk
+        assert_eq!(builtin_types_of("local x = tostring() tostring = nil", "x"), ["unknown"]);
+        assert_eq!(builtin_types_of("local function tostring() return {} end local x = tostring()", "x"), ["table"]);
+        assert_eq!(builtin_types_of("string = {} local x = string.format()", "x"), ["unknown"]);
     }
 
     #[test]
