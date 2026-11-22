@@ -38,11 +38,20 @@
 //! * Values that can be functions remember which function (a [`FunctionRef`]),
 //!   and each function records what it returns, so calls have result types.
 //!
-//! The file is walked twice. On the first walk, reading an upvalue or calling a
-//! function defined further down gives unknown. The second walk uses the first
-//! walk's final types for those, which is sound because the first walk can only
-//! have over-approximated.
+//! The file is walked at least twice. On the first walk, reading an upvalue,
+//! calling a function defined further down, or reading a parameter gives
+//! unknown. Each later walk uses the previous walk's final types for those, which
+//! stays sound because every walk can only over-approximate. Walking stops when
+//! parameter types settle (call-site types can chain through several functions),
+//! or after [`MAX_WALKS`].
 //!
+//! * Parameters are typed by what the body requires of them, if it passes them
+//!   unconditionally to a parameter declared with a single type (`floor(x)`
+//!   makes `x` a number). Otherwise they get the union of the arguments at every
+//!   call, if every call is visible: a local function only ever called directly.
+//!   Otherwise they're unknown.
+//! * Tables and userdata can be a named type from the definitions, like `Frame`
+//!   or `ItemKey` (a [`NamedRef`]), so WoW objects aren't just `table`.
 //! * Globals the file never assigns can have preset types from [`Definitions`]
 //!   (the Lua standard library, the WoW API), including dotted fields of those
 //!   globals like `string.format`.
@@ -57,7 +66,7 @@ use std::sync::Arc;
 use rowan::{NodeOrToken, TextRange, TextSize};
 
 use crate::ast::*;
-use crate::definitions::{BuiltinId, Definitions};
+use crate::definitions::{BuiltinId, Definitions, NamedId};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -90,6 +99,9 @@ impl TypeSet {
     /// The values that let `a or b` return `a`, and `a and b` continue to `b`
     pub fn truthy(self) -> TypeSet {
         self.without(Self::NIL.union(Self::FALSE))
+    }
+    pub fn intersection(self, other: TypeSet) -> TypeSet {
+        TypeSet(self.0 & other.0)
     }
     /// The values that let `a and b` return `a`
     pub fn falsy(self) -> TypeSet {
@@ -178,35 +190,71 @@ impl FunctionRef {
     }
 }
 
-/// A value's possible types, and which function it is if it can be one.
-/// `function` is None exactly when `set` doesn't contain FUNCTION
+/// Which named type (`Frame`, `ItemKey`, ...) a table or userdata value is
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum NamedRef {
+    /// Can't be a table or userdata
+    #[default]
+    None,
+    One(NamedId),
+    /// A plain table, or one of several named types
+    Unknown,
+}
+
+impl NamedRef {
+    fn union(self, other: NamedRef) -> NamedRef {
+        match (self, other) {
+            (NamedRef::None, x) | (x, NamedRef::None) => x,
+            (a, b) if a == b => a,
+            _ => NamedRef::Unknown,
+        }
+    }
+}
+
+/// A value's possible types, which function it is if it can be one, and which
+/// named type if it can be a table or userdata. `function` is None exactly when
+/// `set` doesn't contain FUNCTION, and `named` exactly when it has neither TABLE
+/// nor OTHER
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Type {
     pub set: TypeSet,
     pub function: FunctionRef,
+    pub named: NamedRef,
 }
 
-impl Type {
-    pub const NIL: Type = Type { set: TypeSet::NIL, function: FunctionRef::None };
-    pub const UNKNOWN: Type = Type { set: TypeSet::UNKNOWN, function: FunctionRef::Unknown };
+/// The types a named type can be based on
+const OBJECTS: TypeSet = TypeSet(TypeSet::TABLE.0 | TypeSet::OTHER.0);
 
-    /// A type with no known function identity
+impl Type {
+    pub const NIL: Type = Type { set: TypeSet::NIL, function: FunctionRef::None, named: NamedRef::None };
+    pub const UNKNOWN: Type = Type { set: TypeSet::UNKNOWN, function: FunctionRef::Unknown, named: NamedRef::Unknown };
+
+    /// A type with no known function or named-type identity
     pub fn of(set: TypeSet) -> Type {
         let function = if set.contains(TypeSet::FUNCTION) { FunctionRef::Unknown } else { FunctionRef::None };
-        Type { set, function }
+        let named = if set.intersection(OBJECTS) != TypeSet::NEVER { NamedRef::Unknown } else { NamedRef::None };
+        Type { set, function, named }
     }
     pub fn function(id: FunctionId) -> Type {
-        Type { set: TypeSet::FUNCTION, function: FunctionRef::One(id) }
+        Type { set: TypeSet::FUNCTION, function: FunctionRef::One(id), named: NamedRef::None }
     }
     pub fn builtin(id: BuiltinId) -> Type {
-        Type { set: TypeSet::FUNCTION, function: FunctionRef::Builtin(id) }
+        Type { set: TypeSet::FUNCTION, function: FunctionRef::Builtin(id), named: NamedRef::None }
+    }
+    /// A value of a named type, which is a table or userdata (`base`)
+    pub fn named(id: NamedId, base: TypeSet) -> Type {
+        Type { set: base, function: FunctionRef::None, named: NamedRef::One(id) }
     }
     pub fn union(self, other: Type) -> Type {
-        Type { set: self.set | other.set, function: self.function.union(other.function) }
+        Type {
+            set: self.set | other.set,
+            function: self.function.union(other.function),
+            named: self.named.union(other.named),
+        }
     }
-    /// Functions are always truthy, so they're kept
+    /// Functions, tables and userdata are always truthy, so they're kept
     pub fn truthy(self) -> Type {
-        Type { set: self.set.truthy(), function: self.function }
+        Type { set: self.set.truthy(), ..self }
     }
     pub fn falsy(self) -> Type {
         Type::of(self.set.falsy())
@@ -214,7 +262,8 @@ impl Type {
     pub fn without(self, other: TypeSet) -> Type {
         let set = self.set.without(other);
         let function = if set.contains(TypeSet::FUNCTION) { self.function } else { FunctionRef::None };
-        Type { set, function }
+        let named = if set.intersection(OBJECTS) != TypeSet::NEVER { self.named } else { NamedRef::None };
+        Type { set, function, named }
     }
 }
 
@@ -262,11 +311,42 @@ impl Values {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parameter {
+    pub name: String,
+    pub types: Type,
+    /// The type the function requires, if it requires exactly one. Calls to the
+    /// function then pass that requirement on to their arguments
+    pub mandated: Option<Type>,
+}
+
+impl Parameter {
+    /// A declared parameter, which mandates its type if it's a single one.
+    /// Optional (`number|nil`) and multi-type parameters don't
+    pub fn declared(name: &str, types: Type) -> Parameter {
+        let single = [TypeSet::NUMBER, TypeSet::STRING, TypeSet::BOOLEAN, TypeSet::TRUE, TypeSet::FALSE,
+            TypeSet::FUNCTION, TypeSet::TABLE, TypeSet::OTHER];
+        let mandated = single.contains(&types.set).then_some(types);
+        Parameter { name: name.to_string(), types, mandated }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FunctionInfo {
-    pub parameters: Vec<String>,
-    pub varargs: bool,
+    pub parameters: Vec<Parameter>,
+    /// The type of each extra argument, if the function takes `...`
+    pub varargs: Option<Parameter>,
     pub returns: Values,
+}
+
+impl FunctionInfo {
+    /// What the function requires of the argument at `index`
+    fn mandated(&self, index: usize) -> Option<Type> {
+        match self.parameters.get(index) {
+            Some(parameter) => parameter.mandated,
+            None => self.varargs.as_ref().and_then(|v| v.mandated),
+        }
+    }
 }
 
 pub type BindingId = usize;
@@ -299,6 +379,8 @@ pub struct Binding {
     function: usize,
     scope_depth: usize,
     assigned: bool,
+    /// Written after its declaration (so far, on this walk)
+    reassigned: bool,
 }
 
 #[derive(Debug)]
@@ -308,6 +390,8 @@ pub struct Reference {
     /// The type at this point: the value read, or the value assigned for a write
     pub types: Type,
     pub write: bool,
+    /// A read that's directly called: `f` in `f(x)`
+    pub callee: bool,
 }
 
 #[derive(Debug, Default)]
@@ -321,35 +405,70 @@ pub struct FileTypes {
 
 impl FileTypes {
     pub fn analyse(root: &SyntaxNode, definitions: &Arc<Definitions>) -> FileTypes {
-        let first = Walker::new(None, definitions).walk(root);
-        Walker::new(Some(&first), definitions).walk(root)
+        let mut result = Walker::new(None, definitions).walk(root);
+        for _ in 1..MAX_WALKS {
+            let next = Walker::new(Some(&result), definitions).walk(root);
+            let settled = next.functions.iter().all(|(id, f)| {
+                result.functions.get(id).is_some_and(|before| before.parameters == f.parameters)
+            });
+            result = next;
+            if settled {
+                break
+            }
+        }
+        result
     }
 
-    /// e.g. `number|nil` or `function(a, b) -> string`
+    /// e.g. `number?`, `Frame|string` or `function(a, b) -> string`
     pub fn describe(&self, ty: Type) -> String {
+        self.describe_with(ty, true)
+    }
+
+    /// Without function signatures, which could recurse forever on
+    /// `function f() return f end`
+    fn describe_shallow(&self, ty: Type) -> String {
+        self.describe_with(ty, false)
+    }
+
+    fn describe_with(&self, ty: Type, signatures: bool) -> String {
         let names = ty.set.names();
         let signature = match ty.function {
-            FunctionRef::One(id) => self.functions.get(&id).map(|f| self.signature(f)),
-            FunctionRef::Builtin(id) => self.definitions.function(id).map(|f| self.signature(f)),
+            FunctionRef::One(id) if signatures => self.functions.get(&id).map(|f| self.signature(f)),
+            FunctionRef::Builtin(id) if signatures => self.definitions.function(id).map(|f| self.signature(f)),
             _ => None,
         };
+        let named = match ty.named {
+            NamedRef::One(id) => self.definitions.named_type(id).filter(|named| !named.namespace),
+            _ => None,
+        };
+        // A single type that can also be nil is written `T?`
+        let optional = names.len() == 2 && names[1] == "nil" && !names[0].starts_with("unknown");
         let wrap = names.len() > 1;
-        names.iter().map(|&name| match (&signature, name) {
-            (Some(s), "function") if wrap && s.contains(" -> ") => format!("({s})"),
-            (Some(s), "function") => s.clone(),
-            _ => name.to_string(),
-        }).collect::<Vec<_>>().join("|")
+        let names: Vec<String> = names.iter()
+            .filter(|&&name| !(optional && name == "nil"))
+            .map(|&name| match (&signature, named, name) {
+                (Some(s), _, "function") if wrap && s.contains(" -> ") => format!("({s})"),
+                (Some(s), _, "function") => s.clone(),
+                (_, Some(named), "table" | "userdata") if named.base.names() == [name] => named.name.clone(),
+                _ => name.to_string(),
+            })
+            .collect();
+        let described = names.join("|");
+        if optional { described + "?" } else { described }
     }
 
     fn signature(&self, function: &FunctionInfo) -> String {
-        let mut parameters = function.parameters.clone();
-        if function.varargs {
-            parameters.push("...".to_string());
+        let parameter = |p: &Parameter| match p.types {
+            Type::UNKNOWN => p.name.clone(),
+            types => format!("{}: {}", p.name, self.describe_shallow(types)),
+        };
+        let mut parameters: Vec<String> = function.parameters.iter().map(parameter).collect();
+        if let Some(varargs) = &function.varargs {
+            parameters.push(parameter(varargs));
         }
         let mut signature = format!("function({})", parameters.join(", "));
         let returns = &function.returns;
-        // Not `describe`, which could recurse forever on `function f() return f end`
-        let mut parts: Vec<String> = returns.values.iter().map(|t| t.set.to_string()).collect();
+        let mut parts: Vec<String> = returns.values.iter().map(|&t| self.describe_shallow(t)).collect();
         if returns.rest != Type::NIL {
             parts.push("...".to_string());
         }
@@ -397,6 +516,17 @@ struct Walker<'a> {
     functions: HashMap<FunctionId, FunctionInfo>,
     /// Union of the `return`s seen so far, for each function being walked
     returns: Vec<Option<Values>>,
+    /// Index in `scopes` of the current function's body
+    function_scope: usize,
+    /// Inside the right of an `and`/`or`, which might not run
+    short_circuit_depth: usize,
+    /// Union of the arguments at every direct call of each function
+    call_arguments: HashMap<FunctionId, Values>,
+    /// The single type each parameter has been required to have so far. None
+    /// when two requirements conflicted
+    mandates: HashMap<BindingId, Option<Type>>,
+    /// The local each function literal was directly assigned to
+    assigned_to: HashMap<FunctionId, BindingId>,
 }
 
 /// How much had been recorded before a loop pass, to discard that pass
@@ -408,6 +538,11 @@ struct Snapshot {
 }
 
 const MAIN_CHUNK: usize = 0;
+
+/// Each walk past the second lets call-site parameter types pass one more step
+/// down a chain of calls (`a(1)` calling `b(x)` calling `c(y)`). The last walk is
+/// sound even if parameters hadn't settled, just less precise
+pub const MAX_WALKS: usize = 4;
 
 /// Passes after which a loop that still hasn't settled is widened: any variable
 /// whose type is still changing becomes unknown. Without this, a loop already
@@ -430,9 +565,10 @@ impl<'a> Walker<'a> {
     }
 
     fn finish(mut self) -> FileTypes {
+        self.settle_parameter_types();
         for binding in self.bindings.iter_mut() {
             if binding.kind == BindingKind::Global && !binding.assigned {
-                binding.types = self.definitions.function_id(&binding.name).map_or(Type::UNKNOWN, Type::builtin);
+                binding.types = self.definitions.global(&binding.name).unwrap_or(Type::UNKNOWN);
             }
         }
         for &index in &self.deferred {
@@ -441,6 +577,33 @@ impl<'a> Walker<'a> {
         }
         self.references.sort_by_key(|r| r.range.start());
         FileTypes { bindings: self.bindings, references: self.references, functions: self.functions, definitions: self.definitions }
+    }
+
+    /// Each parameter's type for the next walk: what the body requires, else the
+    /// arguments from every call when every call is visible, else unknown
+    fn settle_parameter_types(&mut self) {
+        let mut only_called = vec![true; self.bindings.len()];
+        for reference in &self.references {
+            if !reference.write && !reference.callee {
+                only_called[reference.binding] = false;
+            }
+        }
+        for (id, function) in self.functions.iter_mut() {
+            // Directly assigned to a local that's only ever called, and never
+            // given another function, so every call to it is one we saw
+            let all_calls_seen = self.assigned_to.get(id).is_some_and(|&b| {
+                let binding = &self.bindings[b];
+                binding.kind == BindingKind::Local && binding.types.function == FunctionRef::One(*id) && only_called[b]
+            });
+            let calls = self.call_arguments.get(id);
+            for (i, parameter) in function.parameters.iter_mut().enumerate() {
+                parameter.types = match (parameter.mandated, calls) {
+                    (Some(mandated), _) => mandated,
+                    (None, Some(calls)) if all_calls_seen => calls.get(i),
+                    _ => Type::UNKNOWN,
+                };
+            }
+        }
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -511,6 +674,7 @@ impl<'a> Walker<'a> {
             function,
             scope_depth,
             assigned: false,
+            reassigned: false,
         });
         self.current.push(types);
         id
@@ -521,7 +685,7 @@ impl<'a> Walker<'a> {
         let id = self.new_binding(token.text(), kind, Some(token.text_range()), types, self.function, depth);
         self.bindings[id].assigned = true;
         self.scopes[depth].names.insert(token.text().to_string(), id);
-        self.references.push(Reference { range: token.text_range(), binding: id, types, write: true });
+        self.references.push(Reference { range: token.text_range(), binding: id, types, write: true, callee: false });
         id
     }
 
@@ -556,7 +720,7 @@ impl<'a> Walker<'a> {
             self.prior_binding_types(id)
         };
         let types = self.builtin_global(id).unwrap_or(types);
-        self.references.push(Reference { range: token.text_range(), binding: id, types, write: false });
+        self.references.push(Reference { range: token.text_range(), binding: id, types, write: false, callee: false });
         types
     }
 
@@ -581,18 +745,7 @@ impl<'a> Walker<'a> {
         if !self.is_unassigned_global(id) {
             return None
         }
-        self.definitions.function_id(&self.bindings[id].name).map(Type::builtin)
-    }
-
-    /// `string.format` and similar, when `string` is an unassigned global
-    fn builtin_field(&mut self, identifier: &Identifier) -> Option<Type> {
-        let (base, fields) = dotted_path(identifier.syntax())?;
-        let id = self.resolve(base.text());
-        if fields.is_empty() || !self.is_unassigned_global(id) {
-            return None
-        }
-        let name = format!("{}.{}", base.text(), fields.join("."));
-        self.definitions.function_id(&name).map(Type::builtin)
+        self.definitions.global(&self.bindings[id].name)
     }
 
     fn write(&mut self, token: &SyntaxToken, types: Type) {
@@ -600,6 +753,7 @@ impl<'a> Walker<'a> {
         let binding = &mut self.bindings[id];
         binding.types |= types;
         binding.assigned = true;
+        binding.reassigned = true;
         let innermost_conditional = self.scopes.iter().rposition(|s| s.conditional);
         let replaces = binding.function == self.function
             && innermost_conditional.is_none_or(|depth| binding.scope_depth >= depth);
@@ -608,7 +762,7 @@ impl<'a> Walker<'a> {
         } else {
             self.current[id] |= types;
         }
-        self.references.push(Reference { range: token.text_range(), binding: id, types, write: true });
+        self.references.push(Reference { range: token.text_range(), binding: id, types, write: true, callee: false });
     }
 
     fn block(&mut self, block: Option<Block>, conditional: bool) {
@@ -631,17 +785,26 @@ impl<'a> Walker<'a> {
                 let names = s.name_list().map(|n| n.name_tokens()).unwrap_or_default();
                 let expressions = s.expression_list().map(|e| e.expressions()).unwrap_or_default();
                 let types = self.expression_list(&expressions, names.len());
-                for (name, types) in names.iter().zip(types) {
-                    self.declare(name, BindingKind::Local, types);
+                for (i, (name, types)) in names.iter().zip(types).enumerate() {
+                    let binding = self.declare(name, BindingKind::Local, types);
+                    if let Some(Expression::Function(def)) = expressions.get(i) {
+                        self.assigned_to.insert(function_id(def), binding);
+                    }
                 }
             }
             Statement::Assign(s) => {
                 let targets = s.variable_list().map(|v| v.identifiers()).unwrap_or_default();
                 let expressions = s.expression_list().map(|e| e.expressions()).unwrap_or_default();
                 let types = self.expression_list(&expressions, targets.len());
-                for (target, types) in targets.iter().zip(types) {
+                for (i, (target, types)) in targets.iter().zip(types).enumerate() {
                     match target.simple_name() {
-                        Some(name) => self.write(&name, types),
+                        Some(name) => {
+                            self.write(&name, types);
+                            if let Some(Expression::Function(def)) = expressions.get(i) {
+                                let binding = self.resolve(name.text());
+                                self.assigned_to.insert(function_id(def), binding);
+                            }
+                        }
                         // `t.x = 1` reads `t`. Field types aren't tracked yet
                         None => self.identifier_parts(target.syntax()),
                     }
@@ -669,9 +832,12 @@ impl<'a> Walker<'a> {
                 w.pop_scope();
             }),
             Statement::If(s) => {
-                for branch in s.if_branches() {
+                for (i, branch) in s.if_branches().iter().enumerate() {
                     if let Some(condition) = branch.expression() {
+                        // An `elseif` condition only runs if the ones before failed
+                        self.short_circuit_depth += usize::from(i > 0);
                         self.expression(&condition);
+                        self.short_circuit_depth -= usize::from(i > 0);
                     }
                     self.block(branch.block(), true);
                 }
@@ -724,13 +890,16 @@ impl<'a> Walker<'a> {
                 if def.is_local() {
                     // Declared before the body so the function can call itself
                     if let Some(name) = def.local_name() {
-                        self.declare(&name, BindingKind::Local, Type::function(function_id(def)));
+                        let binding = self.declare(&name, BindingKind::Local, Type::function(function_id(def)));
+                        self.assigned_to.insert(function_id(def), binding);
                     }
                     self.function_body(def, false);
                 } else if let Some(identifier) = def.identifier() {
                     match identifier.simple_name() {
                         Some(name) => {
                             self.write(&name, Type::function(function_id(def)));
+                            let binding = self.resolve(name.text());
+                            self.assigned_to.insert(function_id(def), binding);
                             self.function_body(def, false);
                         }
                         None => {
@@ -763,10 +932,13 @@ impl<'a> Walker<'a> {
     }
 
     fn function_body(&mut self, def: &FunctionDefinition, has_self: bool) -> FunctionId {
+        let id = function_id(def);
         let outer_function = self.function;
         self.function_count += 1;
         self.function = self.function_count;
         self.push_scope(true);
+        let outer_function_scope = std::mem::replace(&mut self.function_scope, self.scopes.len() - 1);
+        let outer_short_circuit = std::mem::take(&mut self.short_circuit_depth);
         self.returns.push(None);
         if has_self {
             let depth = self.scopes.len() - 1;
@@ -777,9 +949,12 @@ impl<'a> Walker<'a> {
         }
         let params = def.params();
         let parameters = params.as_ref().map(|p| p.parameter_tokens()).unwrap_or_default();
-        for param in &parameters {
-            self.declare(param, BindingKind::Parameter, Type::UNKNOWN);
-        }
+        let parameter_bindings: Vec<BindingId> = parameters.iter().enumerate()
+            .map(|(i, param)| {
+                let types = self.prior_parameter_types(id, i);
+                self.declare(param, BindingKind::Parameter, types)
+            })
+            .collect();
         let block = def.block();
         if let Some(block) = &block {
             self.statements(block);
@@ -793,14 +968,67 @@ impl<'a> Walker<'a> {
         };
         self.pop_scope();
         self.function = outer_function;
+        self.function_scope = outer_function_scope;
+        self.short_circuit_depth = outer_short_circuit;
 
-        let id = function_id(def);
-        self.functions.insert(id, FunctionInfo {
-            parameters: parameters.iter().map(|p| p.text().to_string()).collect(),
-            varargs: params.is_some_and(|p| p.ellipsis()),
-            returns,
-        });
+        let parameters = parameters.iter().zip(&parameter_bindings).map(|(token, binding)| Parameter {
+            name: token.text().to_string(),
+            // Replaced by `settle_parameter_types` once all calls are seen
+            types: self.current[*binding],
+            mandated: self.mandates.get(binding).copied().flatten(),
+        }).collect();
+        let varargs = params.is_some_and(|p| p.ellipsis())
+            .then(|| Parameter { name: "...".to_string(), types: Type::UNKNOWN, mandated: None });
+        self.functions.insert(id, FunctionInfo { parameters, varargs, returns });
         id
+    }
+
+    fn prior_parameter_types(&self, id: FunctionId, index: usize) -> Type {
+        self.prior
+            .and_then(|prior| prior.functions.get(&id))
+            .and_then(|function| function.parameters.get(index))
+            .map_or(Type::UNKNOWN, |parameter| parameter.types)
+    }
+
+    /// The function being called, as far as this walk knows it
+    fn known_function(&self, function: FunctionRef) -> Option<&FunctionInfo> {
+        match function {
+            FunctionRef::One(id) => self.functions.get(&id).or_else(|| self.prior?.functions.get(&id)),
+            FunctionRef::Builtin(id) => self.definitions.function(id),
+            _ => None,
+        }
+    }
+
+    /// Whether the current point runs every time the current function does
+    fn runs_unconditionally(&self) -> bool {
+        self.function != MAIN_CHUNK
+            && self.short_circuit_depth == 0
+            && self.scopes[self.function_scope + 1..].iter().all(|scope| !scope.conditional)
+    }
+
+    fn local_binding(&self, name: &str) -> Option<BindingId> {
+        self.scopes.iter().rev().find_map(|scope| scope.names.get(name).copied())
+    }
+
+    /// Parameters of the current function passed straight on as arguments that
+    /// require one type have to be that type, if the call always runs and the
+    /// parameter still holds what the caller passed
+    fn require_arguments(&mut self, arguments: &[Expression], required: &[Option<Type>]) {
+        if !self.runs_unconditionally() {
+            return
+        }
+        for (argument, required) in arguments.iter().zip(required) {
+            let (Some(required), Expression::Identifier(identifier)) = (required, argument) else { continue };
+            let Some(id) = identifier.simple_name().and_then(|name| self.local_binding(name.text())) else { continue };
+            let binding = &self.bindings[id];
+            if binding.kind != BindingKind::Parameter || binding.function != self.function || binding.reassigned {
+                continue
+            }
+            let mandate = self.mandates.entry(id).or_insert(Some(*required));
+            if *mandate != Some(*required) {
+                *mandate = None;
+            }
+        }
     }
 
     fn returns_of(&self, id: FunctionId) -> Values {
@@ -857,10 +1085,17 @@ impl<'a> Walker<'a> {
             Expression::FunctionCall(call) => self.function_call(call).first(),
             Expression::Identifier(identifier) => match identifier.simple_name() {
                 Some(name) => self.read(&name),
-                None => {
-                    self.identifier_parts(identifier.syntax());
-                    self.builtin_field(identifier).unwrap_or(Type::UNKNOWN)
-                }
+                None => match field_access(identifier.syntax()) {
+                    // `a.b`: field `b` of whatever `a` is
+                    Some((base, field)) => {
+                        let base = self.expression(&base);
+                        self.definitions.field(base, field.text()).unwrap_or(Type::UNKNOWN)
+                    }
+                    None => {
+                        self.identifier_parts(identifier.syntax());
+                        Type::UNKNOWN
+                    }
+                },
             },
             Expression::GroupedExpression(g) => match g.get_expression() {
                 Some(e) => self.expression(&e),
@@ -881,21 +1116,36 @@ impl<'a> Walker<'a> {
     }
 
     fn function_call(&mut self, call: &FunctionCall) -> Values {
-        let callee = call.callee().map(|callee| self.expression(&callee));
-        for argument in call.arguments() {
-            self.expression(&argument);
-        }
-        if call.method_name().is_some() {
-            // `a:m()` calls a field of `a`, and fields aren't tracked yet
-            return Values::unknown();
-        }
-        match callee {
-            Some(Type { set, function: FunctionRef::One(id) }) if set.contains(TypeSet::FUNCTION) => self.returns_of(id),
-            Some(Type { set, function: FunctionRef::Builtin(id) }) if set.contains(TypeSet::FUNCTION) => {
-                self.definitions.function(id).map_or_else(Values::unknown, |f| f.returns.clone())
+        let is_method = call.method_name().is_some();
+        let callee = call.callee().map(|callee| {
+            let types = self.expression(&callee);
+            if !is_method && matches!(&callee, Expression::Identifier(i) if i.simple_name().is_some()) {
+                // The read `expression` just recorded
+                if let Some(reference) = self.references.last_mut() {
+                    reference.callee = true;
+                }
             }
-            _ => Values::unknown(),
-        }
+            types
+        });
+        let arguments = call.arguments();
+        let argument_types = self.expression_values(&arguments);
+        // `a:m()` calls a field of `a`, and fields aren't tracked yet
+        let Some(callee) = callee.filter(|c| !is_method && c.set.contains(TypeSet::FUNCTION)) else {
+            return Values::unknown()
+        };
+        let Some(function) = self.known_function(callee.function) else { return Values::unknown() };
+        let required: Vec<Option<Type>> = (0..arguments.len()).map(|i| function.mandated(i)).collect();
+        let returns = match callee.function {
+            FunctionRef::One(id) => {
+                self.call_arguments.entry(id)
+                    .and_modify(|all| *all = all.union(&argument_types))
+                    .or_insert(argument_types);
+                self.returns_of(id)
+            }
+            _ => function.returns.clone(),
+        };
+        self.require_arguments(&arguments, &required);
+        returns
     }
 
     /// Visits the variable reads in `a.b`, `a[k]`, `a:m(x).y` and similar: the
@@ -954,10 +1204,19 @@ impl<'a> Walker<'a> {
     fn binary_expression(&mut self, b: &BinaryExpression) -> Type {
         let mut operands = Vec::new();
         let mut operators = Vec::new();
+        // Anything after an `and`/`or` might not run
+        let mut short_circuited = false;
         for part in b.flatten() {
             match part {
-                BinaryPart::Operand(e) => operands.push(self.expression(&e)),
-                BinaryPart::Operator(op) => operators.push(op),
+                BinaryPart::Operand(e) => {
+                    self.short_circuit_depth += usize::from(short_circuited);
+                    operands.push(self.expression(&e));
+                    self.short_circuit_depth -= usize::from(short_circuited);
+                }
+                BinaryPart::Operator(op) => {
+                    short_circuited |= matches!(op, Operator::And | Operator::Or);
+                    operators.push(op);
+                }
             }
         }
         if operands.len() != operators.len() + 1 {
@@ -969,22 +1228,17 @@ impl<'a> Walker<'a> {
     }
 }
 
-/// `a.b.c` as (a, [b, c]); None for anything with indexing, calls or methods
-fn dotted_path(node: &SyntaxNode) -> Option<(SyntaxToken, Vec<String>)> {
-    let identifier = Identifier::cast(node.clone())?;
-    if let Some(name) = identifier.simple_name() {
-        return Some((name, Vec::new()))
-    }
+/// `a.b` as (`a`, `b`), for an expression `a` and a field name `b`. None for
+/// indexing (`a[b]`) and plain names
+fn field_access(node: &SyntaxNode) -> Option<(Expression, SyntaxToken)> {
     let mut significant = node.children_with_tokens()
         .filter(|t| !matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment));
-    let (Some(NodeOrToken::Node(inner)), Some(NodeOrToken::Token(dot)), Some(NodeOrToken::Token(field)), None) =
+    let (Some(NodeOrToken::Node(base)), Some(NodeOrToken::Token(dot)), Some(NodeOrToken::Token(field)), None) =
         (significant.next(), significant.next(), significant.next(), significant.next()) else { return None };
     if dot.kind() != SyntaxKind::Dot || field.kind() != SyntaxKind::Name {
         return None
     }
-    let (base, mut fields) = dotted_path(&inner)?;
-    fields.push(field.text().to_string());
-    Some((base, fields))
+    Some((Expression::cast(base)?, field))
 }
 
 fn function_id(def: &FunctionDefinition) -> FunctionId {
@@ -1147,7 +1401,7 @@ mod tests {
         assert_eq!(types_of("local x = 1 for i = 1, 2 do local y = x x = {} end", "y"), ["number|table"]);
         assert_eq!(types_of("local x = 1 for k in pairs(t) do local y = x x = {} end", "y"), ["number|table"]);
         // The `while` condition is checked again after each iteration
-        assert_eq!(types_of("local x = 1 while x do x = nil end", "x"), ["number", "number|nil", "nil"]);
+        assert_eq!(types_of("local x = 1 while x do x = nil end", "x"), ["number", "number?", "nil"]);
         // Unchanged types need no extra pass
         assert_eq!(types_of("local x = 1 while c do local y = x end", "y"), ["number"]);
     }
@@ -1283,11 +1537,11 @@ mod tests {
     fn returns_from_every_path() {
         assert_eq!(types_of("local function f(x) if x then return 1 end return 's' end local y = f()", "y"), ["number|string"]);
         // Falling off the end returns nothing
-        assert_eq!(types_of("local function f(x) if x then return 1 end end local y = f()", "y"), ["number|nil"]);
+        assert_eq!(types_of("local function f(x) if x then return 1 end end local y = f()", "y"), ["number?"]);
         assert_eq!(types_of("local function f(x) if x then return 1 else return 2 end end local y = f()", "y"), ["number"]);
-        assert_eq!(types_of("local function f(x) if x then return 1 elseif z then return 2 end end local y = f()", "y"), ["number|nil"]);
+        assert_eq!(types_of("local function f(x) if x then return 1 elseif z then return 2 end end local y = f()", "y"), ["number?"]);
         assert_eq!(types_of("local function f() do return 1 end end local y = f()", "y"), ["number"]);
-        assert_eq!(types_of("local function f() while c do return 1 end end local y = f()", "y"), ["number|nil"]);
+        assert_eq!(types_of("local function f() while c do return 1 end end local y = f()", "y"), ["number?"]);
         assert_eq!(types_of("local function f() end local y = f()", "y"), ["nil"]);
         assert_eq!(types_of("local function f() return end local y = f()", "y"), ["nil"]);
     }
@@ -1328,7 +1582,7 @@ mod tests {
     fn signatures() {
         assert_eq!(types_of("local function f(a, ...) return 1, 's' end", "f"), ["function(a, ...) -> number, string"]);
         assert_eq!(types_of("local function f() return g() end", "f"), ["function() -> ..."]);
-        assert_eq!(types_of("local function f(x) if x then return 1 end end", "f"), ["function(x) -> number|nil"]);
+        assert_eq!(types_of("local function f(x) if x then return 1 end end", "f"), ["function(x) -> number?"]);
         assert_eq!(types_of("local function f() return 1 end local g = c and f", "g"), ["false|(function() -> number)|nil"]);
         assert_eq!(types_of("local function f() return f end", "f"), ["function() -> function", "function() -> function"]);
     }
@@ -1336,10 +1590,14 @@ mod tests {
     fn builtins() -> Arc<Definitions> {
         Arc::new(Definitions::from_json(r#"{"functions": {
             "tostring": {"parameters": ["value"], "returns": ["string"]},
-            "tonumber": {"parameters": ["value", "base"], "returns": ["number|nil"]},
+            "tonumber": {"parameters": ["value", "base: number|nil"], "returns": ["number|nil"]},
             "select": {"parameters": ["index", "..."], "returns": ["unknown"], "rest": "unknown"},
-            "string.format": {"parameters": ["format", "..."], "returns": ["string"]},
-            "a.b.c": {"returns": ["table"]}
+            "floor": {"parameters": ["x: number"], "returns": ["number"]},
+            "max": {"parameters": ["x: number", "...: number"], "returns": ["number"]},
+            "strlen": {"parameters": ["s: string"], "returns": ["number"]}
+        }, "tables": {
+            "string": {"functions": {"format": {"parameters": ["format: string", "..."], "returns": ["string"]}}},
+            "a": {"tables": {"b": {"functions": {"c": {"returns": ["table"]}}}}}
         }}"#).unwrap())
     }
 
@@ -1350,7 +1608,7 @@ mod tests {
     #[test]
     fn preset_globals() {
         assert_eq!(builtin_types_of("local x = tostring(1)", "x"), ["string"]);
-        assert_eq!(builtin_types_of("local x = tonumber('1')", "x"), ["number|nil"]);
+        assert_eq!(builtin_types_of("local x = tonumber('1')", "x"), ["number?"]);
         assert_eq!(builtin_types_of("local x = tostring", "x"), ["function(value) -> string"]);
         assert_eq!(builtin_types_of("local x, y = select(2, 'a', 'b')", "y"), ["unknown"]);
         assert_eq!(builtin_types_of("local x = undefined()", "x"), ["unknown"]);
@@ -1371,6 +1629,12 @@ mod tests {
         assert_eq!(builtin_types_of("local f = string.format local x = f()", "x"), ["string"]);
         assert_eq!(builtin_types_of("local x = a.b.c()", "x"), ["table"]);
         assert_eq!(builtin_types_of("local x = string.nope()", "x"), ["unknown"]);
+        // Members are fields of the table, so they work through other variables
+        assert_eq!(builtin_types_of("local s = string local x = s.format('%d', 1)", "x"), ["string"]);
+        assert_eq!(builtin_types_of("local string = string function F() local x = string.format() end", "x"), ["string"]);
+        assert_eq!(builtin_types_of("local b = a.b local x = b.c()", "x"), ["table"]);
+        // A namespace is shown as a plain table
+        assert_eq!(builtin_types_of("local s = string", "s"), ["table"]);
         assert_eq!(builtin_types_of("local x = string['format']()", "x"), ["unknown"]);
         // A local named `string` isn't the library
         assert_eq!(builtin_types_of("local string = {} local x = string.format()", "x"), ["unknown"]);
@@ -1383,6 +1647,146 @@ mod tests {
         assert_eq!(builtin_types_of("local x = tostring() tostring = nil", "x"), ["unknown"]);
         assert_eq!(builtin_types_of("local function tostring() return {} end local x = tostring()", "x"), ["table"]);
         assert_eq!(builtin_types_of("string = {} local x = string.format()", "x"), ["unknown"]);
+    }
+
+    #[test]
+    fn mandated_parameters() {
+        assert_eq!(builtin_types_of("local function f(x) return floor(x) end", "x"), ["number", "number"]);
+        assert_eq!(builtin_types_of("local function f(s) return string.format(s) end", "s"), ["string", "string"]);
+        // Varargs can require a type too
+        assert_eq!(builtin_types_of("local function f(a, b) return max(a, b) end", "b"), ["number", "number"]);
+        // Globals and methods can be called from anywhere, but still have to obey
+        assert_eq!(builtin_types_of("function T:m(x) return strlen(x) end", "x"), ["string", "string"]);
+        assert_eq!(builtin_types_of("function F(x) local y = floor(x) end", "x"), ["number", "number"]);
+        // What the body requires beats what callers pass
+        assert_eq!(builtin_types_of("local function f(x) return floor(x) end f('1')", "x"), ["number", "number"]);
+    }
+
+    #[test]
+    fn requirements_must_always_run() {
+        let unknown = ["unknown", "unknown"];
+        assert_eq!(builtin_types_of("function F(x) if c then floor(x) end end", "x"), unknown);
+        assert_eq!(builtin_types_of("function F(x) if type(x) == 'number' then return floor(x) end end", "x")[..1], ["unknown"]);
+        assert_eq!(builtin_types_of("function F(x) while c do floor(x) end end", "x"), unknown);
+        assert_eq!(builtin_types_of("function F(x) return c and floor(x) end", "x"), unknown);
+        assert_eq!(builtin_types_of("function F(x) return floor(x) or 1 end", "x"), ["number", "number"]);
+        assert_eq!(builtin_types_of("function F(x) if c then elseif floor(x) then end end", "x"), unknown);
+        assert_eq!(builtin_types_of("function F(x) if floor(x) then end end", "x"), ["number", "number"]);
+        // A closure might never be called
+        assert_eq!(builtin_types_of("function F(x) return function() floor(x) end end", "x"), unknown);
+        // After reassignment, the call isn't seeing the caller's value
+        assert_eq!(builtin_types_of("function F(x) x = x or 1 floor(x) end", "x")[0], "unknown");
+        // Optional parameters and ones taking anything don't require a type
+        assert_eq!(builtin_types_of("function F(x) tonumber('1', x) tostring(x) end", "x"), ["unknown"; 3]);
+    }
+
+    #[test]
+    fn conflicting_requirements_are_ignored() {
+        assert_eq!(builtin_types_of("function F(x) floor(x) strlen(x) end", "x"), ["unknown"; 3]);
+    }
+
+    #[test]
+    fn requirements_pass_through_user_functions() {
+        let source = "local function g(n) return floor(n) end function F(x) g(x) end";
+        assert_eq!(builtin_types_of(source, "x"), ["number", "number"]);
+        // Even when the required function is defined further down
+        let source = "function F(x) G(x) end function G(n) return floor(n) end";
+        assert_eq!(builtin_types_of(source, "x"), ["number", "number"]);
+    }
+
+    #[test]
+    fn parameters_from_call_sites() {
+        assert_eq!(types_of("local function f(x) return x end f(1) f('a')", "x"), ["number|string", "number|string"]);
+        assert_eq!(types_of("local function f(x) return x end local y = f(1)", "y"), ["number"]);
+        assert_eq!(types_of("local function f(a, b) end f(1)", "b"), ["nil"]);
+        assert_eq!(types_of("local f = function(x) end f({})", "x"), ["table"]);
+        // Calls from inside other functions count too
+        assert_eq!(types_of("local function f(x) end function G() f(true) end", "x"), ["true"]);
+        // Never called, so there's nothing to go on
+        assert_eq!(types_of("local function f(x) end", "x"), ["unknown"]);
+        // Arguments expand like any other expression list
+        assert_eq!(types_of("local function g() return 1, 's' end local function f(a, b) end f(g())", "b"), ["string"]);
+    }
+
+    #[test]
+    fn call_site_types_chain_through_functions() {
+        let source = "local function c(z) end local function b(y) c(y) end local function a(x) b(x) end a(1)";
+        assert_eq!(types_of(source, "z"), ["number"]);
+        let source = "local function f(n) if n > 0 then return f(n - 1) end return 0 end f(10)";
+        assert_eq!(types_of(source, "n")[0], "number");
+    }
+
+    #[test]
+    fn escaping_functions_have_unknown_parameters() {
+        // Stored, passed on, returned, or global: other callers could pass anything
+        assert_eq!(types_of("local function f(x) end f(1) T.cb = f", "x"), ["unknown"]);
+        assert_eq!(types_of("local function f(x) end f(1) pcall(f, 's')", "x"), ["unknown"]);
+        assert_eq!(types_of("local function f(x) end f(1) local g = f", "x"), ["unknown"]);
+        assert_eq!(types_of("local function f(x) end f(1) return f", "x"), ["unknown"]);
+        assert_eq!(types_of("function F(x) end F(1)", "x"), ["unknown"]);
+        assert_eq!(types_of("local t = {} function t.f(x) end t.f(1)", "x"), ["unknown"]);
+        assert_eq!(types_of("pcall(function(x) end, 1)", "x"), ["unknown"]);
+        // Holding two different functions, so a call doesn't say which one ran
+        assert_eq!(types_of("local f = function(x) end f = function(y) end f(1)", "x"), ["unknown"]);
+    }
+
+    #[test]
+    fn typed_signatures() {
+        assert_eq!(builtin_types_of("local function f(x, y) return floor(x) end f(1, 's')", "f")[0], "function(x: number, y: string) -> number");
+        assert_eq!(builtin_types_of("local f = string.format", "f"), ["function(format: string, ...) -> string"]);
+        assert_eq!(builtin_types_of("local f = max", "f"), ["function(x: number, ...: number) -> number"]);
+    }
+
+    #[test]
+    fn optional_types() {
+        assert_eq!(types_of("local x = c and 1 or nil", "x"), ["number?"]);
+        // More than one other type keeps `|nil`, as `number|string?` would be ambiguous
+        assert_eq!(types_of("local x = c and 1 or (d and 's' or nil)", "x"), ["number|string|nil"]);
+        assert_eq!(types_of("local x = nil", "x"), ["nil"]);
+        assert_eq!(types_of("local x = c and f or nil local y = x", "y"), ["unknown (not false)"]);
+        assert_eq!(types_of("local function f() return 1 end local g = c and f or nil", "g"), ["(function() -> number)?"]);
+    }
+
+    fn objects() -> Arc<Definitions> {
+        Arc::new(Definitions::from_json(r#"{
+            "types": {"Frame": {"base": "table"}, "Texture": {"base": "table"}, "Curve": {"base": "userdata"}},
+            "functions": {
+                "CreateFrame": {"parameters": ["frameType: string"], "returns": ["Frame"]},
+                "GetMouseFocus": {"returns": ["Frame|nil"]},
+                "CreateCurve": {"returns": ["Curve"]},
+                "GetTexture": {"returns": ["Texture"]},
+                "SetPortrait": {"parameters": ["texture: Texture"]}
+            }
+        }"#).unwrap())
+    }
+
+    fn object_types_of(source: &str, name: &str) -> Vec<String> {
+        describe_uses(&analyse_with(source, &objects()), name)
+    }
+
+    #[test]
+    fn named_object_types() {
+        assert_eq!(object_types_of("local f = CreateFrame('Frame')", "f"), ["Frame"]);
+        assert_eq!(object_types_of("local f = GetMouseFocus()", "f"), ["Frame?"]);
+        assert_eq!(object_types_of("local c = CreateCurve()", "c"), ["Curve"]);
+        assert_eq!(object_types_of("local f = CreateFrame", "f"), ["function(frameType: string) -> Frame"]);
+        // Still a table, so table operations keep it
+        assert_eq!(object_types_of("local f = GetMouseFocus() or CreateFrame('Frame')", "f"), ["Frame"]);
+    }
+
+    #[test]
+    fn mixing_named_types() {
+        // Different named types, or a named type and a plain table, are just a table
+        assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or GetTexture()", "f"), ["table"]);
+        assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or {}", "f"), ["table"]);
+        assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or 1", "f"), ["number|Frame"]);
+        assert_eq!(object_types_of("local f = CreateFrame('Frame') if c then f = CreateFrame('Frame') end local g = f", "g"), ["Frame"]);
+    }
+
+    #[test]
+    fn named_parameter_requirements() {
+        assert_eq!(object_types_of("function F(t) SetPortrait(t) end", "t"), ["Texture", "Texture"]);
+        assert_eq!(object_types_of("local function f(t) end f(CreateFrame('Frame'))", "t"), ["Frame"]);
     }
 
     #[test]

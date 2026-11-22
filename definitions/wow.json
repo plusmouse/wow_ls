@@ -1,35 +1,5 @@
 {
   "functions": {
-    "CreateFrame": { "parameters": ["frameType", "name", "parent", "template", "id"], "returns": ["table"] },
-    "debugprofilestop": { "parameters": [], "returns": ["number"] },
-    "GetAddOnMetadata": { "parameters": ["addon", "field"], "returns": ["string|nil"] },
-    "GetBuildInfo": { "parameters": [], "returns": ["string", "string", "string", "number"] },
-    "GetCursorPosition": { "parameters": [], "returns": ["number", "number"] },
-    "GetFramerate": { "parameters": [], "returns": ["number"] },
-    "GetLocale": { "parameters": [], "returns": ["string"] },
-    "GetMoney": { "parameters": [], "returns": ["number"] },
-    "GetRealmName": { "parameters": [], "returns": ["string"] },
-    "GetServerTime": { "parameters": [], "returns": ["number"] },
-    "GetTime": { "parameters": [], "returns": ["number"] },
-    "InCombatLockdown": { "parameters": [], "returns": ["boolean"] },
-    "IsAltKeyDown": { "parameters": [], "returns": ["boolean"] },
-    "IsControlKeyDown": { "parameters": [], "returns": ["boolean"] },
-    "IsInGroup": { "parameters": ["category"], "returns": ["boolean"] },
-    "IsInRaid": { "parameters": ["category"], "returns": ["boolean"] },
-    "IsModifierKeyDown": { "parameters": [], "returns": ["boolean"] },
-    "IsShiftKeyDown": { "parameters": [], "returns": ["boolean"] },
-    "UnitClass": { "parameters": ["unit"], "returns": ["string", "string", "number"] },
-    "UnitExists": { "parameters": ["unit"], "returns": ["boolean"] },
-    "UnitFactionGroup": { "parameters": ["unit"], "returns": ["string|nil", "string|nil"] },
-    "UnitGUID": { "parameters": ["unit"], "returns": ["string|nil"] },
-    "UnitHealth": { "parameters": ["unit"], "returns": ["number"] },
-    "UnitHealthMax": { "parameters": ["unit"], "returns": ["number"] },
-    "UnitIsDead": { "parameters": ["unit"], "returns": ["boolean"] },
-    "UnitIsPlayer": { "parameters": ["unit"], "returns": ["boolean"] },
-    "UnitLevel": { "parameters": ["unit"], "returns": ["number"] },
-    "UnitName": { "parameters": ["unit"], "returns": ["string|nil", "string|nil"] },
-    "UnitPower": { "parameters": ["unit", "powerType", "unmodified"], "returns": ["number"] },
-    "UnitPowerMax": { "parameters": ["unit", "powerType", "unmodified"], "returns": ["number"] },
-    "UnitRace": { "parameters": ["unit"], "returns": ["string", "string", "number"] }
+    "CreateFrame": {"parameters": ["frameType: string", "name: string|nil", "parent: Frame|nil", "template: string|nil", "id: number|nil"], "returns": ["Frame"]}
   }
 }
