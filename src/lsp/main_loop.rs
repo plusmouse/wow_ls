@@ -14,7 +14,7 @@
 //along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crate::syntax::{
     syntax, SyntaxNode, SyntaxKind
@@ -30,8 +30,9 @@ use lsp_server::{Connection, ExtractError, Message, Notification, Request, Reque
 use rowan::{TextSize, TokenAtOffset};
 
 use crate::lsp::diagnostics;
-use crate::types;
+use crate::types::{Analysis, FileId};
 use crate::definitions::{self, Definitions};
+use crate::project::{self, Addon};
 
 pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
     // Note that  we must have our logging only write out to stderr.
@@ -49,6 +50,13 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
         .and_then(|o| o.get("definitionsPath"))
         .and_then(|p| p.as_str())
         .map(PathBuf::from);
+    // Where to look for addons (`.toc` files)
+    #[allow(deprecated)]
+    let root = init_params.workspace_folders.as_ref()
+        .and_then(|folders| folders.first())
+        .map(|folder| folder.uri.to_string())
+        .or_else(|| init_params.root_uri.as_ref().map(|uri| uri.to_string()))
+        .and_then(|uri| project::uri_to_path(&uri));
     let _client_capabilities: ClientCapabilities = init_params.capabilities;
     let server_capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -66,14 +74,70 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
 
     connection.initialize_finish(id, initialize_data)?;
 
-    main_loop(connection, definitions_path)
+    main_loop(connection, definitions_path, root)
 }
 
-fn main_loop(connection: Connection, definitions_path: Option<PathBuf>) -> Result<(), Box<dyn Error + Sync + Send>> {
+/// What's known about the workspace's addons, built when first needed
+#[derive(Default)]
+struct Workspace {
+    root: Option<PathBuf>,
+    /// Found the first time they're needed, and again after a `.toc` changes
+    addons: Option<Vec<Addon>>,
+    /// Text of open documents, which is used instead of what's on disk
+    open: HashMap<PathBuf, String>,
+    /// Each addon's analysis, by its `.toc`, until one of its files changes
+    analyses: HashMap<PathBuf, Arc<(Analysis, Vec<PathBuf>)>>,
+}
+
+impl Workspace {
+    fn addons(&mut self) -> &[Addon] {
+        if self.addons.is_none() {
+            self.addons = Some(self.root.as_deref().map(project::discover).unwrap_or_default());
+        }
+        self.addons.as_deref().unwrap_or_default()
+    }
+
+    /// A document's text changed (or was opened)
+    fn changed(&mut self, path: PathBuf, text: String) {
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("toc")) {
+            self.addons = None;
+            self.analyses.clear();
+        }
+        let path = project::normalise(&path);
+        let affected: Vec<PathBuf> = self.addons.iter().flatten()
+            .filter(|addon| addon.contains(&path))
+            .map(|addon| addon.toc.clone())
+            .collect();
+        for toc in affected {
+            self.analyses.remove(&toc);
+        }
+        self.open.insert(path, text);
+    }
+
+    /// The analysis covering `path`, and its id in that analysis: its whole
+    /// addon's if it's in one, otherwise just the file (`root`)
+    fn analysis(&mut self, path: Option<&Path>, root: &SyntaxNode, definitions: &Arc<Definitions>) -> (Arc<(Analysis, Vec<PathBuf>)>, FileId) {
+        if let Some(path) = path.map(project::normalise) {
+            if let Some(addon) = project::addon_for(self.addons(), &path).cloned() {
+                let open = &self.open;
+                let analysis = self.analyses.entry(addon.toc.clone())
+                    .or_insert_with(|| Arc::new(addon.analyse(open, definitions)))
+                    .clone();
+                if let Some(index) = analysis.1.iter().position(|p| *p == path) {
+                    return (analysis, FileId(index as u32))
+                }
+            }
+        }
+        (Arc::new((Analysis::analyse_file(root, definitions), Vec::new())), FileId(0))
+    }
+}
+
+fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Option<PathBuf>) -> Result<(), Box<dyn Error + Sync + Send>> {
     // Loaded the first time types are needed, not at startup
     let mut loaded_definitions: Option<Arc<Definitions>> = None;
     let mut language: HashMap<String, String> = HashMap::new();
     let mut text: HashMap<String, String> = HashMap::new();
+    let mut workspace = Workspace { root, ..Workspace::default() };
 
     for msg in &connection.receiver {
         //eprintln!("got msg: {msg:?}");
@@ -126,11 +190,14 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>) -> Resul
                             let definitions = loaded_definitions
                                 .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
                                 .clone();
-                            let file_types = types::FileTypes::analyse(&all, &definitions);
-                            let (output, text_range) = match file_types.reference_at(TextSize::from(offset)) {
+                            let uri = params.text_document_position_params.text_document.uri.to_string();
+                            let path = project::uri_to_path(&uri);
+                            let (analysis, file) = workspace.analysis(path.as_deref(), &all, &definitions);
+                            let analysis = &analysis.0;
+                            let (output, text_range) = match analysis.reference_at(file, TextSize::from(offset)) {
                                 Some(r) => {
-                                    let binding = file_types.binding(r);
-                                    (format!("{} {}: {}", binding.kind, binding.name, file_types.describe(r.types)), r.range)
+                                    let binding = analysis.binding(r);
+                                    (format!("{} {}: {}", binding.kind, binding.name, analysis.describe(r.types)), r.range)
                                 }
                                 None => {
                                     let n = node.ancestors().filter(|a| a.kind() != SyntaxKind::Identifier).nth(0);
@@ -167,6 +234,9 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>) -> Resul
                 match &*not.method {
                     "textDocument/didChange" => {
                         if let Ok(params) = cast_not::<notification::DidChangeTextDocument>(not) {
+                            if let (Some(path), Some(change)) = (project::uri_to_path(&params.text_document.uri.to_string()), params.content_changes.first()) {
+                                workspace.changed(path, change.text.clone());
+                            }
                             if let Some(l) = language.get(&params.text_document.uri.to_string()) {
                                 if l == "lua" {
                                     text.remove(&params.text_document.uri.to_string());
@@ -180,6 +250,9 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>) -> Resul
                         if let Ok(params) = cast_not::<notification::DidOpenTextDocument>(not) {
                             language.insert(params.text_document.uri.to_string(), params.text_document.language_id.clone());
                             text.insert(params.text_document.uri.to_string(), params.text_document.text.clone());
+                            if let Some(path) = project::uri_to_path(&params.text_document.uri.to_string()) {
+                                workspace.changed(path, params.text_document.text.clone());
+                            }
                             if params.text_document.language_id == "lua" {
                                 diagnostics::get(&connection, params.text_document.uri, &params.text_document.text);
                             }

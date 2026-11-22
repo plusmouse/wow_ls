@@ -1,0 +1,7 @@
+## Interface: 110200
+## Title: Test Addon
+## Notes: Fixture for wow_ls's multi-file analysis
+
+Core.lua
+Util.lua
+Main.lua

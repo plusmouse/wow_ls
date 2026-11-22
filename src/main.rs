@@ -24,6 +24,7 @@ mod state;
 mod diagnostics;
 mod types;
 mod definitions;
+mod project;
 mod ast;
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
@@ -45,20 +46,32 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         //println!("syntax: {:?}", dur);
         Ok(())
     } else if args.len() > 2 && args[1] == "types" {
-        let s = std::fs::read_to_string(&args[2])?;
-        let numbers = line_numbers::LinePositions::from(s.as_str());
-        let root = syntax::syntax::SyntaxNode::new_root(syntax::syntax::Generator::new(&s).process_all());
+        // A `.lua` file on its own, or a `.toc` for every file of its addon together
         let definitions = std::sync::Arc::new(definitions::load(None));
+        let target = std::path::Path::new(&args[2]);
         let before = std::time::Instant::now();
-        let file = types::FileTypes::analyse(&root, &definitions);
+        let (analysis, paths) = if target.extension().is_some_and(|e| e.eq_ignore_ascii_case("toc")) {
+            project::Addon::load(target)?.analyse(&Default::default(), &definitions)
+        } else {
+            let s = std::fs::read_to_string(target)?;
+            let root = syntax::syntax::SyntaxNode::new_root(syntax::syntax::Generator::new(&s).process_all());
+            (types::Analysis::analyse_file(&root, &definitions), vec![target.to_path_buf()])
+        };
         let dur = std::time::Instant::now() - before;
-        for r in &file.references {
-            let binding = file.binding(r);
-            let (line, column) = numbers.from_offset(usize::from(r.range.start()));
-            let access = if r.write { "=" } else { ":" };
-            println!("{}:{} {} {}{} {}", line.0 + 1, column + 1, binding.kind, binding.name, access, file.describe(r.types));
+        for (i, path) in paths.iter().enumerate() {
+            let text = std::fs::read_to_string(path)?;
+            let numbers = line_numbers::LinePositions::from(text.as_str());
+            if paths.len() > 1 {
+                println!("== {}", path.display());
+            }
+            for r in analysis.references.iter().filter(|r| r.file == types::FileId(i as u32)) {
+                let binding = analysis.binding(r);
+                let (line, column) = numbers.from_offset(usize::from(r.range.start()));
+                let access = if r.write { "=" } else { ":" };
+                println!("{}:{} {} {}{} {}", line.0 + 1, column + 1, binding.kind, binding.name, access, analysis.describe(r.types));
+            }
         }
-        eprintln!("{} bindings, {} references in {:?}", file.bindings.len(), file.references.len(), dur);
+        eprintln!("{} files, {} bindings, {} references in {:?}", paths.len(), analysis.bindings.len(), analysis.references.len(), dur);
         Ok(())
     } else {
         lsp::start_ls()

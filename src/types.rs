@@ -13,7 +13,7 @@
 //You should have received a copy of the GNU General Public License
 //along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Single-file type tracking for un-annotated Lua.
+//! Type tracking for un-annotated Lua, across the files of an addon.
 //!
 //! One walk over the tree resolves every variable name to a [`Binding`] (respecting
 //! scopes and shadowing) and records a [`Reference`] with the type the variable has
@@ -38,7 +38,12 @@
 //! * Values that can be functions remember which function (a [`FunctionRef`]),
 //!   and each function records what it returns, so calls have result types.
 //!
-//! The file is walked at least twice. On the first walk, reading an upvalue,
+//! Files are walked in load order (their `.toc` order) as one program: globals
+//! carry over from file to file, and functions and table fields are shared. In
+//! an addon, `...` at the top of a file is the addon's name and its namespace
+//! table, one table shared by all its files.
+//!
+//! The files are walked at least twice. On the first walk, reading an upvalue,
 //! calling a function defined further down, or reading a parameter gives
 //! unknown. Each later walk uses the previous walk's final types for those, which
 //! stays sound because every walk can only over-approximate. Walking stops when
@@ -172,7 +177,19 @@ impl fmt::Display for TypeSet {
 
 /// Identifies a function by where its definition starts, which is the same
 /// across walks and loop passes
-pub type FunctionId = TextSize;
+pub type FunctionId = Location;
+
+/// One file of an analysis, by its position in the list analysed
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct FileId(pub u32);
+
+/// A position in one of the files analysed. Identifies functions and tables
+/// the same way across walks
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Location {
+    pub file: FileId,
+    pub offset: TextSize,
+}
 
 /// Which function a value is, when it can be one
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -215,7 +232,7 @@ pub enum NamedRef {
 
 /// Where a table was made (its `{`), or where the variable given a pseudo
 /// identity was declared. The same across walks
-pub type TableId = TextSize;
+pub type TableId = Location;
 
 impl NamedRef {
     fn union(self, other: NamedRef) -> NamedRef {
@@ -405,6 +422,7 @@ pub struct Binding {
 
 #[derive(Debug)]
 pub struct Reference {
+    pub file: FileId,
     pub range: TextRange,
     pub binding: BindingId,
     /// The type at this point: the value read, or the value assigned for a write
@@ -414,10 +432,18 @@ pub struct Reference {
     pub callee: bool,
 }
 
+/// A file to analyse
+pub struct SourceFile {
+    pub root: SyntaxNode,
+    /// Whether the file is part of an addon, so `...` at its top is the addon's
+    /// name and namespace
+    pub in_addon: bool,
+}
+
 #[derive(Debug, Default)]
-pub struct FileTypes {
+pub struct Analysis {
     pub bindings: Vec<Binding>,
-    /// Sorted by position
+    /// Sorted by file, then position
     pub references: Vec<Reference>,
     pub functions: HashMap<FunctionId, FunctionInfo>,
     pub definitions: Arc<Definitions>,
@@ -427,11 +453,18 @@ pub struct FileTypes {
     pub any_table_fields: HashMap<String, Type>,
 }
 
-impl FileTypes {
-    pub fn analyse(root: &SyntaxNode, definitions: &Arc<Definitions>) -> FileTypes {
-        let mut result = Walker::new(None, definitions).walk(root);
+impl Analysis {
+    /// One file on its own
+    pub fn analyse_file(root: &SyntaxNode, definitions: &Arc<Definitions>) -> Analysis {
+        Analysis::analyse(&[SourceFile { root: root.clone(), in_addon: false }], definitions)
+    }
+
+    /// Files in the order they load, as one program. The `FileId`s in the
+    /// result are positions in `files`
+    pub fn analyse(files: &[SourceFile], definitions: &Arc<Definitions>) -> Analysis {
+        let mut result = Walker::new(None, definitions).walk(files);
         for _ in 1..MAX_WALKS {
-            let next = Walker::new(Some(&result), definitions).walk(root);
+            let next = Walker::new(Some(&result), definitions).walk(files);
             let settled = next.fields == result.fields
                 && next.any_table_fields == result.any_table_fields
                 && next.functions.iter().all(|(id, f)| {
@@ -505,10 +538,10 @@ impl FileTypes {
         signature
     }
 
-    pub fn reference_at(&self, offset: TextSize) -> Option<&Reference> {
-        let after = self.references.partition_point(|r| r.range.start() <= offset);
+    pub fn reference_at(&self, file: FileId, offset: TextSize) -> Option<&Reference> {
+        let after = self.references.partition_point(|r| (r.file, r.range.start()) <= (file, offset));
         let candidate = self.references.get(after.checked_sub(1)?)?;
-        candidate.range.contains_inclusive(offset).then_some(candidate)
+        (candidate.file == file && candidate.range.contains_inclusive(offset)).then_some(candidate)
     }
 
     pub fn binding(&self, reference: &Reference) -> &Binding {
@@ -525,7 +558,11 @@ struct Scope {
 #[derive(Default)]
 struct Walker<'a> {
     /// Results of the previous walk, used where this walk doesn't know yet
-    prior: Option<&'a FileTypes>,
+    prior: Option<&'a Analysis>,
+    /// The file being walked
+    file: FileId,
+    /// Whether that file is part of an addon
+    in_addon: bool,
     definitions: Arc<Definitions>,
     bindings: Vec<Binding>,
     /// Type of each binding at the current point of the walk
@@ -567,7 +604,12 @@ struct Snapshot {
     globals_created: usize,
 }
 
+/// Every file's top level, which run one after another
 const MAIN_CHUNK: usize = 0;
+
+/// The table every file of an addon gets as the second value of `...`. Not a
+/// real file position, so it can't clash with a table made in a file
+const ADDON_NAMESPACE: TableId = Location { file: FileId(u32::MAX), offset: TextSize::new(0) };
 
 /// Each walk past the second lets call-site parameter types pass one more step
 /// down a chain of calls (`a(1)` calling `b(x)` calling `c(y)`). The last walk is
@@ -581,20 +623,42 @@ pub const MAX_WALKS: usize = 4;
 const LOOP_PASSES_BEFORE_WIDENING: usize = 8;
 
 impl<'a> Walker<'a> {
-    fn new(prior: Option<&'a FileTypes>, definitions: &Arc<Definitions>) -> Walker<'a> {
+    fn new(prior: Option<&'a Analysis>, definitions: &Arc<Definitions>) -> Walker<'a> {
         Walker { prior, definitions: definitions.clone(), ..Walker::default() }
     }
 
-    fn walk(mut self, root: &SyntaxNode) -> FileTypes {
-        if let Some(block) = Block::cast(root.clone()) {
-            self.push_scope(false);
-            self.statements(&block);
-            self.pop_scope();
+    /// Each file's top level runs in turn, so globals continue from one file to
+    /// the next. Locals end with their file
+    fn walk(mut self, files: &[SourceFile]) -> Analysis {
+        for (i, file) in files.iter().enumerate() {
+            self.file = FileId(i as u32);
+            self.in_addon = file.in_addon;
+            if let Some(block) = Block::cast(file.root.clone()) {
+                self.push_scope(false);
+                self.statements(&block);
+                self.pop_scope();
+            }
         }
         self.finish()
     }
 
-    fn finish(mut self) -> FileTypes {
+    fn location(&self, offset: TextSize) -> Location {
+        Location { file: self.file, offset }
+    }
+
+    fn function_id(&self, def: &FunctionDefinition) -> FunctionId {
+        self.location(def.syntax().text_range().start())
+    }
+
+    /// `...` at the top of an addon's file: its name and namespace table
+    fn addon_arguments(&self) -> Option<Values> {
+        (self.in_addon && self.function == MAIN_CHUNK).then(|| Values {
+            values: vec![Type::of(TypeSet::STRING), Type::table(ADDON_NAMESPACE)],
+            rest: Type::NIL,
+        })
+    }
+
+    fn finish(mut self) -> Analysis {
         self.settle_parameter_types();
         for binding in self.bindings.iter_mut() {
             if binding.kind == BindingKind::Global && !binding.assigned {
@@ -605,8 +669,8 @@ impl<'a> Walker<'a> {
             let binding = self.references[index].binding;
             self.references[index].types = self.bindings[binding].types;
         }
-        self.references.sort_by_key(|r| r.range.start());
-        FileTypes {
+        self.references.sort_by_key(|r| (r.file, r.range.start()));
+        Analysis {
             bindings: self.bindings,
             references: self.references,
             functions: self.functions,
@@ -720,13 +784,13 @@ impl<'a> Walker<'a> {
     fn declare(&mut self, token: &SyntaxToken, kind: BindingKind, mut types: Type) -> BindingId {
         if types.named == NamedRef::Unknown {
             // A table we can't identify: track its fields under this variable
-            types.named = NamedRef::Table(token.text_range().start());
+            types.named = NamedRef::Table(self.location(token.text_range().start()));
         }
         let depth = self.scopes.len() - 1;
         let id = self.new_binding(token.text(), kind, Some(token.text_range()), types, self.function, depth);
         self.bindings[id].assigned = true;
         self.scopes[depth].names.insert(token.text().to_string(), id);
-        self.references.push(Reference { range: token.text_range(), binding: id, types, write: true, callee: false });
+        self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: true, callee: false });
         id
     }
 
@@ -761,7 +825,7 @@ impl<'a> Walker<'a> {
             self.prior_binding_types(id)
         };
         let types = self.builtin_global(id).unwrap_or(types);
-        self.references.push(Reference { range: token.text_range(), binding: id, types, write: false, callee: false });
+        self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: false, callee: false });
         types
     }
 
@@ -803,7 +867,7 @@ impl<'a> Walker<'a> {
         } else {
             self.current[id] |= types;
         }
-        self.references.push(Reference { range: token.text_range(), binding: id, types, write: true, callee: false });
+        self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: true, callee: false });
     }
 
     fn block(&mut self, block: Option<Block>, conditional: bool) {
@@ -829,7 +893,7 @@ impl<'a> Walker<'a> {
                 for (i, (name, types)) in names.iter().zip(types).enumerate() {
                     let binding = self.declare(name, BindingKind::Local, types);
                     if let Some(Expression::Function(def)) = expressions.get(i) {
-                        self.assigned_to.insert(function_id(def), binding);
+                        self.assigned_to.insert(self.function_id(def), binding);
                     }
                 }
             }
@@ -843,7 +907,7 @@ impl<'a> Walker<'a> {
                             self.write(&name, types);
                             if let Some(Expression::Function(def)) = expressions.get(i) {
                                 let binding = self.resolve(name.text());
-                                self.assigned_to.insert(function_id(def), binding);
+                                self.assigned_to.insert(self.function_id(def), binding);
                             }
                         }
                         None => match field_access(target.syntax()) {
@@ -937,30 +1001,30 @@ impl<'a> Walker<'a> {
                 if def.is_local() {
                     // Declared before the body so the function can call itself
                     if let Some(name) = def.local_name() {
-                        let binding = self.declare(&name, BindingKind::Local, Type::function(function_id(def)));
-                        self.assigned_to.insert(function_id(def), binding);
+                        let binding = self.declare(&name, BindingKind::Local, Type::function(self.function_id(def)));
+                        self.assigned_to.insert(self.function_id(def), binding);
                     }
                     self.function_body(def, None);
                 } else if let Some(identifier) = def.identifier() {
                     match identifier.simple_name() {
                         Some(name) => {
-                            self.write(&name, Type::function(function_id(def)));
+                            self.write(&name, Type::function(self.function_id(def)));
                             let binding = self.resolve(name.text());
-                            self.assigned_to.insert(function_id(def), binding);
+                            self.assigned_to.insert(self.function_id(def), binding);
                             self.function_body(def, None);
                         }
                         // `function a.b:c()` assigns field `c` of `a.b`
                         None => {
                             let owner = self.function_name_owner(&identifier);
                             if let Some((owner, field)) = &owner {
-                                self.field_write(*owner, field, Type::function(function_id(def)));
+                                self.field_write(*owner, field, Type::function(self.function_id(def)));
                             }
                             // `self` is the table the method is defined on
                             let self_type = identifier.is_call_to_self().then(|| {
                                 let owner = owner.map_or(Type::UNKNOWN, |(owner, _)| owner);
                                 match owner.named {
                                     // Unknown, so assume a table, with fields of its own
-                                    NamedRef::None | NamedRef::Unknown => Type::table(function_id(def)),
+                                    NamedRef::None | NamedRef::Unknown => Type::table(self.function_id(def)),
                                     named => {
                                         let set = owner.set.intersection(OBJECTS);
                                         let set = if set == TypeSet::NEVER { TypeSet::TABLE } else { set };
@@ -1041,7 +1105,7 @@ impl<'a> Walker<'a> {
     }
 
     fn function_body(&mut self, def: &FunctionDefinition, self_type: Option<Type>) -> FunctionId {
-        let id = function_id(def);
+        let id = self.function_id(def);
         let outer_function = self.function;
         self.function_count += 1;
         self.function = self.function_count;
@@ -1159,7 +1223,13 @@ impl<'a> Walker<'a> {
                     values.values.extend(results.values);
                     values.rest = results.rest;
                 }
-                Expression::VarArgs(_) if last => values.rest = Type::UNKNOWN,
+                Expression::VarArgs(_) if last => match self.addon_arguments() {
+                    Some(arguments) => {
+                        values.values.extend(arguments.values);
+                        values.rest = arguments.rest;
+                    }
+                    None => values.rest = Type::UNKNOWN,
+                },
                 _ => values.values.push(self.expression(expression)),
             }
         }
@@ -1217,7 +1287,7 @@ impl<'a> Walker<'a> {
                 })
             }
             Expression::BinaryExpression(b) => self.binary_expression(b),
-            Expression::VarArgs(_) => Type::UNKNOWN,
+            Expression::VarArgs(_) => self.addon_arguments().map_or(Type::UNKNOWN, |arguments| arguments.first()),
         }
     }
 
@@ -1252,10 +1322,32 @@ impl<'a> Walker<'a> {
                     .or_insert(argument_types);
                 self.returns_of(id)
             }
-            _ => function.returns.clone(),
+            _ => match self.select(callee, &arguments, &argument_types) {
+                Some(selected) => selected,
+                None => function.returns.clone(),
+            },
         };
         self.require_arguments(&arguments, &required);
         returns
+    }
+
+    /// `select(n, ...)` with a literal `n`, which gives the arguments from the
+    /// `n`th on, or `select("#", ...)`, a count. This is how many addons get
+    /// their namespace: `local ns = select(2, ...)`
+    fn select(&self, callee: Type, arguments: &[Expression], argument_types: &Values) -> Option<Values> {
+        if self.definitions.global("select") != Some(callee) {
+            return None
+        }
+        let Some(Expression::Literal(index)) = arguments.first() else { return None };
+        if index.get_string().is_some_and(|s| s.trim().trim_matches(['"', '\'']) == "#") {
+            return Some(Values { values: vec![Type::of(TypeSet::NUMBER)], rest: Type::NIL })
+        }
+        let index: usize = index.get_number()?.trim().parse().ok().filter(|&n| n >= 1)?;
+        // The index itself is the first argument
+        Some(Values {
+            values: argument_types.values.iter().skip(index).copied().collect(),
+            rest: argument_types.rest,
+        })
     }
 
     /// Visits the variable reads in `a.b`, `a[k]`, `a:m(x).y` and similar: the
@@ -1291,7 +1383,7 @@ impl<'a> Walker<'a> {
 
     /// A new table, with the types of its `name = value` fields recorded
     fn table_constructor(&mut self, node: &SyntaxNode) -> Type {
-        let table = Type::table(node.text_range().start());
+        let table = Type::table(self.location(node.text_range().start()));
         for field in node.children().filter(|n| n.kind() == SyntaxKind::Field) {
             let mut in_brackets = false;
             let mut after_assign = false;
@@ -1362,10 +1454,6 @@ fn field_access(node: &SyntaxNode) -> Option<(Expression, SyntaxToken)> {
     Some((Expression::cast(base)?, field))
 }
 
-fn function_id(def: &FunctionDefinition) -> FunctionId {
-    def.syntax().text_range().start()
-}
-
 /// Whether every path through the block ends in a `return`. Conservative:
 /// loops and `error()` calls count as possibly falling through
 fn always_returns(block: &Block) -> bool {
@@ -1430,14 +1518,14 @@ mod tests {
     use super::*;
     use crate::syntax::syntax::Generator;
 
-    fn analyse(source: &str) -> FileTypes {
+    fn analyse(source: &str) -> Analysis {
         analyse_with(source, &Arc::new(Definitions::default()))
     }
 
-    fn analyse_with(source: &str, definitions: &Arc<Definitions>) -> FileTypes {
+    fn analyse_with(source: &str, definitions: &Arc<Definitions>) -> Analysis {
         let mut generator = Generator::new(source);
         let root = SyntaxNode::new_root(generator.process_all());
-        FileTypes::analyse(&root, definitions)
+        Analysis::analyse_file(&root, definitions)
     }
 
     /// Type at each use of `name`, in source order
@@ -1445,7 +1533,7 @@ mod tests {
         describe_uses(&analyse(source), name)
     }
 
-    fn describe_uses(file: &FileTypes, name: &str) -> Vec<String> {
+    fn describe_uses(file: &Analysis, name: &str) -> Vec<String> {
         file.references.iter()
             .filter(|r| file.binding(r).name == name)
             .map(|r| file.describe(r.types))
@@ -1730,7 +1818,9 @@ mod tests {
         assert_eq!(builtin_types_of("local x = tostring(1)", "x"), ["string"]);
         assert_eq!(builtin_types_of("local x = tonumber('1')", "x"), ["number?"]);
         assert_eq!(builtin_types_of("local x = tostring", "x"), ["function(value) -> string"]);
-        assert_eq!(builtin_types_of("local x, y = select(2, 'a', 'b')", "y"), ["unknown"]);
+        assert_eq!(builtin_types_of("local x, y = select(2, 'a', 'b')", "x"), ["string"]);
+        assert_eq!(builtin_types_of("local x, y = select(2, 'a', 'b')", "y"), ["nil"]);
+        assert_eq!(builtin_types_of("local x, y = select(2, f())", "y"), ["unknown"]);
         assert_eq!(builtin_types_of("local x = undefined()", "x"), ["unknown"]);
         // Inside functions too, where globals are read like upvalues
         assert_eq!(builtin_types_of("function F() local x = tostring(1) end", "x"), ["string"]);
@@ -1990,13 +2080,118 @@ mod tests {
         assert_eq!(types_of("local t = {} t.x = 1 local a = (c and {} or t).x", "a"), ["unknown"]);
     }
 
+    /// Files analysed together, in order, as one addon (`in_addon`) or just
+    /// sharing globals
+    fn analyse_files(sources: &[&str], in_addon: bool) -> Analysis {
+        let files: Vec<SourceFile> = sources.iter()
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), in_addon })
+            .collect();
+        Analysis::analyse(&files, &Arc::new(Definitions::default()))
+    }
+
+    /// Type at each use of `name` in file `file`
+    fn types_in(analysis: &Analysis, file: u32, name: &str) -> Vec<String> {
+        analysis.references.iter()
+            .filter(|r| r.file == FileId(file) && analysis.binding(r).name == name)
+            .map(|r| analysis.describe(r.types))
+            .collect()
+    }
+
+    #[test]
+    fn globals_carry_across_files() {
+        let analysis = analyse_files(&["Foo = 1", "local x = Foo"], false);
+        assert_eq!(types_in(&analysis, 1, "x"), ["number"]);
+        // Files run in order, so a global set by a later file isn't set yet
+        let analysis = analyse_files(&["local x = Late", "Late = 's'"], false);
+        assert_eq!(types_in(&analysis, 0, "x"), ["unknown"]);
+        // But a function reading it can run later
+        let analysis = analyse_files(&["function F() return Late end", "Late = 's' local x = F()"], false);
+        assert_eq!(types_in(&analysis, 1, "x"), ["string"]);
+    }
+
+    #[test]
+    fn functions_across_files() {
+        let analysis = analyse_files(&["function Helper() return {} end", "local t = Helper()"], false);
+        assert_eq!(types_in(&analysis, 1, "t"), ["table"]);
+        let analysis = analyse_files(&["Lib = {} function Lib:Get() return 1 end", "local n = Lib:Get()"], false);
+        assert_eq!(types_in(&analysis, 1, "n"), ["number"]);
+    }
+
+    #[test]
+    fn locals_stay_in_their_file() {
+        let analysis = analyse_files(&["local x = 1", "local y = x"], false);
+        assert_eq!(types_in(&analysis, 1, "y"), ["unknown"]);
+        assert_eq!(analysis.binding(analysis.references.iter().find(|r| r.file == FileId(1) && !r.write).unwrap()).kind, BindingKind::Global);
+    }
+
+    #[test]
+    fn addon_namespace_is_shared() {
+        let analysis = analyse_files(&[
+            "local name, ns = ... ns.Version = '1.0' function ns:GetName() return name end",
+            "local _, ns = ... function ns.Round(x) return 1 end",
+            "local _, ns = ... local v, n, r = ns.Version, ns:GetName(), ns.Round(1)",
+        ], true);
+        assert_eq!(types_in(&analysis, 0, "name"), ["string", "string"]);
+        assert_eq!(types_in(&analysis, 2, "v"), ["string"]);
+        assert_eq!(types_in(&analysis, 2, "n"), ["string"]);
+        assert_eq!(types_in(&analysis, 2, "r"), ["number"]);
+        // A method defined in a later file, called by an earlier one
+        let analysis = analyse_files(&[
+            "local _, ns = ... function F() return ns:Later() end",
+            "local _, ns = ... function ns:Later() return true end local x = F()",
+        ], true);
+        assert_eq!(types_in(&analysis, 1, "x"), ["true"]);
+    }
+
+    #[test]
+    fn select_from_varargs() {
+        let definitions = Arc::new(Definitions::from_json(r#"{"functions": {
+            "select": {"parameters": ["index: number|string", "..."], "returns": ["unknown"], "rest": "unknown"}
+        }}"#).unwrap());
+        let analyse = |sources: &[&str]| {
+            let files: Vec<SourceFile> = sources.iter()
+                .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), in_addon: true })
+                .collect();
+            Analysis::analyse(&files, &definitions)
+        };
+        // The usual way to get the namespace without naming the addon
+        let analysis = analyse(&["local ns = select(2, ...) ns.x = 1", "local ns = select(2, ...) local y = ns.x"]);
+        assert_eq!(types_in(&analysis, 1, "y"), ["number"]);
+        let analysis = analyse(&["local name = select(1, ...)", "local n = select('#', ...)", "local a, b = select(2, 1, 's', true)"]);
+        assert_eq!(types_in(&analysis, 0, "name"), ["string"]);
+        assert_eq!(types_in(&analysis, 1, "n"), ["number"]);
+        assert_eq!(types_in(&analysis, 2, "a"), ["string"]);
+        assert_eq!(types_in(&analysis, 2, "b"), ["true"]);
+        // An index that isn't a literal, or a shadowed `select`, isn't followed
+        assert_eq!(types_in(&analyse(&["local i = 2 local ns = select(i, ...)"]), 0, "ns")[0], "unknown");
+        assert_eq!(types_in(&analyse(&["local function select() return 1 end local ns = select(2, ...)"]), 0, "ns"), ["number"]);
+    }
+
+    #[test]
+    fn varargs_outside_addon_files() {
+        // Not part of an addon, so nothing is known about `...`
+        assert_eq!(types_in(&analyse_files(&["local name, ns = ..."], false), 0, "name"), ["unknown"]);
+        // A function's own `...` is its arguments, even in an addon
+        assert_eq!(types_in(&analyse_files(&["local function f(...) local a = ... end"], true), 0, "a"), ["unknown"]);
+    }
+
+    #[test]
+    fn references_are_per_file() {
+        let analysis = analyse_files(&["local a = 1", "local b = 's'"], false);
+        let first = analysis.reference_at(FileId(0), TextSize::from(6)).unwrap();
+        let second = analysis.reference_at(FileId(1), TextSize::from(6)).unwrap();
+        assert_eq!(analysis.binding(first).name, "a");
+        assert_eq!(analysis.binding(second).name, "b");
+        assert!(analysis.reference_at(FileId(2), TextSize::from(6)).is_none());
+    }
+
     #[test]
     fn reference_lookup() {
         let source = "local x = 5\nlocal y = x";
         let file = analyse(source);
-        let r = file.reference_at(TextSize::from(22)).expect("reference at x");
+        let r = file.reference_at(FileId(0), TextSize::from(22)).expect("reference at x");
         assert_eq!(file.binding(r).name, "x");
         assert!(!r.write);
-        assert!(file.reference_at(TextSize::from(3)).is_none());
+        assert!(file.reference_at(FileId(0), TextSize::from(3)).is_none());
     }
 }

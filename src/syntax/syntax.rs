@@ -1706,8 +1706,20 @@ mod tests {
     /// diagnostics) drift
     #[test]
     fn test_files_round_trip() {
-        for entry in std::fs::read_dir("tests").unwrap() {
-            let path = entry.unwrap().path();
+        fn lua_files(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    lua_files(&path, files);
+                } else if path.extension().is_some_and(|e| e == "lua") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        lua_files(std::path::Path::new("tests"), &mut files);
+        assert!(files.len() > 10);
+        for path in files {
             let source = std::fs::read_to_string(&path).unwrap();
             let text = tree_text(&source);
             if text != source {
