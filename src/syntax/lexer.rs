@@ -331,7 +331,8 @@ impl<'a> Generator<'a> {
 
                         }
                     }
-                    let mut end = end;
+                    // A bare `--` ends before the line break, which is lexed as its own token
+                    let mut end = if ch == '\r' || ch == '\n' { pos } else { end };
                     while let Some((_, ch, end_2)) = self.peek_char() {
                         if ch == '\r' || ch == '\n' {
                             break;
