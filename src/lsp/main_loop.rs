@@ -194,11 +194,8 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                             let path = project::uri_to_path(&uri);
                             let (analysis, file) = workspace.analysis(path.as_deref(), &all, &definitions);
                             let analysis = &analysis.0;
-                            let (output, text_range) = match analysis.reference_at(file, TextSize::from(offset)) {
-                                Some(r) => {
-                                    let binding = analysis.binding(r);
-                                    (format!("{} {}: {}", binding.kind, binding.name, analysis.describe(r.types)), r.range)
-                                }
+                            let (output, text_range) = match analysis.hover(file, TextSize::from(offset)) {
+                                Some(hover) => hover,
                                 None => {
                                     let n = node.ancestors().filter(|a| a.kind() != SyntaxKind::Identifier).nth(0);
                                     let output = match n {

@@ -447,6 +447,35 @@ pub struct Reference {
     pub callee: bool,
 }
 
+/// A use of a field name: `b` in `a.b`, `a.b = v`, `a:b()`, `function a:b()`
+/// or `{ b = v }`
+#[derive(Debug)]
+pub struct FieldReference {
+    pub file: FileId,
+    /// The field name
+    pub range: TextRange,
+    /// The code reaching the field, for `path`. Kept rather than its text,
+    /// which is only needed for hover
+    access: SyntaxNode,
+    /// The field's type, or for a write the value assigned
+    pub types: Type,
+    pub write: bool,
+}
+
+impl FieldReference {
+    /// How the field was reached, without whitespace or comments, like
+    /// `addonTable.hiddenTable`
+    pub fn path(&self) -> String {
+        let end = self.range.end();
+        self.access.descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.text_range().end() <= end)
+            .filter(|t| !matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment))
+            .map(|t| t.text().to_string())
+            .collect()
+    }
+}
+
 /// A file to analyse
 pub struct SourceFile {
     pub root: SyntaxNode,
@@ -460,6 +489,8 @@ pub struct Analysis {
     pub bindings: Vec<Binding>,
     /// Sorted by file, then position
     pub references: Vec<Reference>,
+    /// Sorted by file, then position
+    pub field_references: Vec<FieldReference>,
     pub functions: HashMap<FunctionId, FunctionInfo>,
     pub definitions: Arc<Definitions>,
     /// Every value assigned to each field of each table made in the file
@@ -558,6 +589,22 @@ impl Analysis {
         signature
     }
 
+    /// The hover text for whatever name is at `offset`, and the name's range
+    pub fn hover(&self, file: FileId, offset: TextSize) -> Option<(String, TextRange)> {
+        if let Some(r) = self.reference_at(file, offset) {
+            let binding = self.binding(r);
+            return Some((format!("{} {}: {}", binding.kind, binding.name, self.describe(r.types)), r.range))
+        }
+        let field = self.field_reference_at(file, offset)?;
+        Some((format!("field {}: {}", field.path(), self.describe(field.types)), field.range))
+    }
+
+    pub fn field_reference_at(&self, file: FileId, offset: TextSize) -> Option<&FieldReference> {
+        let after = self.field_references.partition_point(|r| (r.file, r.range.start()) <= (file, offset));
+        let candidate = self.field_references.get(after.checked_sub(1)?)?;
+        (candidate.file == file && candidate.range.contains_inclusive(offset)).then_some(candidate)
+    }
+
     pub fn reference_at(&self, file: FileId, offset: TextSize) -> Option<&Reference> {
         let after = self.references.partition_point(|r| (r.file, r.range.start()) <= (file, offset));
         let candidate = self.references.get(after.checked_sub(1)?)?;
@@ -588,6 +635,7 @@ struct Walker<'a> {
     /// Type of each binding at the current point of the walk
     current: Vec<Type>,
     references: Vec<Reference>,
+    field_references: Vec<FieldReference>,
     /// References that read an upvalue, resolved once all assignments are known
     deferred: Vec<usize>,
     scopes: Vec<Scope>,
@@ -620,6 +668,7 @@ struct Walker<'a> {
 struct Snapshot {
     bindings: usize,
     references: usize,
+    field_references: usize,
     deferred: usize,
     globals_created: usize,
 }
@@ -690,9 +739,11 @@ impl<'a> Walker<'a> {
             self.references[index].types = self.bindings[binding].types;
         }
         self.references.sort_by_key(|r| (r.file, r.range.start()));
+        self.field_references.sort_by_key(|r| (r.file, r.range.start()));
         Analysis {
             bindings: self.bindings,
             references: self.references,
+            field_references: self.field_references,
             functions: self.functions,
             definitions: self.definitions,
             fields: self.fields,
@@ -731,6 +782,7 @@ impl<'a> Walker<'a> {
         Snapshot {
             bindings: self.bindings.len(),
             references: self.references.len(),
+            field_references: self.field_references.len(),
             deferred: self.deferred.len(),
             globals_created: self.globals_created.len(),
         }
@@ -743,6 +795,7 @@ impl<'a> Walker<'a> {
         self.bindings.truncate(snapshot.bindings);
         self.current.truncate(snapshot.bindings);
         self.references.truncate(snapshot.references);
+        self.field_references.truncate(snapshot.field_references);
         self.deferred.truncate(snapshot.deferred);
         for name in self.globals_created.drain(snapshot.globals_created..) {
             self.globals.remove(&name);
@@ -934,6 +987,7 @@ impl<'a> Walker<'a> {
                             Some((base, field)) => {
                                 let base = self.expression(&base);
                                 self.field_write(base, field.text(), types);
+                                self.field_reference(target.syntax(), &field, types, true);
                             }
                             // `t[k] = v` isn't tracked, but still reads `t` and `k`
                             None => self.identifier_parts(target.syntax()),
@@ -1037,7 +1091,9 @@ impl<'a> Walker<'a> {
                         None => {
                             let owner = self.function_name_owner(&identifier);
                             if let Some((owner, field)) = &owner {
-                                self.field_write(*owner, field, Type::function(self.function_id(def)));
+                                let function = Type::function(self.function_id(def));
+                                self.field_write(*owner, field.text(), function);
+                                self.field_reference(identifier.syntax(), field, function, true);
                             }
                             // `self` is the table the method is defined on
                             let self_type = identifier.is_call_to_self().then(|| {
@@ -1080,7 +1136,7 @@ impl<'a> Walker<'a> {
     }
 
     /// The table and field a `function a.b:c()` statement assigns: `a.b` and `c`
-    fn function_name_owner(&mut self, identifier: &Identifier) -> Option<(Type, String)> {
+    fn function_name_owner(&mut self, identifier: &Identifier) -> Option<(Type, SyntaxToken)> {
         let names: Vec<SyntaxToken> = identifier.syntax().children_with_tokens()
             .filter_map(|t| t.into_token())
             .filter(|t| t.kind() == SyntaxKind::Name)
@@ -1090,8 +1146,15 @@ impl<'a> Walker<'a> {
         let mut owner = self.read(first);
         for name in middle {
             owner = self.field_read(owner, name.text());
+            self.field_reference(identifier.syntax(), name, owner, false);
         }
-        Some((owner, last.text().to_string()))
+        Some((owner, last.clone()))
+    }
+
+    /// `access` is the code reaching the field (`a.b` for `b`), or for a table
+    /// constructor's key, the field entry
+    fn field_reference(&mut self, access: &SyntaxNode, name: &SyntaxToken, types: Type, write: bool) {
+        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: access.clone(), types, write });
     }
 
     /// The type of field `name` of a value of type `base`
@@ -1285,7 +1348,9 @@ impl<'a> Walker<'a> {
                     // `a.b`: field `b` of whatever `a` is
                     Some((base, field)) => {
                         let base = self.expression(&base);
-                        self.field_read(base, field.text())
+                        let types = self.field_read(base, field.text());
+                        self.field_reference(identifier.syntax(), &field, types, false);
+                        types
                     }
                     None => {
                         self.identifier_parts(identifier.syntax());
@@ -1325,7 +1390,11 @@ impl<'a> Walker<'a> {
         });
         // `a:m()` calls field `m` of `a`
         let callee = match (callee, call.method_name()) {
-            (Some(base), Some(method)) => Some(self.field_read(base, method.text())),
+            (Some(base), Some(method)) => {
+                let types = self.field_read(base, method.text());
+                self.field_reference(call.syntax(), &method, types, false);
+                Some(types)
+            }
             (callee, _) => callee,
         };
         let arguments = call.arguments();
@@ -1425,6 +1494,7 @@ impl<'a> Walker<'a> {
                             let value = self.expression(&e);
                             if let (Some(key), true) = (&key, after_assign) {
                                 self.field_write(table, key.text(), value);
+                                self.field_reference(&key.parent().unwrap_or_else(|| field.clone()), key, value, true);
                             }
                         }
                     }
@@ -2239,6 +2309,47 @@ mod tests {
         assert_eq!(analysis.binding(first).name, "a");
         assert_eq!(analysis.binding(second).name, "b");
         assert!(analysis.reference_at(FileId(2), TextSize::from(6)).is_none());
+    }
+
+    /// Hover text for each use of the field reached by `path`, in source order
+    fn field_hovers(analysis: &Analysis, path: &str) -> Vec<String> {
+        analysis.field_references.iter()
+            .filter(|f| f.path() == path)
+            .map(|f| analysis.hover(f.file, f.range.start()).unwrap().0)
+            .collect()
+    }
+
+    #[test]
+    fn field_names_have_types() {
+        // The value assigned, and then the field's type wherever it's read
+        let source = "local addonTable = {} local hidden = {} addonTable.hiddenTable = hidden local x = addonTable.hiddenTable";
+        let analysis = analyse(source);
+        assert_eq!(field_hovers(&analysis, "addonTable.hiddenTable"),
+            ["field addonTable.hiddenTable: table", "field addonTable.hiddenTable: table"]);
+        let analysis = analyse_with("local t = {} local hidden = CreateFrame('Frame') t.hidden = hidden local x = t.hidden", &objects());
+        assert_eq!(field_hovers(&analysis, "t.hidden"), ["field t.hidden: Frame", "field t.hidden: Frame"]);
+        // A write shows what that write assigned; reads show every assignment
+        let analysis = analyse("local t = {} t.v = 1 t.v = 's' local x = t.v");
+        assert_eq!(field_hovers(&analysis, "t.v"), ["field t.v: number", "field t.v: string", "field t.v: number|string"]);
+    }
+
+    #[test]
+    fn field_names_in_every_position() {
+        let analysis = analyse("local t = { count = 1, a = { b = {} } } function t.a.b:Get() return 's' end local x = t:Get() local y = t.a.b:Get()");
+        assert_eq!(field_hovers(&analysis, "count"), ["field count: number"]);
+        assert_eq!(field_hovers(&analysis, "t.a"), ["field t.a: table", "field t.a: table"]);
+        assert_eq!(field_hovers(&analysis, "t.a.b:Get"), ["field t.a.b:Get: function() -> string", "field t.a.b:Get: function() -> string"]);
+        // `Get` is on `t.a.b`, not `t`
+        assert_eq!(field_hovers(&analysis, "t:Get"), ["field t:Get: unknown"]);
+        // Whitespace and comments aren't part of the path
+        let analysis = analyse("local t = {} t . --[[c]] x = 1");
+        assert_eq!(field_hovers(&analysis, "t.x"), ["field t.x: number"]);
+    }
+
+    #[test]
+    fn field_names_in_loops_are_recorded_once() {
+        let analysis = analyse("local t = {} while c do t.x = 1 local y = t.x end");
+        assert_eq!(field_hovers(&analysis, "t.x").len(), 2);
     }
 
     #[test]
