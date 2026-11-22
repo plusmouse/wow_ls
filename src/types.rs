@@ -189,7 +189,15 @@ pub struct FileId(pub u32);
 pub struct Location {
     pub file: FileId,
     pub offset: TextSize,
+    /// Tells apart several things identified by one position: 0 for something
+    /// written there, and 1 + n for the nth object a call there returns new.
+    /// With `POOL_OBJECT` added, the objects of the pool that is
+    pub slot: u32,
 }
+
+/// Added to a pool's slot for the slot of the one object standing for all the
+/// pool's objects
+const POOL_OBJECT: u32 = 1 << 31;
 
 /// Which function a value is, when it can be one
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -424,10 +432,26 @@ impl Parameter {
 
 #[derive(Debug, Clone)]
 pub struct FunctionInfo {
+    /// Not counting `self` for a method
     pub parameters: Vec<Parameter>,
+    /// Defined with `:`, so it takes `self` before its parameters
+    pub method: bool,
     /// The type of each extra argument, if the function takes `...`
     pub varargs: Option<Parameter>,
     pub returns: Values,
+    /// For each return value that's a table or object the function makes, so
+    /// each call returns a new one: the one made in the function (whose fields
+    /// and parent each call's gets), and the parameters it mixes in
+    pub fresh_returns: Vec<Option<FreshObject>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshObject {
+    pub made: TableId,
+    pub mixed_parameters: Vec<usize>,
+    /// When it's a pool, the parameters mixed into its objects (by its init
+    /// or reset function)
+    pub pool_mixed_parameters: Option<Vec<usize>>,
 }
 
 impl FunctionInfo {
@@ -484,6 +508,9 @@ pub struct Reference {
     pub write: bool,
     /// A read that's directly called: `f` in `f(x)`
     pub callee: bool,
+    /// For a callee, what this call returns when that's more than the function
+    /// says (`CreateFrame("Button")` giving a `Button`)
+    pub call_returns: Option<Values>,
 }
 
 /// A use of a field name: `b` in `a.b`, `a.b = v`, `a:b()`, `function a:b()`
@@ -499,9 +526,19 @@ pub struct FieldReference {
     /// The field's type, or for a write the value assigned
     pub types: Type,
     pub write: bool,
+    /// A read that's directly called: `f` in `t.f(x)` or `t:f(x)`
+    pub callee: bool,
+    /// For a callee, what this call returns when that's more than the function
+    /// says (a pool's `Acquire` giving the pool's object)
+    pub call_returns: Option<Values>,
 }
 
 impl FieldReference {
+    /// The field name
+    fn name(&self) -> Option<String> {
+        self.access.covering_element(self.range).into_token().map(|t| t.text().to_string())
+    }
+
     /// How the field was reached, without whitespace or comments, like
     /// `addonTable.hiddenTable`
     pub fn path(&self) -> String {
@@ -551,6 +588,21 @@ pub struct Analysis {
     /// (`CreateFrame`'s parent, or the receiver of `CreateTexture` and the like)
     /// and anything passed to its `SetParent`
     pub parents: HashMap<TableId, Type>,
+    /// The tables each table or object made in the files had mixed into it (by
+    /// `Mixin` or `CreateFromMixins`), whose fields it has too
+    pub mixins: HashMap<TableId, Vec<Type>>,
+    /// For each table mixed into WoW objects (directly, or through tables made
+    /// from it with `CreateFromMixins`), the one type those objects all are,
+    /// and whether they may have members beyond that type's. What `self` is in
+    /// the table's methods
+    pub mixed_into: HashMap<TableId, (NamedId, bool)>,
+    /// The name each table made in the files was first stored under (a
+    /// variable or a field path like `ns.ButtonMixin`), to show its mixins by
+    pub table_names: HashMap<TableId, String>,
+    /// What `Acquire` gives for each pool made in the files (by
+    /// `CreateFramePool` and the like): one object standing for all of them,
+    /// whose fields and mixins come from the pool's init and reset functions
+    pub pool_objects: HashMap<TableId, Type>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -568,6 +620,9 @@ impl Analysis {
             let next = Walker::new(Some(&result), definitions).walk(files);
             let settled = next.fields == result.fields
                 && next.parents == result.parents
+                && next.mixins == result.mixins
+                && next.mixed_into == result.mixed_into
+                && next.pool_objects == result.pool_objects
                 && next.any_table_fields == result.any_table_fields
                 && next.functions.iter().all(|(id, f)| {
                     result.functions.get(id).is_some_and(|before| before.parameters == f.parameters)
@@ -613,7 +668,19 @@ impl Analysis {
             .map(|&name| match (&signature, named, name) {
                 (Some(s), _, "function") if wrap && s.contains(" -> ") => format!("({s})"),
                 (Some(s), _, "function") => s.clone(),
-                (_, Some(named), "table" | "userdata") if named.base.names() == [name] => named.name.clone(),
+                (_, Some(named), "table" | "userdata") if named.base.names() == [name] && signatures
+                    && ty.named.identity().is_some_and(|at| self.pool_objects.contains_key(&at)) => {
+                    let object = ty.named.identity().and_then(|at| self.pool_objects.get(&at)).copied().unwrap_or(Type::UNKNOWN);
+                    format!("{}<{}>", named.name, self.describe_shallow(object))
+                }
+                (_, Some(named), "table" | "userdata") if named.base.names() == [name] => {
+                    let mixins = ty.named.identity().map(|at| self.object_mixins(at)).unwrap_or_default();
+                    match mixins.is_empty() {
+                        true => named.name.clone(),
+                        false if wrap || optional => format!("({} & {})", named.name, mixins.join(" & ")),
+                        false => format!("{} & {}", named.name, mixins.join(" & ")),
+                    }
+                }
                 (_, _, "number") if numeric.is_some() => numeric.map_or_else(String::new, |n| n.name.clone()),
                 _ => name.to_string(),
             })
@@ -622,7 +689,54 @@ impl Analysis {
         if optional { described + "?" } else { described }
     }
 
+    /// The names of the mixins a WoW object made in the files has, in the order
+    /// they were mixed in. In a mixin's own methods, `self` is the mixin
+    fn object_mixins(&self, at: TableId) -> Vec<String> {
+        let mut names = Vec::new();
+        match self.table_names.get(&at) {
+            Some(name) => names.push(name.clone()),
+            None => self.collect_mixins(at, &mut names, 0),
+        }
+        names
+    }
+
+    /// Named mixins are listed by name. Unnamed ones (an inline
+    /// `CreateFromMixins(A, B)`, or the frame a function made and returns) are
+    /// listed by their own mixins
+    fn collect_mixins(&self, at: TableId, names: &mut Vec<String>, depth: usize) {
+        // Deep enough for any real chain of mixins, and stops a loop
+        if depth > 16 {
+            return
+        }
+        for mixin in self.mixins.get(&at).into_iter().flatten() {
+            let Some(mixin) = mixin.named.identity() else { continue };
+            match self.table_names.get(&mixin) {
+                Some(name) => if !names.contains(name) { names.push(name.clone()) },
+                None => self.collect_mixins(mixin, names, depth + 1),
+            }
+        }
+    }
+
     fn signature(&self, function: &FunctionInfo) -> String {
+        self.signature_returning(function, &function.returns)
+    }
+
+    /// A callee's type, with what the call returns when that's known better
+    /// than the function's own returns
+    pub fn describe_callee(&self, ty: Type, call_returns: Option<&Values>) -> String {
+        let function = match ty.function {
+            FunctionRef::One(id) => self.functions.get(&id),
+            FunctionRef::Builtin(id) => self.definitions.function(id),
+            _ => None,
+        };
+        match (function, call_returns) {
+            // Only when it's sure to be the function, so the signature is all of it
+            (Some(function), Some(returns)) if ty.set == TypeSet::FUNCTION => self.signature_returning(function, returns),
+            _ => self.describe(ty),
+        }
+    }
+
+    fn signature_returning(&self, function: &FunctionInfo, returns: &Values) -> String {
         let parameter = |p: &Parameter| match p.types {
             Type::UNKNOWN => p.name.clone(),
             types => format!("{}: {}", p.name, self.describe_shallow(types)),
@@ -632,7 +746,6 @@ impl Analysis {
             parameters.push(parameter(varargs));
         }
         let mut signature = format!("function({})", parameters.join(", "));
-        let returns = &function.returns;
         let mut parts: Vec<String> = returns.values.iter().map(|&t| self.describe_shallow(t)).collect();
         if returns.rest != Type::NIL {
             parts.push("...".to_string());
@@ -648,10 +761,10 @@ impl Analysis {
     pub fn hover(&self, file: FileId, offset: TextSize) -> Option<(String, TextRange)> {
         if let Some(r) = self.reference_at(file, offset) {
             let binding = self.binding(r);
-            return Some((format!("{} {}: {}", binding.kind, binding.name, self.describe(r.types)), r.range))
+            return Some((format!("{} {}: {}", binding.kind, binding.name, self.describe_callee(r.types, r.call_returns.as_ref())), r.range))
         }
         let field = self.field_reference_at(file, offset)?;
-        Some((format!("field {}: {}", field.path(), self.describe(field.types)), field.range))
+        Some((format!("field {}: {}", field.path(), self.describe_callee(field.types, field.call_returns.as_ref())), field.range))
     }
 
     pub fn field_reference_at(&self, file: FileId, offset: TextSize) -> Option<&FieldReference> {
@@ -720,6 +833,52 @@ struct Walker<'a> {
     any_table_fields: HashMap<String, Type>,
     /// Parents seen on this walk. Reads use the previous walk's, like fields
     parents: HashMap<TableId, Type>,
+    /// The field names each function was stored under, in any table
+    stored_in_fields: HashMap<FunctionId, std::collections::HashSet<String>>,
+    /// Mixins seen on this walk. Reads use the previous walk's, like fields
+    mixins: HashMap<TableId, Vec<Type>>,
+    /// What each table made in the files was mixed into on this walk
+    mixed_into: HashMap<TableId, Vec<NamedRef>>,
+    /// Pools made on this walk, and what they hold
+    pool_objects: HashMap<TableId, Type>,
+    /// Functions passed straight to a pool, which calls them only as it
+    /// documents (with its objects)
+    pool_callbacks: std::collections::HashSet<FunctionId>,
+    /// Calls to a pool's `EnumerateActive`, by where they are, and the objects
+    /// the iterator gives
+    enumerated: HashMap<Location, Type>,
+    /// The function being walked's code, to tell what it makes, for each
+    /// function being walked
+    function_ranges: Vec<(TextRange, usize)>,
+    /// Per function being walked: what each return position returns new, so
+    /// far (None once returns disagree)
+    fresh: Vec<Option<Vec<Option<FreshObject>>>>,
+    /// Which parameter of its function each parameter binding is
+    parameter_index: HashMap<BindingId, usize>,
+    /// For tables and objects made in a function: which of its parameters
+    /// were mixed into them
+    parameter_mixins: HashMap<TableId, Vec<usize>>,
+}
+
+/// Where a call's callee was read
+#[derive(Clone, Copy)]
+enum CalleeRead {
+    /// An index into `references`
+    Variable(usize),
+    /// An index into `field_references`
+    Field(usize),
+}
+
+/// What a mixin was mixed into, as far as its methods' `self` goes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MixinTarget {
+    /// Nothing seen
+    Nothing,
+    /// Only WoW objects, all of this type (and whether they may have members
+    /// beyond it)
+    Object(NamedId, bool),
+    /// A plain table, or objects with no type in common
+    Other,
 }
 
 /// How much had been recorded before a loop pass, to discard that pass
@@ -737,7 +896,7 @@ const MAIN_CHUNK: usize = 0;
 
 /// The table every file of an addon gets as the second value of `...`. Not a
 /// real file position, so it can't clash with a table made in a file
-const ADDON_NAMESPACE: TableId = Location { file: FileId(u32::MAX), offset: TextSize::new(0) };
+const ADDON_NAMESPACE: TableId = Location { file: FileId(u32::MAX), offset: TextSize::new(0), slot: 0 };
 
 /// Each walk past the second lets call-site parameter types pass one more step
 /// down a chain of calls (`a(1)` calling `b(x)` calling `c(y)`). The last walk is
@@ -771,7 +930,7 @@ impl<'a> Walker<'a> {
     }
 
     fn location(&self, offset: TextSize) -> Location {
-        Location { file: self.file, offset }
+        Location { file: self.file, offset, slot: 0 }
     }
 
     fn function_id(&self, def: &FunctionDefinition) -> FunctionId {
@@ -805,9 +964,34 @@ impl<'a> Walker<'a> {
             .filter(|(_, ty)| ty.set.contains(TypeSet::FUNCTION))
             .map(|(name, _)| name.clone())
             .collect();
+        let mixed_into = self.mixed_into.keys()
+            .filter_map(|&mixin| match self.mixin_target(mixin, 0) {
+                MixinTarget::Object(named, extended) => Some((mixin, (named, extended))),
+                _ => None,
+            })
+            .collect();
+        // References are sorted, so the first write of each table wins
+        let mut table_names: HashMap<TableId, String> = HashMap::new();
+        // Not parameters, whose types come from what calls pass them
+        let variables = self.references.iter()
+            .filter(|r| r.write && self.bindings[r.binding].kind != BindingKind::Parameter)
+            .map(|r| (r.file, r.range.start(), r.types, self.bindings[r.binding].name.clone()));
+        let fields = self.field_references.iter().filter(|f| f.write)
+            .map(|f| (f.file, f.range.start(), f.types, f.path()));
+        let mut named: Vec<_> = variables.chain(fields).collect();
+        named.sort_by_key(|&(file, start, ..)| (file, start));
+        for (_, _, types, name) in named {
+            if let NamedRef::Table(at) = types.named {
+                table_names.entry(at).or_insert(name);
+            }
+        }
         Analysis {
             function_fields,
+            mixed_into,
+            table_names,
+            pool_objects: self.pool_objects,
             parents: self.parents,
+            mixins: self.mixins,
             diagnostics: self.diagnostics,
             bindings: self.bindings,
             references: self.references,
@@ -828,13 +1012,33 @@ impl<'a> Walker<'a> {
                 only_called[reference.binding] = false;
             }
         }
+        // Functions read from a field other than to call them, and field names
+        // read where it isn't known which function they hold
+        let mut escaped = std::collections::HashSet::new();
+        let mut unresolved = std::collections::HashSet::new();
+        for field in self.field_references.iter().filter(|f| !f.write) {
+            match field.types.function {
+                FunctionRef::One(function) if !field.callee => { escaped.insert(function); }
+                FunctionRef::Unknown => { unresolved.extend(field.name()); }
+                _ => {}
+            }
+        }
         for (id, function) in self.functions.iter_mut() {
-            // Directly assigned to a local that's only ever called, and never
-            // given another function, so every call to it is one we saw
-            let all_calls_seen = self.assigned_to.get(id).is_some_and(|&b| {
+            // Every call to it is one we saw: it was assigned straight to a
+            // variable (local or global) only ever called, which never holds
+            // another function, and any field it was stored in is only ever
+            // called, with no reads of a field by that name that could be it
+            let in_variable = self.assigned_to.get(id).map(|&b| {
                 let binding = &self.bindings[b];
-                binding.kind == BindingKind::Local && binding.types.function == FunctionRef::One(*id) && only_called[b]
+                binding.types.function == FunctionRef::One(*id) && only_called[b]
             });
+            let in_fields = self.stored_in_fields.get(id).map(|names| {
+                !escaped.contains(id) && names.iter().all(|name| !unresolved.contains(name))
+            });
+            let all_calls_seen = match (in_variable, in_fields) {
+                (None, None) => self.pool_callbacks.contains(id),
+                (variable, fields) => variable.unwrap_or(true) && fields.unwrap_or(true),
+            };
             let calls = self.call_arguments.get(id);
             for (i, parameter) in function.parameters.iter_mut().enumerate() {
                 parameter.types = match (parameter.mandated, calls) {
@@ -933,7 +1137,7 @@ impl<'a> Walker<'a> {
         let id = self.new_binding(token.text(), kind, Some(token.text_range()), types, self.function, depth);
         self.bindings[id].assigned = true;
         self.scopes[depth].names.insert(token.text().to_string(), id);
-        self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: true, callee: false });
+        self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: true, callee: false, call_returns: None });
         id
     }
 
@@ -968,7 +1172,7 @@ impl<'a> Walker<'a> {
             self.prior_binding_types(id)
         };
         let types = self.builtin_global(id).unwrap_or(types);
-        self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: false, callee: false });
+        self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: false, callee: false, call_returns: None });
         types
     }
 
@@ -1010,7 +1214,7 @@ impl<'a> Walker<'a> {
         } else {
             self.current[id] |= types;
         }
-        self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: true, callee: false });
+        self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: true, callee: false, call_returns: None });
     }
 
     fn block(&mut self, block: Option<Block>, conditional: bool) {
@@ -1122,10 +1326,19 @@ impl<'a> Walker<'a> {
                 for e in &expressions {
                     self.expression(e);
                 }
+                // `for object in pool:EnumerateActive()`
+                let enumerated = match expressions.as_slice() {
+                    [Expression::FunctionCall(call)] => self.enumerated.get(&self.location(call.syntax().text_range().start())).copied(),
+                    _ => None,
+                };
                 let names = s.name_list().map(|n| n.name_tokens()).unwrap_or_default();
                 self.loop_body(|w| {
                     w.push_scope(true);
                     for (i, name) in names.iter().enumerate() {
+                        if let (0, Some(object)) = (i, enumerated) {
+                            w.declare(name, BindingKind::Local, object);
+                            continue
+                        }
                         let types = match (i, iterator.as_deref()) {
                             (0, Some("ipairs")) => TypeSet::NUMBER,
                             (1, Some("ipairs" | "pairs")) => TypeSet::UNKNOWN.without(TypeSet::NIL),
@@ -1171,6 +1384,12 @@ impl<'a> Walker<'a> {
                                 match owner.named {
                                     // Unknown, so assume a table, with fields of its own
                                     NamedRef::None | NamedRef::Unknown => Type::table(self.function_id(def)),
+                                    // A mixin: `self` is the WoW object it's mixed into, with
+                                    // the mixin's fields too
+                                    NamedRef::Table(at) => match self.prior.and_then(|prior| prior.mixed_into.get(&at)) {
+                                        Some(&(named, extended)) => Type { named: NamedRef::Instance { named, at, extended }, ..Type::of(TypeSet::TABLE) },
+                                        None => Type { named: owner.named, ..Type::of(TypeSet::TABLE) },
+                                    },
                                     named => {
                                         let set = owner.set.intersection(OBJECTS);
                                         let set = if set == TypeSet::NEVER { TypeSet::TABLE } else { set };
@@ -1185,6 +1404,29 @@ impl<'a> Walker<'a> {
             }
             Statement::Return(s) => {
                 let values = self.expression_values(&s.expressions());
+                if !self.fresh.is_empty() {
+                    let made: Vec<Option<FreshObject>> = values.values.iter()
+                        .map(|value| {
+                            let made = value.named.identity().filter(|&at| self.made_here(at))?;
+                            let mixed_parameters = self.parameter_mixins.get(&made).cloned().unwrap_or_default();
+                            let pool_mixed_parameters = self.pool_objects.get(&made).and_then(|object| object.named.identity())
+                                .map(|object| self.parameter_mixins.get(&object).cloned().unwrap_or_default());
+                            Some(FreshObject { made, mixed_parameters, pool_mixed_parameters })
+                        })
+                        .collect();
+                    if let Some(fresh) = self.fresh.last_mut() {
+                        *fresh = Some(match fresh.take() {
+                            None => made,
+                            // Every return has to agree on what's new
+                            Some(earlier) => (0..earlier.len().max(made.len()))
+                                .map(|i| match (earlier.get(i), made.get(i)) {
+                                    (Some(Some(a)), Some(Some(b))) if a == b => Some(a.clone()),
+                                    _ => None,
+                                })
+                                .collect(),
+                        });
+                    }
+                }
                 // At the top of the file there's no function to return from
                 if let Some(returns) = self.returns.last_mut() {
                     *returns = Some(match returns.take() {
@@ -1224,7 +1466,14 @@ impl<'a> Walker<'a> {
     /// `access` is the code reaching the field (`a.b` for `b`), or for a table
     /// constructor's key, the field entry
     fn field_reference(&mut self, access: &SyntaxNode, name: &SyntaxToken, types: Type, write: bool) {
-        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: access.clone(), types, write });
+        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: access.clone(), types, write, callee: false, call_returns: None });
+    }
+
+    /// The field read just recorded is the function being called
+    fn last_field_is_callee(&mut self) {
+        if let Some(field) = self.field_references.last_mut() {
+            field.callee = true;
+        }
     }
 
     /// The type of field `name` of a value of type `base`
@@ -1235,19 +1484,41 @@ impl<'a> Walker<'a> {
         // Writes can come later in the file, so only a previous walk knows them all
         let Some(prior) = self.prior else { return Type::UNKNOWN };
         let own = match base.named {
-            NamedRef::Table(id) | NamedRef::Instance { at: id, .. } => prior.fields.get(&id).and_then(|fields| fields.get(name)).copied(),
+            NamedRef::Table(id) | NamedRef::Instance { at: id, .. } => self.own_field(prior, id, name, 0),
             NamedRef::One(_) | NamedRef::Extended(_) => None,
             // Not a table we know, so nothing to go on
             NamedRef::None | NamedRef::Unknown => return Type::UNKNOWN,
         };
-        let any = prior.any_table_fields.get(name).copied();
-        match (own, any) {
-            (None, None) => Type::UNKNOWN,
-            (own, any) => own.unwrap_or_default() | any.unwrap_or_default(),
+        // What the table's own code (or a mixin's) sets wins. Writes to tables of
+        // unknown identity are only a fallback: one field name is reused by many
+        // unrelated tables (`entry.texts.cooldown` and `pools.cooldown`), so
+        // merging them in would lose what's known about this one
+        match own {
+            Some(own) => own,
+            None => prior.any_table_fields.get(name).copied().unwrap_or(Type::UNKNOWN),
         }
     }
 
+    /// A field of a table made in the files: its own, else one it got from its
+    /// mixins (the last mixin first, as later ones overwrite earlier ones)
+    fn own_field(&self, prior: &Analysis, table: TableId, name: &str, depth: usize) -> Option<Type> {
+        if let Some(own) = prior.fields.get(&table).and_then(|fields| fields.get(name)) {
+            return Some(*own)
+        }
+        // Deep enough for any real chain of mixins, and stops a loop
+        if depth > 16 {
+            return None
+        }
+        prior.mixins.get(&table)?.iter().rev().find_map(|mixin| {
+            let mixin = mixin.named.identity()?;
+            self.own_field(prior, mixin, name, depth + 1)
+        })
+    }
+
     fn field_write(&mut self, base: Type, name: &str, value: Type) {
+        if let FunctionRef::One(function) = value.function {
+            self.stored_in_fields.entry(function).or_default().insert(name.to_string());
+        }
         let field = match base.named {
             NamedRef::Table(id) | NamedRef::Instance { at: id, .. } => self.fields.entry(id).or_default().entry(name.to_string()).or_default(),
             // Could be any table, or shared by every object of a WoW type
@@ -1266,6 +1537,8 @@ impl<'a> Walker<'a> {
         let outer_function_scope = std::mem::replace(&mut self.function_scope, self.scopes.len() - 1);
         let outer_short_circuit = std::mem::take(&mut self.short_circuit_depth);
         self.returns.push(None);
+        self.function_ranges.push((def.syntax().text_range(), self.function));
+        self.fresh.push(None);
         if let Some(self_type) = self_type {
             let depth = self.scopes.len() - 1;
             // Implicit, so there's no token to declare it at
@@ -1278,7 +1551,9 @@ impl<'a> Walker<'a> {
         let parameter_bindings: Vec<BindingId> = parameters.iter().enumerate()
             .map(|(i, param)| {
                 let types = self.prior_parameter_types(id, i);
-                self.declare(param, BindingKind::Parameter, types)
+                let binding = self.declare(param, BindingKind::Parameter, types);
+                self.parameter_index.insert(binding, i);
+                binding
             })
             .collect();
         let block = def.block();
@@ -1286,6 +1561,8 @@ impl<'a> Walker<'a> {
             self.statements(block);
         }
         let returned = self.returns.pop().flatten();
+        self.function_ranges.pop();
+        let fresh_returns = self.fresh.pop().flatten().unwrap_or_default();
         let returns = match returned {
             Some(returns) if block.as_ref().is_some_and(always_returns) => returns,
             // Reaching `end` returns nothing
@@ -1305,7 +1582,7 @@ impl<'a> Walker<'a> {
         }).collect();
         let varargs = params.is_some_and(|p| p.ellipsis())
             .then(|| Parameter { name: "...".to_string(), types: Type::UNKNOWN, mandated: None });
-        self.functions.insert(id, FunctionInfo { parameters, varargs, returns });
+        self.functions.insert(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns });
         id
     }
 
@@ -1476,13 +1753,23 @@ impl<'a> Walker<'a> {
 
     fn function_call(&mut self, call: &FunctionCall) -> Values {
         let is_method = call.method_name().is_some();
+        // Where the callee's read was recorded, to note what this call returns
+        let mut callee_read = None;
         let callee = call.callee().map(|callee| {
             let types = self.expression(&callee);
-            if !is_method && matches!(&callee, Expression::Identifier(i) if i.simple_name().is_some()) {
+            match &callee {
                 // The read `expression` just recorded
-                if let Some(reference) = self.references.last_mut() {
-                    reference.callee = true;
+                Expression::Identifier(i) if !is_method && i.simple_name().is_some() => {
+                    if let Some(reference) = self.references.last_mut() {
+                        reference.callee = true;
+                        callee_read = Some(CalleeRead::Variable(self.references.len() - 1));
+                    }
                 }
+                Expression::Identifier(i) if !is_method && field_access(i.syntax()).is_some() => {
+                    self.last_field_is_callee();
+                    callee_read = self.field_references.len().checked_sub(1).map(CalleeRead::Field);
+                }
+                _ => {}
             }
             types
         });
@@ -1492,6 +1779,8 @@ impl<'a> Walker<'a> {
             (Some(base), Some(method)) => {
                 let types = self.field_read(base, method.text());
                 self.field_reference(call.syntax(), &method, types, false);
+                self.last_field_is_callee();
+                callee_read = Some(CalleeRead::Field(self.field_references.len() - 1));
                 self.check_method(base, &method);
                 Some(types)
             }
@@ -1510,18 +1799,39 @@ impl<'a> Walker<'a> {
             .and_then(|i| arguments.get(i))
             .is_some_and(|a| !matches!(a, Expression::Literal(l) if l.is_nil()));
         let documented = function.returns.clone();
+        let fresh_returns = function.fresh_returns.clone();
+        // What the function's own parameters get: `self` is separate for a
+        // method, whether it's passed with `:` or explicitly
+        let parameter_types = match (function.method, is_method) {
+            (true, false) => Values { values: argument_types.values.iter().skip(1).copied().collect(), rest: argument_types.rest },
+            (false, true) => {
+                let mut values = vec![receiver.unwrap_or(Type::UNKNOWN)];
+                values.extend(argument_types.values.iter().copied());
+                Values { values, rest: argument_types.rest }
+            }
+            _ => argument_types.clone(),
+        };
         let mut returns = match callee.function {
             FunctionRef::One(id) => {
                 self.call_arguments.entry(id)
-                    .and_modify(|all| *all = all.union(&argument_types))
-                    .or_insert(argument_types.clone());
-                self.returns_of(id)
+                    .and_modify(|all| *all = all.union(&parameter_types))
+                    .or_insert(parameter_types.clone());
+                let mut returns = self.returns_of(id);
+                for (slot, fresh) in fresh_returns.iter().enumerate() {
+                    if let (Some(fresh), Some(&value)) = (fresh, returns.values.get(slot)) {
+                        returns.values[slot] = self.fresh_object(call, slot, value, fresh, &parameter_types);
+                    }
+                }
+                returns
             }
             _ => match self.select(callee, &arguments, &argument_types) {
                 Some(selected) => selected,
                 None => match self.create_frame(call, callee, &arguments, &argument_types) {
                     Some(frame) => frame,
-                    None => documented,
+                    None => match self.create_pool(call, callee, &arguments, &argument_types) {
+                        Some(pool) => pool,
+                        None => self.mix(call, callee, &arguments, &argument_types).unwrap_or_else(|| documented.clone()),
+                    },
                 },
             },
         };
@@ -1529,6 +1839,14 @@ impl<'a> Walker<'a> {
             returns = self.object_method(call, receiver, method.text(), template, &argument_types, returns);
         }
         self.require_arguments(&arguments, &required);
+        if returns != documented {
+            let call_returns = Some(returns.clone());
+            match callee_read {
+                Some(CalleeRead::Variable(i)) => if let Some(r) = self.references.get_mut(i) { r.call_returns = call_returns },
+                Some(CalleeRead::Field(i)) => if let Some(f) = self.field_references.get_mut(i) { f.call_returns = call_returns },
+                None => {}
+            }
+        }
         returns
     }
 
@@ -1536,6 +1854,16 @@ impl<'a> Walker<'a> {
     /// method's documentation says it returns
     fn object_method(&mut self, call: &FunctionCall, receiver: Type, name: &str, template: bool, arguments: &Values, mut returns: Values) -> Values {
         let parent = receiver.named.identity();
+        if let Some(object) = parent.and_then(|at| self.pool_object(at)) {
+            match name {
+                "Acquire" => return Values { values: vec![object, Type::of(TypeSet::BOOLEAN)], rest: Type::NIL },
+                "GetNextActive" => return Values { values: vec![object | Type::NIL], rest: Type::NIL },
+                "EnumerateActive" => {
+                    self.enumerated.insert(self.location(call.syntax().text_range().start()), object);
+                }
+                _ => {}
+            }
+        }
         match name {
             "SetParent" => {
                 if let Some(at) = parent {
@@ -1544,8 +1872,8 @@ impl<'a> Walker<'a> {
             }
             "GetParent" => {
                 // What it was made with or given, if it was made in the files
-                if let Some(parent) = parent.and_then(|at| self.prior?.parents.get(&at)) {
-                    returns = Values { values: vec![*parent], rest: Type::NIL };
+                if let Some(parent) = parent.and_then(|at| self.known_parent(at)) {
+                    returns = Values { values: vec![parent], rest: Type::NIL };
                 }
             }
             // `parent:CreateTexture()` and the like: a new object of the type the
@@ -1594,20 +1922,281 @@ impl<'a> Walker<'a> {
         if self.definitions.global("CreateFrame") != Some(callee) {
             return None
         }
-        let frame = self.definitions.named_type_id("Frame")?;
-        let named = match arguments.first() {
-            Some(Expression::Literal(literal)) => literal.get_string()
-                .and_then(|text| self.definitions.named_type_id_ignoring_case(text.trim().trim_matches(['"', '\''])))
-                .filter(|&id| self.definitions.is_a(id, frame))
-                .unwrap_or(frame),
-            _ => frame,
-        };
+        let named = self.frame_type(arguments.first())?;
         let template = arguments.get(3).is_some_and(|a| !matches!(a, Expression::Literal(l) if l.is_nil()));
         let at = self.location(call.syntax().text_range().start());
         // The third argument, or nil without one
         *self.parents.entry(at).or_default() |= argument_types.get(2);
         let named = NamedRef::Instance { named, at, extended: template };
         Some(Values { values: vec![Type { named, ..Type::of(TypeSet::TABLE) }], rest: Type::NIL })
+    }
+
+    /// The kind of `Frame` a literal frame type names, else `Frame`
+    fn frame_type(&self, argument: Option<&Expression>) -> Option<NamedId> {
+        let frame = self.definitions.named_type_id("Frame")?;
+        Some(match argument {
+            Some(Expression::Literal(literal)) => literal.get_string()
+                .and_then(|text| self.definitions.named_type_id_ignoring_case(text.trim().trim_matches(['"', '\''])))
+                .filter(|&id| self.definitions.is_a(id, frame))
+                .unwrap_or(frame),
+            _ => frame,
+        })
+    }
+
+    /// What a pool made in the files holds, from this walk if it's been made
+    /// yet, else the previous one
+    fn pool_object(&self, pool: TableId) -> Option<Type> {
+        self.pool_objects.get(&pool).or_else(|| self.prior?.pool_objects.get(&pool)).copied()
+    }
+
+    /// `CreateFramePool`, `CreateTexturePool`, `CreateFontStringPool` and
+    /// `CreateObjectPool` make a pool, whose objects are all one object here:
+    /// of the type the pool makes (or its create function returns), made with
+    /// the pool's parent. Its init and reset functions are called with it, so
+    /// the fields and mixins they give it are what `Acquire` returns
+    fn create_pool(&mut self, call: &FunctionCall, callee: Type, expressions: &[Expression], arguments: &Values) -> Option<Values> {
+        let is = |name: &str| self.definitions.global(name) == Some(callee);
+        let at = self.location(call.syntax().text_range().start());
+        let object_at = Location { slot: POOL_OBJECT, ..at };
+        let has = |i: usize| expressions.get(i).is_some_and(|a| !matches!(a, Expression::Literal(l) if l.is_nil()));
+        // A template can add members, as with `CreateFrame`
+        let region = |named: Option<NamedId>, template: bool| -> Option<Type> {
+            let named = NamedRef::Instance { named: named?, at: object_at, extended: template };
+            Some(Type { named, ..Type::of(TypeSet::TABLE) })
+        };
+        // The object, its parent, then each callback's argument position and
+        // whether it's given the pool before the object
+        let (object, parent, callbacks): (Type, Option<Type>, &[(usize, bool)]) = if is("CreateFramePool") {
+            (region(self.frame_type(expressions.first()), has(2))?, Some(arguments.get(1)), &[(3, true), (5, false)])
+        } else if is("CreateTexturePool") {
+            (region(self.definitions.named_type_id("Texture"), has(3))?, Some(arguments.get(0)), &[(4, true)])
+        } else if is("CreateFontStringPool") {
+            (region(self.definitions.named_type_id("FontString"), has(3))?, Some(arguments.get(0)), &[(4, true)])
+        } else if is("CreateObjectPool") {
+            // Whatever the create function returns, which it's given the pool for
+            let pool = self.pool_type(at);
+            let create = arguments.get(0);
+            let object = match create.function {
+                FunctionRef::One(id) => self.returns_of(id).first(),
+                FunctionRef::Builtin(id) => self.definitions.function(id).map_or(Type::UNKNOWN, |f| f.returns.first()),
+                _ => Type::UNKNOWN,
+            };
+            self.pass_to_callback(expressions.first(), create, Values { values: vec![pool], rest: Type::NIL });
+            (object, None, &[(1, true)])
+        } else {
+            return None
+        };
+        if let Some(parent) = parent {
+            *self.parents.entry(object_at).or_default() |= parent;
+        }
+        let pool = self.pool_type(at);
+        self.pool_objects.insert(at, object);
+        for &(index, with_pool) in callbacks {
+            let values = if with_pool { vec![pool, object] } else { vec![object] };
+            self.pass_to_callback(expressions.get(index), arguments.get(index), Values { values, rest: Type::NIL });
+        }
+        Some(Values { values: vec![pool], rest: Type::NIL })
+    }
+
+    /// A pool made at `at`
+    fn pool_type(&self, at: TableId) -> Type {
+        match self.definitions.named_type_id("ObjectPool") {
+            // Only the main methods are listed, so others aren't reported
+            Some(named) => Type { named: NamedRef::Instance { named, at, extended: true }, ..Type::of(TypeSet::TABLE) },
+            None => Type::table(at),
+        }
+    }
+
+    /// A function given to a pool, which calls it with `arguments`. That call
+    /// is seen like any other, and passing it there doesn't let it escape
+    fn pass_to_callback(&mut self, expression: Option<&Expression>, function: Type, arguments: Values) {
+        let FunctionRef::One(id) = function.function else { return };
+        self.call_arguments.entry(id)
+            .and_modify(|all| *all = all.union(&arguments))
+            .or_insert(arguments);
+        let Some(Expression::Identifier(identifier)) = expression else {
+            // A function written right there, which nothing else can call
+            if matches!(expression, Some(Expression::Function(_))) {
+                self.pool_callbacks.insert(id);
+            }
+            return
+        };
+        // The read of the variable or field holding it counts as a call
+        let range = identifier.syntax().text_range();
+        if identifier.simple_name().is_some() {
+            if let Some(reference) = self.references.iter_mut().rev().find(|r| r.file == self.file && range.contains_range(r.range)) {
+                reference.callee = true;
+            }
+        } else if field_access(identifier.syntax()).is_some() {
+            if let Some(field) = self.field_references.iter_mut().rev().find(|f| f.file == self.file && !f.write && range.contains_range(f.range)) {
+                field.callee = true;
+            }
+        }
+    }
+
+    /// The parents an object made in the files is known to have
+    fn known_parent(&self, at: TableId) -> Option<Type> {
+        // From the previous walk, which saw every `SetParent`, and this one so
+        // far. Parents only gain types, so the two together are never wrong
+        let prior = self.prior.and_then(|prior| prior.parents.get(&at)).copied();
+        let current = self.parents.get(&at).copied();
+        match (prior, current) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or_default() | b.unwrap_or_default()),
+        }
+    }
+
+    /// Whether a table or object was made by the function being walked
+    fn made_here(&self, at: TableId) -> bool {
+        at.slot == 0 && at.file == self.file && self.function_ranges.last().is_some_and(|(range, _)| range.contains(at.offset))
+    }
+
+    /// The innermost function being walked that made a table or object (or a
+    /// pool whose object it is), as its number in the walk
+    fn maker(&self, at: TableId) -> Option<usize> {
+        if at.file != self.file || at.slot & !POOL_OBJECT != 0 {
+            return None
+        }
+        self.function_ranges.iter().rev().find(|(range, _)| range.contains(at.offset)).map(|&(_, function)| function)
+    }
+
+    /// The function (by its number in the walk) and index of the parameter
+    /// that `expression` reads, if it reads one that still holds its argument.
+    /// It can be an enclosing function's
+    fn parameter_read(&self, expression: &Expression) -> Option<(usize, usize)> {
+        let Expression::Identifier(identifier) = expression else { return None };
+        let id = self.local_binding(identifier.simple_name()?.text())?;
+        let binding = &self.bindings[id];
+        if binding.reassigned {
+            return None
+        }
+        Some((binding.function, *self.parameter_index.get(&id)?))
+    }
+
+    /// A function's new object, for one call: a new identity at the call, with
+    /// the object the function made mixed in (for the fields it set there)
+    /// along with that call's arguments for the parameters it mixed in
+    fn fresh_object(&mut self, call: &FunctionCall, slot: usize, value: Type, fresh: &FreshObject, arguments: &Values) -> Type {
+        let at = Location { slot: slot as u32 + 1, ..self.location(call.syntax().text_range().start()) };
+        let named = match value.named {
+            NamedRef::Table(_) => NamedRef::Table(at),
+            NamedRef::Instance { named, extended, .. } => NamedRef::Instance { named, at, extended },
+            other => return Type { named: other, ..value },
+        };
+        let mut mixins = vec![value];
+        mixins.extend(fresh.mixed_parameters.iter().map(|&i| arguments.get(i)));
+        for mixin in &mixins {
+            self.record_mixed_into(*mixin, named);
+        }
+        self.mixins.insert(at, mixins);
+        if let Some(parent) = self.known_parent(fresh.made) {
+            *self.parents.entry(at).or_default() |= parent;
+        }
+        // A pool: its objects are new for the call too, with the call's
+        // arguments for the parameters its init or reset function mixed in
+        if let (Some(mixed), Some(inner)) = (&fresh.pool_mixed_parameters, self.pool_object(fresh.made)) {
+            let object_at = Location { slot: at.slot | POOL_OBJECT, ..at };
+            let object = match inner.named {
+                NamedRef::Instance { named, extended, .. } => Type { named: NamedRef::Instance { named, at: object_at, extended }, ..inner },
+                NamedRef::Table(_) => Type { named: NamedRef::Table(object_at), ..inner },
+                _ => inner,
+            };
+            if object.named.identity() == Some(object_at) {
+                let mut mixins = vec![inner];
+                mixins.extend(mixed.iter().map(|&i| arguments.get(i)));
+                for mixin in &mixins {
+                    self.record_mixed_into(*mixin, object.named);
+                }
+                self.mixins.insert(object_at, mixins);
+                if let Some(parent) = inner.named.identity().and_then(|inner| self.known_parent(inner)) {
+                    *self.parents.entry(object_at).or_default() |= parent;
+                }
+            }
+            self.pool_objects.insert(at, object);
+        }
+        Type { named, ..value }
+    }
+
+    /// `CreateFromMixins(a, b)` makes a table with the fields of `a` and `b`,
+    /// and `Mixin(object, a, b)` adds them to `object` and returns it
+    fn mix(&mut self, call: &FunctionCall, callee: Type, expressions: &[Expression], arguments: &Values) -> Option<Values> {
+        let (object, mixins, mixin_expressions) = if self.definitions.global("CreateFromMixins") == Some(callee) {
+            (Type::table(self.location(call.syntax().text_range().start())), &arguments.values[..], expressions)
+        } else if self.definitions.global("Mixin") == Some(callee) {
+            let (object, mixins) = arguments.values.split_first()?;
+            (*object, mixins, expressions.get(1..).unwrap_or_default())
+        } else {
+            return None
+        };
+        // Mixing a parameter into something the function makes, so each call
+        // mixes in what it passes
+        // (or an enclosing function makes, like a pool's object in its init function)
+        if let Some((at, maker)) = object.named.identity().and_then(|at| Some((at, self.maker(at)?))) {
+            let parameters: Vec<usize> = mixin_expressions.iter()
+                .filter_map(|e| self.parameter_read(e))
+                .filter(|&(function, _)| function == maker)
+                .map(|(_, index)| index)
+                .collect();
+            let recorded = self.parameter_mixins.entry(at).or_default();
+            for parameter in parameters {
+                if !recorded.contains(&parameter) {
+                    recorded.push(parameter);
+                }
+            }
+        }
+        for mixin in mixins {
+            self.record_mixed_into(*mixin, object.named);
+        }
+        // Only a table or object made in the files can keep track of its mixins
+        if let Some(at) = object.named.identity() {
+            let recorded = self.mixins.entry(at).or_default();
+            for mixin in mixins {
+                if !recorded.contains(mixin) {
+                    recorded.push(*mixin);
+                }
+            }
+        }
+        Some(Values { values: vec![object], rest: Type::NIL })
+    }
+
+    /// `mixin` was mixed into a table or object of type `object`
+    fn record_mixed_into(&mut self, mixin: Type, object: NamedRef) {
+        let Some(mixin) = mixin.named.identity() else { return };
+        if matches!(object, NamedRef::None | NamedRef::Unknown) {
+            return
+        }
+        let recorded = self.mixed_into.entry(mixin).or_default();
+        if !recorded.contains(&object) {
+            recorded.push(object);
+        }
+    }
+
+    /// What `mixin` was mixed into on this walk, following tables made from it
+    /// to what they were mixed into
+    fn mixin_target(&self, mixin: TableId, depth: usize) -> MixinTarget {
+        // Deep enough for any real chain of mixins, and stops a loop
+        if depth > 16 {
+            return MixinTarget::Nothing
+        }
+        let Some(objects) = self.mixed_into.get(&mixin) else { return MixinTarget::Nothing };
+        objects.iter().fold(MixinTarget::Nothing, |target, &object| {
+            let next = match object.object_type() {
+                Some((named, extended)) => MixinTarget::Object(named, extended),
+                // A table, which is plain unless it's mixed into something too
+                None => match object.identity().map(|at| self.mixin_target(at, depth + 1)) {
+                    Some(MixinTarget::Nothing) | None => MixinTarget::Other,
+                    Some(target) => target,
+                },
+            };
+            match (target, next) {
+                (MixinTarget::Nothing, x) | (x, MixinTarget::Nothing) => x,
+                (MixinTarget::Object(a, e), MixinTarget::Object(b, f)) => match self.definitions.common_ancestor(a, b) {
+                    Some(common) => MixinTarget::Object(common, e || f),
+                    None => MixinTarget::Other,
+                },
+                _ => MixinTarget::Other,
+            }
+        })
     }
 
     /// `select(n, ...)` with a literal `n`, which gives the arguments from the
@@ -2249,8 +2838,8 @@ mod tests {
         assert_eq!(types_of("local function f(x) end f(1) pcall(f, 's')", "x"), ["unknown"]);
         assert_eq!(types_of("local function f(x) end f(1) local g = f", "x"), ["unknown"]);
         assert_eq!(types_of("local function f(x) end f(1) return f", "x"), ["unknown"]);
-        assert_eq!(types_of("function F(x) end F(1)", "x"), ["unknown"]);
-        assert_eq!(types_of("local t = {} function t.f(x) end t.f(1)", "x"), ["unknown"]);
+        assert_eq!(types_of("function F(x) end F(1) local g = F", "x"), ["unknown"]);
+        assert_eq!(types_of("local t = {} function t.f(x) end t.f(1) pcall(t.f)", "x"), ["unknown"]);
         assert_eq!(types_of("pcall(function(x) end, 1)", "x"), ["unknown"]);
         // Holding two different functions, so a call doesn't say which one ran
         assert_eq!(types_of("local f = function(x) end f = function(y) end f(1)", "x"), ["unknown"]);
@@ -2484,6 +3073,146 @@ mod tests {
     }
 
     #[test]
+    fn parameters_from_calls_in_other_files() {
+        let analysis = analyse_files(&["function Id(x) return x end", "local v = Id(1)"], true);
+        assert_eq!(types_in(&analysis, 0, "x"), ["number", "number"]);
+        assert_eq!(types_in(&analysis, 1, "v"), ["number"]);
+        let analysis = analyse_files(&[
+            "local _, ns = ... function ns.Id(x) return x end function ns:Add(n) return n end",
+            "local _, ns = ... local a, b = ns.Id(1), ns:Add('s')",
+        ], true);
+        assert_eq!(types_in(&analysis, 0, "x"), ["number", "number"]);
+        assert_eq!(types_in(&analysis, 0, "n"), ["string", "string"]);
+        assert_eq!(types_in(&analysis, 1, "a"), ["number"]);
+        assert_eq!(types_in(&analysis, 1, "b"), ["string"]);
+        // From calls in several files
+        let analysis = analyse_files(&["local _, ns = ... function ns.F(x) end", "local _, ns = ... ns.F(1)", "local _, ns = ... ns.F('s')"], true);
+        assert_eq!(types_in(&analysis, 0, "x"), ["number|string"]);
+    }
+
+    #[test]
+    fn methods_called_either_way() {
+        // `self` is passed explicitly with `.`, so the arguments line up after it
+        let analysis = analyse_files(&["local _, ns = ... function ns:Add(n) end ns.Add(ns, 1)"], true);
+        assert_eq!(types_in(&analysis, 0, "n"), ["number"]);
+        let analysis = analyse_files(&["local _, ns = ... function ns.Add(t, n) end ns:Add(1)"], true);
+        assert_eq!(types_in(&analysis, 0, "n"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "t"), ["table"]);
+    }
+
+    #[test]
+    fn shared_functions_that_escape() {
+        // Handed to something else, which could call it with anything
+        let analysis = analyse_files(&["local _, ns = ... function ns.OnEvent(x) end", "local _, ns = ... ns.OnEvent(1) frame:SetScript('OnEvent', ns.OnEvent)"], true);
+        assert_eq!(types_in(&analysis, 0, "x"), ["unknown"]);
+        let analysis = analyse_files(&["function Handler(x) end", "Handler(1) register(Handler)"], true);
+        assert_eq!(types_in(&analysis, 0, "x"), ["unknown"]);
+        // Copied onto something else (a mixin), whose calls aren't known to be it
+        let analysis = analyse_files(&["local M = {} function M:Init(x) end M:Init(1)", "local f = Mixin(CreateFrame('Frame'), M) f:Init('s')"], true);
+        assert_eq!(types_in(&analysis, 0, "x"), ["unknown"]);
+    }
+
+    fn mixin_definitions() -> Arc<Definitions> {
+        Arc::new(Definitions::from_json(r#"{"functions": {
+            "CreateFromMixins": {"parameters": ["..."], "returns": ["unknown"]},
+            "Mixin": {"parameters": ["object", "..."], "returns": ["unknown"]}
+        }}"#).unwrap())
+    }
+
+    fn analyse_mixins(sources: &[&str]) -> Analysis {
+        let files: Vec<SourceFile> = sources.iter()
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), in_addon: true })
+            .collect();
+        Analysis::analyse(&files, &mixin_definitions())
+    }
+
+    #[test]
+    fn create_from_mixins() {
+        let analysis = analyse_mixins(&[
+            "local _, ns = ... ns.Base = {} function ns.Base:Name() return 's' end",
+            "local _, ns = ... ns.Bar = CreateFromMixins(ns.Base) function ns.Bar:Size() return 1 end",
+            "local _, ns = ... local a, b, c = ns.Bar:Name(), ns.Bar:Size(), ns.Bar",
+        ]);
+        assert_eq!(types_in(&analysis, 2, "a"), ["string"]);
+        assert_eq!(types_in(&analysis, 2, "b"), ["number"]);
+        assert_eq!(types_in(&analysis, 2, "c"), ["table"]);
+        // Its own fields win, and so do later mixins
+        let analysis = analyse_mixins(&["local A = { x = 1 } local B = { x = 's' } local C = CreateFromMixins(A, B) local D = CreateFromMixins(A) D.x = true
+            local c, d = C.x, D.x"]);
+        assert_eq!(types_in(&analysis, 0, "c"), ["string"]);
+        assert_eq!(types_in(&analysis, 0, "d"), ["true"]);
+        // Through an alias too
+        let analysis = analyse_mixins(&["local Create = CreateFromMixins local A = { x = 1 } local y = Create(A).x"]);
+        assert_eq!(types_in(&analysis, 0, "y"), ["number"]);
+    }
+
+    #[test]
+    fn mixin_into_objects() {
+        let analysis = analyse_mixins(&["local M = {} function M:Init(x) end M:Init(1) local t = Mixin({}, M) t:Init('s')"]);
+        // Both calls are known to be M.Init
+        assert_eq!(types_in(&analysis, 0, "x"), ["number|string"]);
+        let analysis = analyse_mixins(&["local M = { v = 1 } local t = {} Mixin(t, M) local y = t.v"]);
+        assert_eq!(types_in(&analysis, 0, "y"), ["number"]);
+    }
+
+    fn analyse_files_with(sources: &[&str], definitions: &Arc<Definitions>) -> Analysis {
+        let files: Vec<SourceFile> = sources.iter()
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), in_addon: true })
+            .collect();
+        Analysis::analyse(&files, definitions)
+    }
+
+    fn analyse_objects(sources: &[&str]) -> Analysis {
+        let definitions = Arc::new(Definitions::from_json(r#"{
+            "types": {"Frame": {"base": "table", "method_tables": ["FrameAPI"]}},
+            "method_tables": {"FrameAPI": {"functions": {"Show": {}, "GetParent": {"returns": ["Frame"]}}}},
+            "values": {"UIParent": "Frame"},
+            "functions": {
+                "CreateFrame": {"parameters": ["frameType: string", "name: string|nil", "parent: Frame|nil"], "returns": ["Frame"]},
+                "CreateFromMixins": {"parameters": ["..."], "returns": ["unknown"]},
+                "Mixin": {"parameters": ["object", "..."], "returns": ["unknown"]}
+            }
+        }"#).unwrap());
+        let files: Vec<SourceFile> = sources.iter()
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), in_addon: true })
+            .collect();
+        Analysis::analyse(&files, &definitions)
+    }
+
+    #[test]
+    fn functions_mixing_in_parameters() {
+        // Coolinator's InitFrameWithMixin
+        let analysis = analyse_objects(&[
+            "local _, ns = ... function ns.Init(parent, mixin) local f = CreateFrame('Frame', nil, parent) Mixin(f, mixin) f:OnLoad() return f end",
+            "local _, ns = ... ns.A = {} function ns.A:OnLoad() end function ns.A:Count() return 1 end
+             ns.B = {} function ns.B:OnLoad() end function ns.B:Name() return 's' end",
+            "local _, ns = ... local a, b = ns.Init(UIParent, ns.A), ns.Init(UIParent, ns.B)
+             local x, y, z = a:Count(), b:Name(), a:Name()
+             local p = a:GetParent() a:Show()",
+        ]);
+        assert_eq!(types_in(&analysis, 2, "a")[0], "Frame & ns.A");
+        assert_eq!(types_in(&analysis, 2, "x"), ["number"]);
+        assert_eq!(types_in(&analysis, 2, "y"), ["string"]);
+        // `a` was made with A, not B
+        assert_eq!(types_in(&analysis, 2, "z"), ["unknown"]);
+        assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
+    }
+
+    #[test]
+    fn each_call_returns_a_new_object() {
+        let analysis = analyse_objects(&["local function Make() local t = { kind = 1 } return t end
+            local a, b = Make(), Make() a.v = 1 b.v = 's' local x, y, k = a.v, b.v, a.kind"]);
+        assert_eq!(types_in(&analysis, 0, "x"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "y"), ["string"]);
+        // Fields set where it was made still count
+        assert_eq!(types_in(&analysis, 0, "k"), ["number"]);
+        // Something not made by the function is the same table every call
+        let analysis = analyse_objects(&["local shared = {} local function Get() return shared end
+            local a, b = Get(), Get() a.v = 1 local y = b.v"]);
+        assert_eq!(types_in(&analysis, 0, "y"), ["number"]);
+    }
+
+    #[test]
     fn varargs_outside_addon_files() {
         // Not part of an addon, so nothing is known about `...`
         assert_eq!(types_in(&analyse_files(&["local name, ns = ..."], false), 0, "name"), ["unknown"]);
@@ -2549,6 +3278,8 @@ mod tests {
                 "Frame": {"base": "table", "inherits": ["Region"], "method_tables": ["FrameAPI"]},
                 "Button": {"base": "table", "inherits": ["Frame"], "method_tables": ["ButtonAPI"]},
                 "Texture": {"base": "table", "inherits": ["Region"], "method_tables": []},
+                "FontString": {"base": "table", "inherits": ["Region"], "method_tables": ["FontStringAPI"]},
+                "ObjectPool": {"base": "table", "method_tables": ["ObjectPoolAPI"]},
                 "ItemKey": {"base": "table"}
             },
             "method_tables": {
@@ -2558,7 +3289,10 @@ mod tests {
                     "CreateFontString": {"parameters": ["name: string|nil", "templateName: string|nil"], "returns": ["Texture"]},
                     "GetChild": {"returns": ["Frame|nil"]}
                 }},
-                "ButtonAPI": {"functions": {"Click": {}, "GetText": {"returns": ["string"]}}}
+                "ButtonAPI": {"functions": {"Click": {}, "GetText": {"returns": ["string"]}}},
+                "FontStringAPI": {"functions": {"SetText": {}}},
+                "ObjectPoolAPI": {"functions": {"Acquire": {"returns": ["unknown", "boolean"]}, "Release": {"parameters": ["object"]},
+                    "EnumerateActive": {"returns": ["function", "table"]}, "GetNextActive": {"returns": ["unknown"]}}}
             },
             "values": {"UIParent": "Frame"},
             "functions": {
@@ -2566,7 +3300,12 @@ mod tests {
                 "GetItemKey": {"returns": ["ItemKey"]},
                 "GetFrame": {"returns": ["Frame"]},
                 "Anchor": {"parameters": ["region: Region"]},
-                "Parent": {"parameters": ["frame: Frame"]}
+                "Parent": {"parameters": ["frame: Frame"]},
+                "CreateFromMixins": {"parameters": ["..."], "returns": ["unknown"]},
+                "Mixin": {"parameters": ["object", "..."], "returns": ["unknown"]},
+                "CreateFramePool": {"parameters": ["frameType: string|nil", "parent: Frame|nil", "frameTemplate: string|nil", "resetFunc: function|nil", "forbidden: boolean|nil", "frameInitFunc: function|nil"], "returns": ["ObjectPool"]},
+                "CreateFontStringPool": {"parameters": ["parent: Frame|nil", "layer: string|nil", "subLayer: number|nil", "fontStringTemplate: string|nil", "resetFunc: function|nil"], "returns": ["ObjectPool"]},
+                "CreateObjectPool": {"parameters": ["createFunc: function|nil", "resetFunc: function|nil"], "returns": ["ObjectPool"]}
             }
         }"#).unwrap())
     }
@@ -2663,6 +3402,145 @@ mod tests {
         assert_eq!(widget_types_of(source, "y"), ["true"]);
         // Still shown as just their type
         assert_eq!(widget_types_of("local f = CreateFrame('Frame')", "f"), ["Frame"]);
+    }
+
+    #[test]
+    fn mixins_are_what_they_are_mixed_into() {
+        // `self` in a mixin's methods is the frame it's mixed into, with the mixin's fields
+        let source = "local M = {} function M:OnLoad() local s, t, n = self, self:GetText(), self:Count() end function M:Count() return 1 end
+            local b = CreateFrame('Button') Mixin(b, M)";
+        assert_eq!(widget_types_of(source, "s"), ["Button & M"]);
+        assert_eq!(widget_types_of(source, "t"), ["string"]);
+        assert_eq!(widget_types_of(source, "n"), ["number"]);
+        assert!(warnings(source).is_empty(), "{:?}", warnings(source));
+        // A missing method is still reported
+        assert_eq!(warnings("local M = {} function M:OnLoad() self:Nope() end Mixin(CreateFrame('Button'), M)"), ["Button has no method `Nope`"]);
+        // Mixed into a Button and a Frame, so it's only known to be a Frame
+        assert_eq!(widget_types_of("local M = {} function M:OnLoad() local s = self end Mixin(CreateFrame('Button'), M) Mixin(CreateFrame('Frame'), M)", "s"), ["Frame & M"]);
+        // Through a table made from it
+        assert_eq!(widget_types_of("local Base = {} function Base:OnLoad() local s = self end local M = CreateFromMixins(Base)
+            Mixin(CreateFrame('Button'), M)", "s"), ["Button & Base"]);
+        // Mixed into a plain table too, so it isn't only frames
+        assert_eq!(widget_types_of("local M = {} function M:OnLoad() local s = self end Mixin(CreateFrame('Button'), M) Mixin({}, M)", "s"), ["table"]);
+        // Never mixed into anything: still a plain table
+        assert_eq!(widget_types_of("local M = {} function M:OnLoad() local s = self end", "s"), ["table"]);
+        // A template can add methods, so they aren't reported
+        assert!(warnings("local M = {} function M:OnLoad() self:Nope() end Mixin(CreateFrame('Button', nil, nil, 'T'), M)").is_empty());
+    }
+
+    #[test]
+    fn mixins_shown_on_frames() {
+        let source = "local A, B = {}, {} local f = CreateFrame('Button') Mixin(f, A, B) local g = f
+            local h = Mixin(CreateFrame('Frame'), CreateFromMixins(A, B)) local plain = CreateFrame('Frame')
+            local maybe = c and f or nil";
+        assert_eq!(widget_types_of(source, "g"), ["Button & A & B"]);
+        // An inline table of mixins shows what it's made from
+        assert_eq!(widget_types_of(source, "h"), ["Frame & A & B"]);
+        assert_eq!(widget_types_of(source, "plain"), ["Frame"]);
+        assert_eq!(widget_types_of(source, "maybe"), ["(Button & A & B)?"]);
+    }
+
+    #[test]
+    fn pools_give_their_objects() {
+        let source = "local M = {} function M:Count() return 1 end
+            local pool = CreateFramePool('Button', UIParent, nil, function(p, frame) local r = frame end, false, function(frame) Mixin(frame, M) frame.label = 's' end)
+            local got, new = pool:Acquire()
+            local n, label, t = got:Count(), got.label, got:GetText()
+            for active in pool:EnumerateActive() do local e = active end
+            local next = pool:GetNextActive()
+            local p = pool";
+        assert_eq!(widget_types_of(source, "got")[0], "Button & M");
+        assert_eq!(widget_types_of(source, "new"), ["boolean"]);
+        // The init function's mixins and fields, and the type's own methods
+        assert_eq!(widget_types_of(source, "n"), ["number"]);
+        assert_eq!(widget_types_of(source, "label"), ["string"]);
+        assert_eq!(widget_types_of(source, "t"), ["string"]);
+        // The reset function is given the pool, then the object
+        assert_eq!(widget_types_of(source, "r"), ["Button & M"]);
+        assert_eq!(widget_types_of(source, "e"), ["Button & M"]);
+        assert_eq!(widget_types_of(source, "next"), ["(Button & M)?"]);
+        // The reset function's pool parameter, then the pool itself
+        assert_eq!(widget_types_of(source, "p"), ["ObjectPool<Button & M>", "ObjectPool<Button & M>"]);
+        // `self` in the mixin is the pool's frames
+        assert_eq!(widget_types_of("local M = {} function M:Init() local s = self end
+            local pool = CreateFramePool('Button', nil, nil, nil, false, function(f) Mixin(f, M) end)", "s"), ["Button & M"]);
+        assert!(warnings(source).is_empty(), "{:?}", warnings(source));
+    }
+
+    #[test]
+    fn pool_callbacks_held_in_variables() {
+        // Named init and reset functions count as called by the pool too
+        let source = "local function Reset(pool, fs) local r = fs end
+            local pool = CreateFontStringPool(UIParent, 'OVERLAY', 0, nil, Reset) local s = pool:Acquire()";
+        assert_eq!(widget_types_of(source, "r"), ["FontString"]);
+        assert_eq!(widget_types_of(source, "s"), ["FontString"]);
+        // Object pools hold what their create function returns
+        let source = "local M = { v = 1 } local pool = CreateObjectPool(function(p) local f = CreateFrame('Frame') Mixin(f, M) return f end)
+            local o = pool:Acquire() local v = o.v";
+        assert_eq!(widget_types_of(source, "o")[0], "Frame & M");
+        assert_eq!(widget_types_of(source, "v"), ["number"]);
+        // A template can add members
+        assert!(warnings("local pool = CreateFramePool('Button', nil, 'T') pool:Acquire():Anything()").is_empty());
+        assert_eq!(warnings("local pool = CreateFramePool('Button') pool:Acquire():Anything()"), ["Button has no method `Anything`"]);
+    }
+
+    #[test]
+    fn pools_made_by_functions() {
+        // Coolinator's GeneratePool: the init function mixes in a parameter of
+        // the function making the pool, so each call's pool has its own mixin
+        let analysis = analyse_files_with(&[
+            "local _, ns = ... function ns.GeneratePool(mixin, template)
+                return CreateFramePool('Frame', UIParent, template or 'T', function(_, frame) frame:Hide() end, false, function(frame)
+                    Mixin(frame, mixin) frame:OnLoad() end)
+            end",
+            "local _, ns = ... ns.A = {} function ns.A:OnLoad() local sa = self end function ns.A:Count() return 1 end
+             ns.B = {} function ns.B:OnLoad() end function ns.B:Name() return 's' end",
+            "local _, ns = ... local pools = { a = ns.GeneratePool(ns.A), b = ns.GeneratePool(ns.B) }
+             local pa, pb = pools.a, pools.b
+             local a, b = pools.a:Acquire(), pools.b:Acquire()
+             local x, y = a:Count(), b:Name()",
+        ], &widgets());
+        assert_eq!(types_in(&analysis, 2, "pa"), ["ObjectPool<Frame & ns.A>"]);
+        assert_eq!(types_in(&analysis, 2, "pb"), ["ObjectPool<Frame & ns.B>"]);
+        assert_eq!(types_in(&analysis, 2, "a"), ["Frame & ns.A", "Frame & ns.A"]);
+        assert_eq!(types_in(&analysis, 2, "b"), ["Frame & ns.B", "Frame & ns.B"]);
+        assert_eq!(types_in(&analysis, 2, "x"), ["number"]);
+        assert_eq!(types_in(&analysis, 2, "y"), ["string"]);
+        assert_eq!(types_in(&analysis, 1, "sa"), ["Frame & ns.A"]);
+    }
+
+    #[test]
+    fn hovering_calls_shows_what_they_return() {
+        let source = "local M = {} local pool = CreateFramePool('Button', nil, nil, nil, false, function(f) Mixin(f, M) end)
+            local got = pool:Acquire() local b = CreateFrame('Button')";
+        let analysis = analyse_with(source, &widgets());
+        let hover = |text: &str| analysis.hover(FileId(0), TextSize::new(source.find(text).unwrap() as u32)).unwrap().0;
+        assert_eq!(hover("Acquire"), "field pool:Acquire: function() -> Button & M, boolean");
+        assert_eq!(hover("CreateFrame('Button')"), "global CreateFrame: function(frameType: string, name: string?, parent: Frame?, template: string?) -> Button");
+    }
+
+    #[test]
+    fn own_fields_win_over_unknown_tables() {
+        // Another table of unknown identity using the same field name doesn't
+        // blur what this table's field holds
+        let source = "local t = { cooldown = CreateFramePool('Frame') }
+            local function f(entry) entry.texts.cooldown = { scale = 1 } end
+            local p = t.cooldown local o = {} local v = o.cooldown";
+        assert_eq!(widget_types_of(source, "p"), ["ObjectPool<Frame>"]);
+        // With no field of its own, it could be the unknown table
+        assert_eq!(widget_types_of(source, "v"), ["table"]);
+    }
+
+    #[test]
+    fn mixins_given_to_functions_making_frames() {
+        // Coolinator's InitFrameWithMixin, with the frame made in another file
+        let analysis = analyse_objects(&[
+            "local _, ns = ... function ns.Init(parent, mixin) local f = CreateFrame('Frame', nil, parent) Mixin(f, mixin) return f end",
+            "local _, ns = ... ns.A = {} function ns.A:OnLoad() local s = self self:Show() end",
+            "local _, ns = ... local a = ns.Init(UIParent, ns.A)",
+        ]);
+        assert_eq!(types_in(&analysis, 1, "s"), ["Frame & ns.A"]);
+        assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
     }
 
     #[test]

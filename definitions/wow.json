@@ -1,8 +1,26 @@
 {
+  "types": {
+    "ObjectPool": {"base": "table", "method_tables": ["ObjectPoolAPI"]}
+  },
+  "method_tables": {
+    "ObjectPoolAPI": {"functions": {
+      "Acquire": {"returns": ["unknown", "boolean"]},
+      "Release": {"parameters": ["object"], "returns": ["boolean"]},
+      "ReleaseAll": {},
+      "EnumerateActive": {"returns": ["function", "table"]},
+      "GetNextActive": {"parameters": ["current"], "returns": ["unknown"]},
+      "IsActive": {"parameters": ["object"], "returns": ["boolean"]},
+      "GetNumActive": {"returns": ["number"]}
+    }}
+  },
   "values": {
     "UIParent": "Frame"
   },
   "functions": {
-    "CreateFrame": {"parameters": ["frameType: string", "name: string|nil", "parent: Frame|nil", "template: string|nil", "id: number|nil"], "returns": ["Frame"]}
+    "CreateFrame": {"parameters": ["frameType: string", "name: string|nil", "parent: Frame|nil", "template: string|nil", "id: number|nil"], "returns": ["Frame"]},
+    "CreateFramePool": {"parameters": ["frameType: string|nil", "parent: Frame|nil", "frameTemplate: string|nil", "resetFunc: function|nil", "forbidden: boolean|nil", "frameInitFunc: function|nil", "capacity: number|nil"], "returns": ["ObjectPool"]},
+    "CreateTexturePool": {"parameters": ["parent: Frame|nil", "layer: string|nil", "subLayer: number|nil", "textureTemplate: string|nil", "resetFunc: function|nil"], "returns": ["ObjectPool"]},
+    "CreateFontStringPool": {"parameters": ["parent: Frame|nil", "layer: string|nil", "subLayer: number|nil", "fontStringTemplate: string|nil", "resetFunc: function|nil"], "returns": ["ObjectPool"]},
+    "CreateObjectPool": {"parameters": ["createFunc: function|nil", "resetFunc: function|nil", "capacity: number|nil"], "returns": ["ObjectPool"]}
   }
 }

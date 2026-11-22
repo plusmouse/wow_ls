@@ -138,6 +138,23 @@ impl Definitions {
         }))
     }
 
+    /// The closest type both `a` and `b` are, if they have one in common
+    pub fn common_ancestor(&self, a: NamedId, b: NamedId) -> Option<NamedId> {
+        // Breadth first through `a`'s ancestors, so the closest is found first
+        let mut queue = std::collections::VecDeque::from([a]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = queue.pop_front() {
+            if !seen.insert(id) {
+                continue
+            }
+            if self.is_a(b, id) {
+                return Some(id)
+            }
+            queue.extend(self.named_type(id).iter().flat_map(|named| named.inherits.iter().copied()));
+        }
+        None
+    }
+
     /// Named types, by name ignoring case
     pub fn named_type_id_ignoring_case(&self, name: &str) -> Option<NamedId> {
         self.named_type_id(name).or_else(|| {
@@ -398,7 +415,7 @@ impl Definitions {
             Some(Value::String(t)) => self.parse_type(t)?,
             Some(_) => return Err("`rest` should be a string".to_string()),
         };
-        Ok(FunctionInfo { parameters, varargs, returns: Values { values, rest } })
+        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns: Vec::new() })
     }
 
     /// `"name"` or `"name: type"`
