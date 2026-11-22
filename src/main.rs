@@ -70,6 +70,10 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
                 let access = if r.write { "=" } else { ":" };
                 println!("{}:{} {} {}{} {}", line.0 + 1, column + 1, binding.kind, binding.name, access, analysis.describe(r.types));
             }
+            for d in analysis.diagnostics.iter().filter(|d| d.file == types::FileId(i as u32)) {
+                let (line, column) = numbers.from_offset(usize::from(d.range.start()));
+                println!("warning {}:{}:{} {}", path.display(), line.0 + 1, column + 1, d.message);
+            }
         }
         eprintln!("{} files, {} bindings, {} references in {:?}", paths.len(), analysis.bindings.len(), analysis.references.len(), dur);
         Ok(())

@@ -53,7 +53,14 @@
 //!   `"values": { "Immediate": "Enum.StatusBarInterpolation" }`.
 //! * Named types (`types`) are tables or userdata with their own name, like WoW's
 //!   `Frame`, shown by that name instead of `table`, or numbers with a name (an
-//!   enum). Any file can use a named type declared in any other.
+//!   enum). Any file can use a named type declared in any other, and several
+//!   files can declare the same type (with the same `base`).
+//! * A named type's methods come from `method_tables` it lists (each a set of
+//!   `functions`, declared in a `method_tables` section), and every method of
+//!   the types it `inherits`:
+//!   `"Button": { "base": "table", "inherits": ["Frame"], "method_tables": ["SimpleButtonAPI"] }`.
+//!   A type that lists either has a known set of methods, so calls of other
+//!   methods on it can be reported as missing.
 //!
 //! Every `.json` file in the directory is loaded, in filename order, and a later
 //! file's definition of a name replaces an earlier one. Tables are merged member
@@ -75,8 +82,13 @@ pub struct NamedType {
     pub name: String,
     /// TABLE, OTHER (userdata) or NUMBER (an enum)
     pub base: TypeSet,
-    /// Known members
+    /// Known members, not counting inherited ones
     pub fields: HashMap<String, Type>,
+    /// Types whose members this has too
+    pub inherits: Vec<NamedId>,
+    /// Whether its methods are known (it has `method_tables` or `inherits`), so
+    /// anything else called on it is missing
+    pub has_methods: bool,
     /// A namespace table like `string`, which only exists to hold its members.
     /// Shown as plain `table`, as it isn't a type code would name
     pub namespace: bool,
@@ -89,6 +101,13 @@ pub struct Definitions {
     globals: HashMap<String, Type>,
     types: Vec<NamedType>,
     type_names: HashMap<String, NamedId>,
+    /// Methods by table, from `method_tables` sections
+    method_tables: HashMap<String, HashMap<String, Type>>,
+    /// What each type listed for `inherits` and `method_tables`, resolved once
+    /// every file is loaded
+    compositions: HashMap<NamedId, (Vec<String>, Vec<String>)>,
+    /// Types another type inherits from
+    has_subtypes: std::collections::HashSet<String>,
 }
 
 impl Definitions {
@@ -97,12 +116,43 @@ impl Definitions {
         self.globals.get(name).copied()
     }
 
-    /// The type of member `name` of a value of type `ty`, if it's known
+    /// The type of member `name` of a value of type `ty`, if it's known,
+    /// including inherited members
     pub fn field(&self, ty: Type, name: &str) -> Option<Type> {
-        match ty.named {
-            NamedRef::One(id) => self.named_type(id)?.fields.get(name).copied(),
-            _ => None,
+        self.member(ty.named.named_id()?, name, 0)
+    }
+
+    /// Whether another type inherits from `id`
+    pub fn has_subtypes(&self, id: NamedId) -> bool {
+        self.named_type(id).is_some_and(|named| self.has_subtypes.contains(&named.name))
+    }
+
+    /// Whether `id` is `ancestor` or inherits from it
+    pub fn is_a(&self, id: NamedId, ancestor: NamedId) -> bool {
+        self.is_a_within(id, ancestor, 0)
+    }
+
+    fn is_a_within(&self, id: NamedId, ancestor: NamedId, depth: usize) -> bool {
+        id == ancestor || (depth <= 32 && self.named_type(id).is_some_and(|named| {
+            named.inherits.iter().any(|&parent| self.is_a_within(parent, ancestor, depth + 1))
+        }))
+    }
+
+    /// Named types, by name ignoring case
+    pub fn named_type_id_ignoring_case(&self, name: &str) -> Option<NamedId> {
+        self.named_type_id(name).or_else(|| {
+            self.types.iter().position(|t| !t.namespace && t.name.eq_ignore_ascii_case(name)).map(|i| i as NamedId)
+        })
+    }
+
+    fn member(&self, id: NamedId, name: &str, depth: usize) -> Option<Type> {
+        // Deep enough for any real hierarchy, and stops a loop in a bad file
+        if depth > 32 {
+            return None
         }
+        let named = self.named_type(id)?;
+        named.fields.get(name).copied()
+            .or_else(|| named.inherits.iter().find_map(|&parent| self.member(parent, name, depth + 1)))
     }
 
     /// The function at a path like `string.format`
@@ -162,9 +212,14 @@ impl Definitions {
         for (file, root) in files {
             definitions.add_types(root).map_err(|e| format!("{file}: {e}"))?;
         }
+        definitions.has_subtypes = definitions.compositions.values()
+            .flat_map(|(inherits, _)| inherits.iter().cloned())
+            .collect();
         for (file, root) in files {
+            definitions.add_method_tables(root).map_err(|e| format!("{file}: {e}"))?;
             definitions.add_members(root, None, "").map_err(|e| format!("{file}: {e}"))?;
         }
+        definitions.compose()?;
         Ok(definitions)
     }
 
@@ -184,13 +239,78 @@ impl Definitions {
             if parse_builtin_type(name).is_some() {
                 return Err(format!("{name}: can't redefine a built-in type"));
             }
-            let named = NamedType { name: name.clone(), base, fields: HashMap::new(), namespace: false };
-            match self.type_names.get(name) {
-                Some(&id) => self.types[id as usize] = named,
+            let id = match self.type_names.get(name) {
+                Some(&id) if self.types[id as usize].base == base => id,
+                Some(_) => return Err(format!("{name} is declared with two different bases")),
                 None => {
-                    self.type_names.insert(name.clone(), self.types.len() as NamedId);
-                    self.types.push(named);
+                    let id = self.types.len() as NamedId;
+                    self.type_names.insert(name.clone(), id);
+                    self.types.push(NamedType {
+                        name: name.clone(), base, fields: HashMap::new(), inherits: Vec::new(), has_methods: false, namespace: false,
+                    });
+                    id
                 }
+            };
+            let names = |key: &str| -> Result<Vec<String>, String> {
+                match definition.get(key) {
+                    None => Ok(Vec::new()),
+                    Some(Value::Array(items)) => items.iter()
+                        .map(|i| i.as_str().map(str::to_string).ok_or_else(|| format!("{name}: `{key}` should only hold strings")))
+                        .collect(),
+                    Some(_) => Err(format!("{name}: `{key}` should be an array")),
+                }
+            };
+            let (inherits, method_tables) = (names("inherits")?, names("method_tables")?);
+            if definition.get("inherits").is_some() || definition.get("method_tables").is_some() {
+                let composition = self.compositions.entry(id).or_default();
+                composition.0.extend(inherits);
+                composition.1.extend(method_tables);
+            }
+        }
+        Ok(())
+    }
+
+    fn add_method_tables(&mut self, root: &Value) -> Result<(), String> {
+        let Some(tables) = object(root, "method_tables")? else { return Ok(()) };
+        for (table, definition) in tables {
+            // Registered even if empty, so types can list it
+            self.method_tables.entry(table.clone()).or_default();
+            let Some(functions) = object(definition, "functions")? else { continue };
+            for (name, function) in functions {
+                let function = self.parse_function(function).map_err(|e| format!("{table}:{name}: {e}"))?;
+                let id = self.functions.len() as BuiltinId;
+                self.functions.push(function);
+                self.method_tables.entry(table.clone()).or_default().insert(name.clone(), Type::builtin(id));
+            }
+        }
+        Ok(())
+    }
+
+    /// Gives each type the methods of the tables it lists, and links the types
+    /// it inherits from
+    fn compose(&mut self) -> Result<(), String> {
+        let mut compositions: Vec<_> = std::mem::take(&mut self.compositions).into_iter().collect();
+        compositions.sort_by_key(|(id, _)| *id);
+        for (id, (inherits, method_tables)) in compositions {
+            let name = self.types[id as usize].name.clone();
+            let mut parents = Vec::new();
+            for parent in &inherits {
+                let parent = self.named_type_id(parent).ok_or_else(|| format!("{name} inherits unknown type {parent}"))?;
+                parents.push(parent);
+            }
+            let mut fields = HashMap::new();
+            for table in &method_tables {
+                let methods = self.method_tables.get(table).ok_or_else(|| format!("{name}: no method table {table}"))?;
+                for (method, ty) in methods {
+                    // The first table listed wins
+                    fields.entry(method.clone()).or_insert(*ty);
+                }
+            }
+            let named = &mut self.types[id as usize];
+            named.inherits = parents;
+            named.has_methods = true;
+            for (method, ty) in fields {
+                named.fields.entry(method).or_insert(ty);
             }
         }
         Ok(())
@@ -235,7 +355,9 @@ impl Definitions {
                     Some(_) => return Err(format!("{path} is both a function and a table")),
                     None => {
                         let id = self.types.len() as NamedId;
-                        self.types.push(NamedType { name: path.clone(), base: TypeSet::TABLE, fields: HashMap::new(), namespace: true });
+                        self.types.push(NamedType {
+                            name: path.clone(), base: TypeSet::TABLE, fields: HashMap::new(), inherits: Vec::new(), has_methods: false, namespace: true,
+                        });
                         self.set_member(namespace, name, Type::named(id, TypeSet::TABLE));
                         id
                     }
@@ -481,6 +603,50 @@ mod tests {
         assert!(Definitions::from_json(r#"{"tables": {"x": {"functions": []}}}"#).is_err());
     }
 
+    #[test]
+    fn object_methods() {
+        let generated: Value = serde_json::from_str(r#"{
+            "types": {"Frame": {"base": "table"}, "Texture": {"base": "table"}},
+            "method_tables": {
+                "RegionAPI": {"functions": {"SetPoint": {}, "Show": {"returns": ["number"]}}},
+                "FrameAPI": {"functions": {"CreateTexture": {"returns": ["Texture"]}, "Show": {"returns": ["string"]}}},
+                "ButtonAPI": {"functions": {"Click": {}}}
+            }
+        }"#).unwrap();
+        let objects: Value = serde_json::from_str(r#"{"types": {
+            "Region": {"base": "table", "method_tables": ["RegionAPI"]},
+            "Frame": {"base": "table", "inherits": ["Region"], "method_tables": ["FrameAPI"]},
+            "Button": {"base": "table", "inherits": ["Frame"], "method_tables": ["ButtonAPI"]}
+        }}"#).unwrap();
+        let definitions = Definitions::from_values(&[("a".to_string(), generated), ("b".to_string(), objects)]).unwrap();
+        let button = Type::named(definitions.named_type_id("Button").unwrap(), TypeSet::TABLE);
+        assert!(definitions.field(button, "Click").is_some());
+        assert!(definitions.field(button, "SetPoint").is_some());
+        assert!(definitions.field(button, "Missing").is_none());
+        // The nearest definition wins
+        let show = definitions.field(button, "Show").unwrap();
+        let FunctionRef::Builtin(show) = show.function else { panic!() };
+        assert_eq!(definitions.function(show).unwrap().returns.values, [Type::of(TypeSet::STRING)]);
+        let create = definitions.field(button, "CreateTexture").unwrap();
+        let FunctionRef::Builtin(create) = create.function else { panic!() };
+        let texture = definitions.named_type_id("Texture").unwrap();
+        assert_eq!(definitions.function(create).unwrap().returns.values, [Type::named(texture, TypeSet::TABLE)]);
+        assert!(definitions.named_type(definitions.named_type_id("Button").unwrap()).unwrap().has_methods);
+        assert!(!definitions.named_type(texture).unwrap().has_methods);
+    }
+
+    #[test]
+    fn object_method_errors() {
+        assert!(Definitions::from_json(r#"{"types": {"A": {"base": "table", "inherits": ["Missing"]}}}"#).is_err());
+        assert!(Definitions::from_json(r#"{"types": {"A": {"base": "table", "method_tables": ["Missing"]}}}"#).is_err());
+        let a: Value = serde_json::from_str(r#"{"types": {"A": {"base": "table"}}}"#).unwrap();
+        let b: Value = serde_json::from_str(r#"{"types": {"A": {"base": "userdata"}}}"#).unwrap();
+        assert!(Definitions::from_values(&[("a".to_string(), a), ("b".to_string(), b)]).is_err());
+        // A loop doesn't hang lookups
+        let looped = Definitions::from_json(r#"{"types": {"A": {"base": "table", "inherits": ["B"]}, "B": {"base": "table", "inherits": ["A"]}}}"#).unwrap();
+        assert!(looped.field(Type::named(looped.named_type_id("A").unwrap(), TypeSet::TABLE), "x").is_none());
+    }
+
     /// The shipped definitions must load, or the LSP silently loses them
     #[test]
     fn repository_definitions_load() {
@@ -490,6 +656,10 @@ mod tests {
         }
         for name in ["Frame", "Texture", "ItemLocation", "ItemKey"] {
             assert!(definitions.named_type_id(name).is_some(), "{name} missing");
+        }
+        let frame = Type::named(definitions.named_type_id("Button").unwrap(), TypeSet::TABLE);
+        for method in ["Click", "SetScript", "SetPoint", "CreateTexture", "GetName", "Show"] {
+            assert!(definitions.field(frame, method).is_some(), "Button:{method} missing");
         }
     }
 }

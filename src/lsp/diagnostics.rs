@@ -16,31 +16,40 @@
 use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
 use lsp_types::{request, Diagnostic, DiagnosticSeverity, Position, PublishDiagnosticsParams, Range, Uri};
 
-pub fn get(connection: &Connection, uri: Uri, text: &str) {
+/// Publishes a document's syntax errors, along with `warnings` (byte ranges
+/// and messages) found by type analysis
+pub fn publish(connection: &Connection, uri: Uri, text: &str, warnings: &[(rowan::TextRange, String)]) {
     let mut parser = crate::syntax::syntax::Generator::new(text);
     let numbers = line_numbers::LinePositions::from(text);
     let _green_tree = parser.process_all();
     let errors = parser.errors();
 
-    let mut diagnostics: Vec<Diagnostic> = Vec::with_capacity(errors.len());
+    let mut diagnostics: Vec<Diagnostic> = Vec::with_capacity(errors.len() + warnings.len());
+    let range = |start: usize, end: usize| {
+        let (start, end) = (numbers.from_offset(start), numbers.from_offset(end));
+        Range {
+            start: Position { line: start.0.0, character: start.1 as u32 },
+            end: Position { line: end.0.0, character: end.1 as u32 },
+        }
+    };
+    let diagnostic = |range: Range, severity: DiagnosticSeverity, message: String| Diagnostic {
+        range,
+        severity: Some(severity),
+        code: None,
+        code_description: None,
+        source: Some(String::from("wow_ls")),
+        message,
+        tags: None,
+        related_information: None,
+        data: None,
+    };
 
     for e in errors {
-        let start = numbers.from_offset(e.start);
-        let end = numbers.from_offset(e.end);
-        diagnostics.push(Diagnostic {
-            range: Range {
-                start: Position { line: start.0.0, character: start.1 as u32},
-                end: Position { line: end.0.0, character: end.1 as u32},
-            },
-            severity: Some(DiagnosticSeverity::ERROR),
-            code: None,
-            code_description: None,
-            source: Some(String::from("wow_ls")),
-            message: format!("{:?}", e.kind),
-            tags: None,
-            related_information: None,
-            data: None,
-        });
+        diagnostics.push(diagnostic(range(e.start, e.end), DiagnosticSeverity::ERROR, format!("{:?}", e.kind)));
+    }
+    for (text_range, message) in warnings {
+        let span = range(usize::from(text_range.start()), usize::from(text_range.end()));
+        diagnostics.push(diagnostic(span, DiagnosticSeverity::WARNING, message.clone()));
     }
 
     let params = PublishDiagnosticsParams {

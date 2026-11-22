@@ -25,8 +25,11 @@
 -- so new documentation shows what needs mapping.
 --
 -- Generated: functions, the `Enum` table (each enumeration's members typed as
--- that enumeration, `Enum.X`), and the `Constants` table. Widget methods (the
--- ScriptObject tables) and events are skipped, as wow_ls can't use them yet.
+-- that enumeration, `Enum.X`), the `Constants` table, and each documented
+-- method table (`method_tables`, from the ScriptObject documentation, like
+-- SimpleFrameAPI). Which tables make up which object type isn't documented, so
+-- that's in the hand-maintained definitions/wow_objects.json. Events are
+-- skipped, as wow_ls can't use them yet.
 
 local output_path = arg[1]
 if not output_path or #arg < 2 then
@@ -238,7 +241,8 @@ local functions = {}
 local namespaces = {}
 local skipped = { secure = 0, duplicate = 0 }
 
-local function add_function(namespace, name, documentation)
+-- A function's parameters and returns, in the definitions' form
+local function convert_function(documentation)
 	local parameters = {}
 	for _, argument in ipairs(documentation.Arguments or {}) do
 		local types = field_type(argument)
@@ -257,6 +261,10 @@ local function add_function(namespace, name, documentation)
 		end
 		returns[#returns + 1] = types
 	end
+	return { parameters = parameters, returns = returns, rest = rest }
+end
+
+local function add_function(namespace, name, documentation)
 	local scope = functions
 	if namespace then
 		namespaces[namespace] = namespaces[namespace] or {}
@@ -267,7 +275,7 @@ local function add_function(namespace, name, documentation)
 		io.stderr:write(("note: %s%s is documented twice; keeping the first\n"):format(namespace and (namespace .. ".") or "", name))
 		return
 	end
-	scope[name] = { parameters = parameters, returns = returns, rest = rest }
+	scope[name] = convert_function(documentation)
 end
 
 for _, document in ipairs(documents) do
@@ -278,6 +286,20 @@ for _, document in ipairs(documents) do
 				skipped.secure = skipped.secure + 1
 			else
 				add_function(document.Namespace, documentation.Name, documentation)
+			end
+		end
+	end
+end
+
+-- Each documented method table, as is
+local method_tables = {}
+for _, document in ipairs(documents) do
+	if document.Type == "ScriptObject" then
+		if method_tables[document.Name] then error(document.Name .. " is documented twice") end
+		method_tables[document.Name] = {}
+		for _, documentation in ipairs(document.Functions or {}) do
+			if document.Environment ~= "SecureOnly" then
+				method_tables[document.Name][documentation.Name] = convert_function(documentation)
 			end
 		end
 	end
@@ -306,11 +328,6 @@ local function json_array(items)
 	return "[" .. table.concat(parts, ", ") .. "]"
 end
 
-local lines = {}
-for _, name in ipairs(sorted_keys(named_types)) do
-	lines[#lines + 1] = ("    %s: {\"base\": %s}"):format(json_string(name), json_string(named_types[name]))
-end
-local type_lines = table.concat(lines, ",\n")
 
 -- One function per line, indented under its scope
 local function function_lines(scope, indent)
@@ -322,6 +339,19 @@ local function function_lines(scope, indent)
 		lines[#lines + 1] = ("%s%s: %s}"):format(indent, json_string(name), entry)
 	end
 	return table.concat(lines, ",\n")
+end
+
+local type_entries = {}
+for _, name in ipairs(sorted_keys(named_types)) do
+	type_entries[#type_entries + 1] = ("    %s: {\"base\": %s}"):format(json_string(name), json_string(named_types[name]))
+end
+local type_lines = table.concat(type_entries, ",\n")
+
+-- Method tables, one method per line
+local method_table_entries = {}
+for _, name in ipairs(sorted_keys(method_tables)) do
+	local functions = next(method_tables[name]) and ("\n" .. function_lines(method_tables[name], "        ") .. "\n      ") or ""
+	method_table_entries[#method_table_entries + 1] = ('    %s: {"functions": {%s}}'):format(json_string(name), functions)
 end
 
 -- A table of tables of values, one inner table per line:
@@ -354,6 +384,7 @@ local file = assert(io.open(output_path, "w"))
 file:write("{\n")
 file:write('  "generated": "by tools/generate_api_definitions.lua from Blizzard_APIDocumentationGenerated; regenerate rather than editing",\n')
 file:write('  "types": {\n', type_lines, "\n  },\n")
+file:write('  "method_tables": {\n', table.concat(method_table_entries, ",\n"), "\n  },\n")
 file:write('  "functions": {\n', function_lines(functions, "    "), "\n  },\n")
 file:write('  "tables": {\n', table.concat(table_blocks, ",\n"), "\n  }\n")
 file:write("}\n")
@@ -361,8 +392,8 @@ file:close()
 
 local count = #sorted_keys(functions)
 for _, scope in pairs(namespaces) do count = count + #sorted_keys(scope) end
-io.stderr:write(("wrote %d functions, %d enumerations, %d constants tables and %d named types to %s (skipped %d secure-only, %d duplicates)\n")
-	:format(count, #sorted_keys(enumerations), #sorted_keys(constants), #sorted_keys(named_types), output_path, skipped.secure, skipped.duplicate))
+io.stderr:write(("wrote %d functions, %d method tables, %d enumerations, %d constants tables and %d named types to %s (skipped %d secure-only, %d duplicates)\n")
+	:format(count, #sorted_keys(method_tables), #sorted_keys(enumerations), #sorted_keys(constants), #sorted_keys(named_types), output_path, skipped.secure, skipped.duplicate))
 local names = sorted_keys(unmapped)
 if #names > 0 then
 	table.sort(names, function(a, b) return unmapped[a] > unmapped[b] end)

@@ -223,6 +223,15 @@ pub enum NamedRef {
     #[default]
     None,
     One(NamedId),
+    /// A named type that may have members beyond its documented ones, like a
+    /// frame made from a template (whose Lua mixin adds methods). Missing
+    /// methods aren't reported on these
+    Extended(NamedId),
+    /// A WoW object made in the files, by `CreateFrame` or a method like
+    /// `CreateTexture`: its type, where it was made (its identity, for its own
+    /// fields and its parent), and whether a template may have added members.
+    /// Shown as its type
+    Instance { named: NamedId, at: TableId, extended: bool },
     /// A table made in this file: its identity, for tracking its fields. Shown
     /// as a plain table
     Table(TableId),
@@ -239,7 +248,37 @@ impl NamedRef {
         match (self, other) {
             (NamedRef::None, x) | (x, NamedRef::None) => x,
             (a, b) if a == b => a,
-            _ => NamedRef::Unknown,
+            (NamedRef::Instance { named: a, at: x, extended: e }, NamedRef::Instance { named: b, at: y, extended: f }) if a == b && x == y => {
+                NamedRef::Instance { named: a, at: x, extended: e || f }
+            }
+            // Different objects of one type are still that type
+            (a, b) => match (a.object_type(), b.object_type()) {
+                (Some((a, e)), Some((b, f))) if a == b => if e || f { NamedRef::Extended(a) } else { NamedRef::One(a) },
+                _ => NamedRef::Unknown,
+            },
+        }
+    }
+
+    /// The named type, if it's one
+    pub fn named_id(self) -> Option<NamedId> {
+        self.object_type().map(|(id, _)| id)
+    }
+
+    /// The named type, and whether it may have members beyond the type's
+    fn object_type(self) -> Option<(NamedId, bool)> {
+        match self {
+            NamedRef::One(id) => Some((id, false)),
+            NamedRef::Extended(id) => Some((id, true)),
+            NamedRef::Instance { named, extended, .. } => Some((named, extended)),
+            _ => None,
+        }
+    }
+
+    /// Where the table or object was made, if it's one made in the files
+    fn identity(self) -> Option<TableId> {
+        match self {
+            NamedRef::Table(at) | NamedRef::Instance { at, .. } => Some(at),
+            _ => None,
         }
     }
 }
@@ -476,6 +515,15 @@ impl FieldReference {
     }
 }
 
+/// A problem found while analysing, like a call of a method a WoW type
+/// doesn't have
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub file: FileId,
+    pub range: TextRange,
+    pub message: String,
+}
+
 /// A file to analyse
 pub struct SourceFile {
     pub root: SyntaxNode,
@@ -497,6 +545,13 @@ pub struct Analysis {
     pub fields: HashMap<TableId, HashMap<String, Type>>,
     /// Values assigned to fields of tables whose identity wasn't known, by name
     pub any_table_fields: HashMap<String, Type>,
+    /// Every field name any table in the files was given a function under
+    pub function_fields: std::collections::HashSet<String>,
+    /// The parent of each WoW object made in the files: what it was made with
+    /// (`CreateFrame`'s parent, or the receiver of `CreateTexture` and the like)
+    /// and anything passed to its `SetParent`
+    pub parents: HashMap<TableId, Type>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl Analysis {
@@ -512,6 +567,7 @@ impl Analysis {
         for _ in 1..MAX_WALKS {
             let next = Walker::new(Some(&result), definitions).walk(files);
             let settled = next.fields == result.fields
+                && next.parents == result.parents
                 && next.any_table_fields == result.any_table_fields
                 && next.functions.iter().all(|(id, f)| {
                     result.functions.get(id).is_some_and(|before| before.parameters == f.parameters)
@@ -542,10 +598,9 @@ impl Analysis {
             FunctionRef::Builtin(id) if signatures => self.definitions.function(id).map(|f| self.signature(f)),
             _ => None,
         };
-        let named = match ty.named {
-            NamedRef::One(id) => self.definitions.named_type(id).filter(|named| !named.namespace),
-            _ => None,
-        };
+        let named = ty.named.named_id()
+            .and_then(|id| self.definitions.named_type(id))
+            .filter(|named| !named.namespace);
         let numeric = match ty.numeric {
             NamedRef::One(id) => self.definitions.named_type(id),
             _ => None,
@@ -636,6 +691,7 @@ struct Walker<'a> {
     current: Vec<Type>,
     references: Vec<Reference>,
     field_references: Vec<FieldReference>,
+    diagnostics: Vec<Diagnostic>,
     /// References that read an upvalue, resolved once all assignments are known
     deferred: Vec<usize>,
     scopes: Vec<Scope>,
@@ -662,6 +718,8 @@ struct Walker<'a> {
     /// field can be written after (or in another function from) a read
     fields: HashMap<TableId, HashMap<String, Type>>,
     any_table_fields: HashMap<String, Type>,
+    /// Parents seen on this walk. Reads use the previous walk's, like fields
+    parents: HashMap<TableId, Type>,
 }
 
 /// How much had been recorded before a loop pass, to discard that pass
@@ -669,6 +727,7 @@ struct Snapshot {
     bindings: usize,
     references: usize,
     field_references: usize,
+    diagnostics: usize,
     deferred: usize,
     globals_created: usize,
 }
@@ -740,7 +799,16 @@ impl<'a> Walker<'a> {
         }
         self.references.sort_by_key(|r| (r.file, r.range.start()));
         self.field_references.sort_by_key(|r| (r.file, r.range.start()));
+        self.diagnostics.sort_by_key(|d| (d.file, d.range.start()));
+        let function_fields = self.fields.values().flat_map(|fields| fields.iter())
+            .chain(self.any_table_fields.iter())
+            .filter(|(_, ty)| ty.set.contains(TypeSet::FUNCTION))
+            .map(|(name, _)| name.clone())
+            .collect();
         Analysis {
+            function_fields,
+            parents: self.parents,
+            diagnostics: self.diagnostics,
             bindings: self.bindings,
             references: self.references,
             field_references: self.field_references,
@@ -783,6 +851,7 @@ impl<'a> Walker<'a> {
             bindings: self.bindings.len(),
             references: self.references.len(),
             field_references: self.field_references.len(),
+            diagnostics: self.diagnostics.len(),
             deferred: self.deferred.len(),
             globals_created: self.globals_created.len(),
         }
@@ -796,6 +865,7 @@ impl<'a> Walker<'a> {
         self.current.truncate(snapshot.bindings);
         self.references.truncate(snapshot.references);
         self.field_references.truncate(snapshot.field_references);
+        self.diagnostics.truncate(snapshot.diagnostics);
         self.deferred.truncate(snapshot.deferred);
         for name in self.globals_created.drain(snapshot.globals_created..) {
             self.globals.remove(&name);
@@ -1165,8 +1235,8 @@ impl<'a> Walker<'a> {
         // Writes can come later in the file, so only a previous walk knows them all
         let Some(prior) = self.prior else { return Type::UNKNOWN };
         let own = match base.named {
-            NamedRef::Table(id) => prior.fields.get(&id).and_then(|fields| fields.get(name)).copied(),
-            NamedRef::One(_) => None,
+            NamedRef::Table(id) | NamedRef::Instance { at: id, .. } => prior.fields.get(&id).and_then(|fields| fields.get(name)).copied(),
+            NamedRef::One(_) | NamedRef::Extended(_) => None,
             // Not a table we know, so nothing to go on
             NamedRef::None | NamedRef::Unknown => return Type::UNKNOWN,
         };
@@ -1179,9 +1249,9 @@ impl<'a> Walker<'a> {
 
     fn field_write(&mut self, base: Type, name: &str, value: Type) {
         let field = match base.named {
-            NamedRef::Table(id) => self.fields.entry(id).or_default().entry(name.to_string()).or_default(),
+            NamedRef::Table(id) | NamedRef::Instance { at: id, .. } => self.fields.entry(id).or_default().entry(name.to_string()).or_default(),
             // Could be any table, or shared by every object of a WoW type
-            NamedRef::One(_) | NamedRef::Unknown => self.any_table_fields.entry(name.to_string()).or_default(),
+            NamedRef::One(_) | NamedRef::Extended(_) | NamedRef::Unknown => self.any_table_fields.entry(name.to_string()).or_default(),
             NamedRef::None => return,
         };
         *field |= value;
@@ -1266,6 +1336,27 @@ impl<'a> Walker<'a> {
         self.scopes.iter().rev().find_map(|scope| scope.names.get(name).copied())
     }
 
+    /// Of two requirements, the one that satisfies both: the same type, or a
+    /// named type that inherits from the other (`Frame` over `ScriptRegion`).
+    /// None if they conflict
+    fn narrower(&self, a: Type, b: Type) -> Option<Type> {
+        if a == b {
+            return Some(a)
+        }
+        let id = |t: Type| t.named.named_id();
+        let (x, y) = (id(a)?, id(b)?);
+        if a.set != b.set {
+            return None
+        }
+        if self.definitions.is_a(x, y) {
+            Some(a)
+        } else if self.definitions.is_a(y, x) {
+            Some(b)
+        } else {
+            None
+        }
+    }
+
     /// Parameters of the current function passed straight on as arguments that
     /// require one type have to be that type, if the call always runs and the
     /// parameter still holds what the caller passed
@@ -1280,10 +1371,17 @@ impl<'a> Walker<'a> {
             if binding.kind != BindingKind::Parameter || binding.function != self.function || binding.reassigned {
                 continue
             }
-            let mandate = self.mandates.entry(id).or_insert(Some(*required));
-            if *mandate != Some(*required) {
-                *mandate = None;
-            }
+            // Required to be a `ScriptRegion` means at least one: it could be a
+            // Frame or a FontString, with more methods
+            let required = match required.named {
+                NamedRef::One(named) if self.definitions.has_subtypes(named) => Type { named: NamedRef::Extended(named), ..*required },
+                _ => *required,
+            };
+            let merged = match self.mandates.get(&id) {
+                None => Some(required),
+                Some(earlier) => earlier.and_then(|earlier| self.narrower(earlier, required)),
+            };
+            self.mandates.insert(id, merged);
         }
     }
 
@@ -1388,11 +1486,13 @@ impl<'a> Walker<'a> {
             }
             types
         });
+        let receiver = if is_method { callee } else { None };
         // `a:m()` calls field `m` of `a`
         let callee = match (callee, call.method_name()) {
             (Some(base), Some(method)) => {
                 let types = self.field_read(base, method.text());
                 self.field_reference(call.syntax(), &method, types, false);
+                self.check_method(base, &method);
                 Some(types)
             }
             (callee, _) => callee,
@@ -1404,20 +1504,110 @@ impl<'a> Walker<'a> {
         };
         let Some(function) = self.known_function(callee.function) else { return Values::unknown() };
         let required: Vec<Option<Type>> = (0..arguments.len()).map(|i| function.mandated(i)).collect();
-        let returns = match callee.function {
+        // Whether the call passes a template, which can add members
+        let template = function.parameters.iter()
+            .position(|p| p.name.to_ascii_lowercase().contains("template"))
+            .and_then(|i| arguments.get(i))
+            .is_some_and(|a| !matches!(a, Expression::Literal(l) if l.is_nil()));
+        let documented = function.returns.clone();
+        let mut returns = match callee.function {
             FunctionRef::One(id) => {
                 self.call_arguments.entry(id)
                     .and_modify(|all| *all = all.union(&argument_types))
-                    .or_insert(argument_types);
+                    .or_insert(argument_types.clone());
                 self.returns_of(id)
             }
             _ => match self.select(callee, &arguments, &argument_types) {
                 Some(selected) => selected,
-                None => function.returns.clone(),
+                None => match self.create_frame(call, callee, &arguments, &argument_types) {
+                    Some(frame) => frame,
+                    None => documented,
+                },
             },
         };
+        if let (Some(receiver), Some(method)) = (receiver, call.method_name()) {
+            returns = self.object_method(call, receiver, method.text(), template, &argument_types, returns);
+        }
         self.require_arguments(&arguments, &required);
         returns
+    }
+
+    /// Methods that make or change WoW objects' parents. `returns` is what the
+    /// method's documentation says it returns
+    fn object_method(&mut self, call: &FunctionCall, receiver: Type, name: &str, template: bool, arguments: &Values, mut returns: Values) -> Values {
+        let parent = receiver.named.identity();
+        match name {
+            "SetParent" => {
+                if let Some(at) = parent {
+                    *self.parents.entry(at).or_default() |= arguments.first();
+                }
+            }
+            "GetParent" => {
+                // What it was made with or given, if it was made in the files
+                if let Some(parent) = parent.and_then(|at| self.prior?.parents.get(&at)) {
+                    returns = Values { values: vec![*parent], rest: Type::NIL };
+                }
+            }
+            // `parent:CreateTexture()` and the like: a new object of the type the
+            // method returns, made with the receiver as its parent
+            name if name.starts_with("Create") => {
+                let Some(first) = returns.values.first_mut() else { return returns };
+                let NamedRef::One(child) = first.named else { return returns };
+                if !self.definitions.named_type(child).is_some_and(|t| t.has_methods) {
+                    return returns
+                }
+                let at = self.location(call.syntax().text_range().start());
+                first.named = NamedRef::Instance { named: child, at, extended: template };
+                *self.parents.entry(at).or_default() |= receiver;
+            }
+            _ => {}
+        }
+        returns
+    }
+
+    /// Reports `receiver:method()` when the receiver is one WoW type whose
+    /// methods are known, and none of them (nor any function the addon puts in
+    /// a table under that name, as a mixin might) is called `method`
+    fn check_method(&mut self, receiver: Type, method: &SyntaxToken) {
+        // Only the previous walk knows every function the files define
+        let Some(prior) = self.prior else { return };
+        let id = match receiver.named {
+            NamedRef::One(id) | NamedRef::Instance { named: id, extended: false, .. } => id,
+            _ => return,
+        };
+        if receiver.set.without(OBJECTS | TypeSet::NIL) != TypeSet::NEVER {
+            return
+        }
+        let Some(named) = self.definitions.named_type(id).filter(|named| named.has_methods) else { return };
+        let name = method.text();
+        if self.definitions.field(receiver, name).is_some() || prior.function_fields.contains(name) {
+            return
+        }
+        let message = format!("{} has no method `{}`", named.name, name);
+        self.diagnostics.push(Diagnostic { file: self.file, range: method.text_range(), message });
+    }
+
+    /// `CreateFrame("Button", ...)` gives a `Button`: the frame type named by a
+    /// literal first argument, if it's a kind of `Frame`. A template (the fourth
+    /// argument) can add Lua methods, so its frames aren't checked for missing ones
+    fn create_frame(&mut self, call: &FunctionCall, callee: Type, arguments: &[Expression], argument_types: &Values) -> Option<Values> {
+        if self.definitions.global("CreateFrame") != Some(callee) {
+            return None
+        }
+        let frame = self.definitions.named_type_id("Frame")?;
+        let named = match arguments.first() {
+            Some(Expression::Literal(literal)) => literal.get_string()
+                .and_then(|text| self.definitions.named_type_id_ignoring_case(text.trim().trim_matches(['"', '\''])))
+                .filter(|&id| self.definitions.is_a(id, frame))
+                .unwrap_or(frame),
+            _ => frame,
+        };
+        let template = arguments.get(3).is_some_and(|a| !matches!(a, Expression::Literal(l) if l.is_nil()));
+        let at = self.location(call.syntax().text_range().start());
+        // The third argument, or nil without one
+        *self.parents.entry(at).or_default() |= argument_types.get(2);
+        let named = NamedRef::Instance { named, at, extended: template };
+        Some(Values { values: vec![Type { named, ..Type::of(TypeSet::TABLE) }], rest: Type::NIL })
     }
 
     /// `select(n, ...)` with a literal `n`, which gives the arguments from the
@@ -2350,6 +2540,150 @@ mod tests {
     fn field_names_in_loops_are_recorded_once() {
         let analysis = analyse("local t = {} while c do t.x = 1 local y = t.x end");
         assert_eq!(field_hovers(&analysis, "t.x").len(), 2);
+    }
+
+    fn widgets() -> Arc<Definitions> {
+        Arc::new(Definitions::from_json(r#"{
+            "types": {
+                "Region": {"base": "table", "method_tables": ["RegionAPI"]},
+                "Frame": {"base": "table", "inherits": ["Region"], "method_tables": ["FrameAPI"]},
+                "Button": {"base": "table", "inherits": ["Frame"], "method_tables": ["ButtonAPI"]},
+                "Texture": {"base": "table", "inherits": ["Region"], "method_tables": []},
+                "ItemKey": {"base": "table"}
+            },
+            "method_tables": {
+                "RegionAPI": {"functions": {"SetPoint": {}, "Show": {}, "GetParent": {"returns": ["Region"]}, "SetParent": {"parameters": ["parent: Frame|nil"]}}},
+                "FrameAPI": {"functions": {
+                    "CreateTexture": {"returns": ["Texture"]},
+                    "CreateFontString": {"parameters": ["name: string|nil", "templateName: string|nil"], "returns": ["Texture"]},
+                    "GetChild": {"returns": ["Frame|nil"]}
+                }},
+                "ButtonAPI": {"functions": {"Click": {}, "GetText": {"returns": ["string"]}}}
+            },
+            "values": {"UIParent": "Frame"},
+            "functions": {
+                "CreateFrame": {"parameters": ["frameType: string", "name: string|nil", "parent: Frame|nil", "template: string|nil"], "returns": ["Frame"]},
+                "GetItemKey": {"returns": ["ItemKey"]},
+                "GetFrame": {"returns": ["Frame"]},
+                "Anchor": {"parameters": ["region: Region"]},
+                "Parent": {"parameters": ["frame: Frame"]}
+            }
+        }"#).unwrap())
+    }
+
+    fn widget_types_of(source: &str, name: &str) -> Vec<String> {
+        describe_uses(&analyse_with(source, &widgets()), name)
+    }
+
+    fn warnings(source: &str) -> Vec<String> {
+        analyse_with(source, &widgets()).diagnostics.iter().map(|d| d.message.clone()).collect()
+    }
+
+    #[test]
+    fn create_frame_types() {
+        assert_eq!(widget_types_of("local f = CreateFrame('Button')", "f"), ["Button"]);
+        assert_eq!(widget_types_of("local f = CreateFrame(\"button\", 'Name')", "f"), ["Button"]);
+        // Not a kind of frame, or not a literal
+        assert_eq!(widget_types_of("local f = CreateFrame('Texture')", "f"), ["Frame"]);
+        assert_eq!(widget_types_of("local f = CreateFrame(kind)", "f"), ["Frame"]);
+        // Templates still give the type
+        assert_eq!(widget_types_of("local f = CreateFrame('Button', nil, nil, 'Template')", "f"), ["Button"]);
+    }
+
+    #[test]
+    fn methods_of_wow_types() {
+        assert_eq!(widget_types_of("local f = CreateFrame('Button') local t = f:CreateTexture()", "t"), ["Texture"]);
+        assert_eq!(widget_types_of("local f = CreateFrame('Button') local t = f:GetText()", "t"), ["string"]);
+        assert_eq!(widget_types_of("local f = CreateFrame('Frame') local c = f:GetChild()", "c"), ["Frame?"]);
+        // Methods are fields too
+        assert_eq!(widget_types_of("local f = CreateFrame('Frame') local m = f.Show", "m"), ["function()"]);
+    }
+
+    #[test]
+    fn missing_methods() {
+        assert_eq!(warnings("local f = CreateFrame('Frame') f:SetPiont()"), ["Frame has no method `SetPiont`"]);
+        assert_eq!(warnings("local f = CreateFrame('Frame') f:Click()"), ["Frame has no method `Click`"]);
+        assert_eq!(warnings("local f = CreateFrame('Frame') local c = f:GetChild() c:Nope()"), ["Frame has no method `Nope`"]);
+        assert_eq!(warnings("local t = CreateFrame('Frame'):CreateTexture() t:Nope()"), ["Texture has no method `Nope`"]);
+        // Known, inherited, or added by the addon
+        assert!(warnings("local f = CreateFrame('Button') f:SetPoint() f:Click() f:CreateTexture()").is_empty());
+        assert!(warnings("local f = CreateFrame('Frame') function f:OnEvent() end f:OnEvent()").is_empty());
+        assert!(warnings("local M = {} function M:Extra() end local f = CreateFrame('Frame') Mixin(f, M) f:Extra()").is_empty());
+        assert!(warnings("local f = CreateFrame('Frame') f:Later() function SomeTable:Later() end").is_empty());
+    }
+
+    #[test]
+    fn requirements_include_subtypes() {
+        // Required to be a Region, which a Frame is, so it could have Frame methods
+        let source = "local function Row(frame) Anchor(frame) frame:CreateTexture() frame:Anything() end";
+        assert!(warnings(source).is_empty());
+        assert_eq!(widget_types_of(source, "frame")[0], "Region");
+        // But a documented return is exactly what it says
+        assert_eq!(warnings("local p = GetFrame() p:Click()"), ["Frame has no method `Click`"]);
+        assert_eq!(warnings("local t = GetFrame():CreateTexture() t:Nope()"), ["Texture has no method `Nope`"]);
+        // Two requirements that agree give the narrower
+        let source = "local function Row(frame) Anchor(frame) Parent(frame) end";
+        assert_eq!(widget_types_of(source, "frame")[0], "Frame");
+    }
+
+    #[test]
+    fn parents_from_creation() {
+        assert_eq!(widget_types_of("local p = CreateFrame('Frame', nil, UIParent):GetParent()", "p"), ["Frame"]);
+        let source = "local b = CreateFrame('Button') local t = b:CreateTexture() local p = t:GetParent()";
+        assert_eq!(widget_types_of(source, "p"), ["Button"]);
+        // So methods of the real parent are known
+        assert!(warnings("local b = CreateFrame('Button') local t = b:CreateTexture() t:GetParent():Click()").is_empty());
+        assert_eq!(warnings("local f = CreateFrame('Frame') local t = f:CreateTexture() t:GetParent():Click()"), ["Frame has no method `Click`"]);
+        // Made without one
+        assert_eq!(widget_types_of("local p = CreateFrame('Frame'):GetParent()", "p"), ["nil"]);
+        assert_eq!(widget_types_of("local p = CreateFrame('Frame', nil, nil):GetParent()", "p"), ["nil"]);
+    }
+
+    #[test]
+    fn parents_from_set_parent() {
+        // Anywhere in the files, as it could run before GetParent does
+        let source = "local f = CreateFrame('Frame') local p = f:GetParent() f:SetParent(UIParent)";
+        assert_eq!(widget_types_of(source, "p"), ["Frame?"]);
+        let source = "local b = CreateFrame('Button', nil, UIParent) b:SetParent(CreateFrame('Button')) local p = b:GetParent()";
+        assert_eq!(widget_types_of(source, "p"), ["table"]);
+    }
+
+    #[test]
+    fn objects_not_made_in_the_files() {
+        // The documented parent type
+        assert_eq!(widget_types_of("local p = UIParent:GetParent()", "p"), ["Region"]);
+        assert_eq!(widget_types_of("local f = GetFrame() local p = f:GetParent()", "p"), ["Region"]);
+    }
+
+    #[test]
+    fn objects_have_their_own_fields() {
+        let source = "local a = CreateFrame('Frame') local b = CreateFrame('Frame') a.x = 1 b.x = 's' local y = a.x";
+        assert_eq!(widget_types_of(source, "y"), ["number"]);
+        let source = "local f = CreateFrame('Frame') function f:OnEvent() return true end local y = f:OnEvent()";
+        assert_eq!(widget_types_of(source, "y"), ["true"]);
+        // Still shown as just their type
+        assert_eq!(widget_types_of("local f = CreateFrame('Frame')", "f"), ["Frame"]);
+    }
+
+    #[test]
+    fn templates_on_created_children() {
+        assert!(warnings("local t = CreateFrame('Frame'):CreateFontString(nil, 'Template') t:Anything()").is_empty());
+        assert_eq!(warnings("local t = CreateFrame('Frame'):CreateFontString(nil, nil) t:Anything()"), ["Texture has no method `Anything`"]);
+    }
+
+    #[test]
+    fn missing_methods_only_when_sure() {
+        // Made from a template, which can add methods
+        assert!(warnings("local f = CreateFrame('Frame', nil, nil, 'BackdropTemplate') f:SetBackdrop()").is_empty());
+        // Not one known WoW type
+        assert!(warnings("local f = c and CreateFrame('Frame') or 's' f:Nope()").is_empty());
+        assert!(warnings("local f = c and CreateFrame('Frame') or {} f:Nope()").is_empty());
+        assert!(warnings("local t = {} t:Nope()").is_empty());
+        assert!(warnings("unknown:Nope()").is_empty());
+        // A type without known methods, like a data structure
+        assert!(warnings("local k = GetItemKey() k:Nope()").is_empty());
+        // Recorded once, even in loops
+        assert_eq!(warnings("local f = CreateFrame('Frame') while c do f:Nope() end").len(), 1);
     }
 
     #[test]

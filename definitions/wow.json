@@ -1,4 +1,7 @@
 {
+  "values": {
+    "UIParent": "Frame"
+  },
   "functions": {
     "CreateFrame": {"parameters": ["frameType: string", "name: string|nil", "parent: Frame|nil", "template: string|nil", "id: number|nil"], "returns": ["Frame"]}
   }

@@ -87,6 +87,8 @@ struct Workspace {
     open: HashMap<PathBuf, String>,
     /// Each addon's analysis, by its `.toc`, until one of its files changes
     analyses: HashMap<PathBuf, Arc<(Analysis, Vec<PathBuf>)>>,
+    /// The URI each open document was opened with
+    uris: HashMap<PathBuf, lsp_types::Uri>,
 }
 
 impl Workspace {
@@ -95,6 +97,30 @@ impl Workspace {
             self.addons = Some(self.root.as_deref().map(project::discover).unwrap_or_default());
         }
         self.addons.as_deref().unwrap_or_default()
+    }
+
+    /// Publishes diagnostics for every open document the change to `path` could
+    /// affect: all of its addon's, or just it if it's not in one
+    fn publish_diagnostics(&mut self, connection: &Connection, path: &Path, definitions: &Arc<Definitions>) {
+        let path = project::normalise(path);
+        let Some(text) = self.open.get(&path).cloned() else { return };
+        let root = SyntaxNode::new_root(syntax::Generator::new(&text).process_all());
+        let (analysis, _) = self.analysis(Some(&path), &root, definitions);
+        let (analysis, paths) = (&analysis.0, &analysis.1);
+        // Files of the addon, or the one file analysed on its own
+        let files: Vec<(FileId, PathBuf)> = if paths.is_empty() {
+            vec![(FileId(0), path.clone())]
+        } else {
+            paths.iter().enumerate().map(|(i, p)| (FileId(i as u32), p.clone())).collect()
+        };
+        for (file, path) in files {
+            let (Some(uri), Some(text)) = (self.uris.get(&path), self.open.get(&path)) else { continue };
+            let warnings: Vec<_> = analysis.diagnostics.iter()
+                .filter(|d| d.file == file)
+                .map(|d| (d.range, d.message.clone()))
+                .collect();
+            diagnostics::publish(connection, uri.clone(), text, &warnings);
+        }
     }
 
     /// A document's text changed (or was opened)
@@ -231,14 +257,23 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                 match &*not.method {
                     "textDocument/didChange" => {
                         if let Ok(params) = cast_not::<notification::DidChangeTextDocument>(not) {
-                            if let (Some(path), Some(change)) = (project::uri_to_path(&params.text_document.uri.to_string()), params.content_changes.first()) {
-                                workspace.changed(path, change.text.clone());
+                            let path = project::uri_to_path(&params.text_document.uri.to_string());
+                            if let (Some(path), Some(change)) = (&path, params.content_changes.first()) {
+                                workspace.changed(path.clone(), change.text.clone());
                             }
                             if let Some(l) = language.get(&params.text_document.uri.to_string()) {
                                 if l == "lua" {
                                     text.remove(&params.text_document.uri.to_string());
                                     text.insert(params.text_document.uri.to_string(), params.content_changes[0].text.clone());
-                                    diagnostics::get(&connection, params.text_document.uri, &params.content_changes[0].text);
+                                    match &path {
+                                        Some(path) => {
+                                            let definitions = loaded_definitions
+                                                .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
+                                                .clone();
+                                            workspace.publish_diagnostics(&connection, path, &definitions);
+                                        }
+                                        None => diagnostics::publish(&connection, params.text_document.uri, &params.content_changes[0].text, &[]),
+                                    }
                                 }
                             }
                         }
@@ -247,11 +282,21 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                         if let Ok(params) = cast_not::<notification::DidOpenTextDocument>(not) {
                             language.insert(params.text_document.uri.to_string(), params.text_document.language_id.clone());
                             text.insert(params.text_document.uri.to_string(), params.text_document.text.clone());
-                            if let Some(path) = project::uri_to_path(&params.text_document.uri.to_string()) {
-                                workspace.changed(path, params.text_document.text.clone());
+                            let path = project::uri_to_path(&params.text_document.uri.to_string());
+                            if let Some(path) = &path {
+                                workspace.uris.insert(project::normalise(path), params.text_document.uri.clone());
+                                workspace.changed(path.clone(), params.text_document.text.clone());
                             }
                             if params.text_document.language_id == "lua" {
-                                diagnostics::get(&connection, params.text_document.uri, &params.text_document.text);
+                                match &path {
+                                    Some(path) => {
+                                        let definitions = loaded_definitions
+                                            .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
+                                            .clone();
+                                        workspace.publish_diagnostics(&connection, path, &definitions);
+                                    }
+                                    None => diagnostics::publish(&connection, params.text_document.uri, &params.text_document.text, &[]),
+                                }
                             }
                         }
                     }
