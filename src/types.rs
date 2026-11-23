@@ -589,9 +589,10 @@ pub struct FieldReference {
     pub file: FileId,
     /// The field name
     pub range: TextRange,
-    /// The code reaching the field, for `path`. Kept rather than its text,
-    /// which is only needed for hover
-    access: SyntaxNode,
+    /// Where the code reaching the field is, for `Analysis::field_path`. A
+    /// pointer, found again in its file when needed, as keeping a node for
+    /// every field reference made freeing a walk's results slow
+    access: crate::syntax::SyntaxNodePtr,
     /// The field's type, or for a write the value assigned
     pub types: Type,
     pub write: bool,
@@ -603,16 +604,20 @@ pub struct FieldReference {
 }
 
 impl FieldReference {
-    /// The field name
-    fn name(&self) -> Option<String> {
-        self.access.covering_element(self.range).into_token().map(|t| t.text().to_string())
+    /// The field name, from its file's root
+    fn name(&self, roots: &[SyntaxNode]) -> Option<String> {
+        let root = roots.get(self.file.0 as usize)?;
+        root.covering_element(self.range).into_token().map(|t| t.text().to_string())
     }
 
     /// How the field was reached, without whitespace or comments, like
     /// `addonTable.hiddenTable`
-    pub fn path(&self) -> String {
+    fn path(&self, roots: &[SyntaxNode]) -> String {
+        let Some(access) = roots.get(self.file.0 as usize).and_then(|root| self.access.try_to_node(root)) else {
+            return String::new()
+        };
         let end = self.range.end();
-        self.access.descendants_with_tokens()
+        access.descendants_with_tokens()
             .filter_map(|t| t.into_token())
             .filter(|t| t.text_range().end() <= end)
             .filter(|t| !matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment))
@@ -750,6 +755,8 @@ pub struct Analysis {
     pub vararg_values: HashMap<FunctionId, Values>,
     /// How many walks it took to settle
     pub walks: usize,
+    /// Each file's tree, for what field references point to
+    roots: Vec<SyntaxNode>,
     /// References that read an upvalue, given the binding's final type by
     /// `complete`
     deferred: Vec<usize>,
@@ -818,8 +825,9 @@ impl Analysis {
             if combining {
                 next.combine_inputs(&result);
             }
-            let settled = next.same_walk_inputs(&result);
             changed = next.changed_reads(&result);
+            // Nothing the next walk would read has changed
+            let settled = changed.is_empty();
             // Walks are deterministic, so a state coming round again would
             // cycle forever (a field and parameter feeding each other can
             // swap between two types). From then on each walk keeps what
@@ -854,7 +862,7 @@ impl Analysis {
             .filter(|r| r.write && self.bindings[r.binding].kind != BindingKind::Parameter)
             .map(|r| (r.file, r.range.start(), r.types, self.bindings[r.binding].name.clone()));
         let fields = self.field_references.iter().filter(|f| f.write)
-            .map(|f| (f.file, f.range.start(), f.types, f.path()));
+            .map(|f| (f.file, f.range.start(), f.types, f.path(&self.roots)));
         let mut named: Vec<_> = variables.chain(fields).collect();
         named.sort_by_key(|&(file, start, ..)| (file, start));
         for (_, _, types, name) in named {
@@ -864,27 +872,8 @@ impl Analysis {
         }
     }
 
-    /// Whether a walk from `self` would see exactly what one from `other` does:
-    /// everything a walk reads from the one before it is the same
-    fn same_walk_inputs(&self, other: &Analysis) -> bool {
-        self.fields == other.fields
-            && self.parents == other.parents
-            && self.mixins == other.mixins
-            && self.mixed_into == other.mixed_into
-            && self.pool_objects == other.pool_objects
-            && self.any_table_fields == other.any_table_fields
-            && self.function_fields == other.function_fields
-            && self.entries == other.entries
-            && self.metatables == other.metatables
-            && self.vararg_values == other.vararg_values
-            // Parameters, and returns for calls of functions defined further down
-            && self.functions == other.functions
-            // Upvalues, and whether globals are assigned
-            && self.bindings.len() == other.bindings.len()
-            && self.bindings.iter().zip(&other.bindings).all(|(a, b)| a.name == b.name && a.types == b.types && a.assigned == b.assigned)
-    }
-
-    /// What a walk from `self` would read differently from one from `older`
+    /// What a walk from `self` would read differently from one from `older`.
+    /// Empty when the walks have settled
     fn changed_reads(&self, older: &Analysis) -> HashSet<Read> {
         let mut changed = HashSet::default();
         fn keys<K: std::hash::Hash + Eq + Copy, V>(a: &HashMap<K, V>, b: &HashMap<K, V>) -> HashSet<K> {
@@ -1035,37 +1024,40 @@ impl Analysis {
         }
     }
 
-    /// A hash of what `same_walk_inputs` compares
+    /// A hash of everything a walk reads from the one before
     fn fingerprint(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        // Maps iterate in no fixed order, so their entries are sorted first
-        fn sorted<K: Ord + Hash, V: Hash>(map: &HashMap<K, V>, state: &mut impl Hasher) {
-            let mut entries: Vec<_> = map.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
-            entries.hash(state);
+        use std::hash::{BuildHasher, Hash};
+        // Spreads a weak hash's bits, so sums of them rarely collide
+        fn mixed(value: impl Hash) -> u64 {
+            let mut z = FastHash::default().hash_one(value).wrapping_add(0x9e37_79b9_7f4a_7c15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
         }
-        let mut state = std::collections::hash_map::DefaultHasher::new();
-        sorted(&self.fields.iter().map(|(at, fields)| {
-            let mut fields: Vec<_> = fields.iter().collect();
-            fields.sort_by(|a, b| a.0.cmp(b.0));
-            (*at, fields)
-        }).collect::<HashMap<_, _>>(), &mut state);
-        sorted(&self.parents, &mut state);
-        sorted(&self.mixins, &mut state);
-        sorted(&self.mixed_into, &mut state);
-        sorted(&self.pool_objects, &mut state);
-        sorted(&self.any_table_fields, &mut state);
-        let mut function_fields: Vec<_> = self.function_fields.iter().collect();
-        function_fields.sort();
-        function_fields.hash(&mut state);
-        sorted(&self.entries, &mut state);
-        sorted(&self.metatables, &mut state);
-        sorted(&self.vararg_values, &mut state);
-        sorted(&self.functions, &mut state);
-        for binding in &self.bindings {
-            (&binding.name, binding.types, binding.assigned).hash(&mut state);
+        // Maps iterate in no fixed order, so their entries' hashes are added,
+        // which doesn't depend on it. Each map has its own tag
+        fn map<K: Hash, V: Hash>(tag: u8, map: &HashMap<K, V>) -> u64 {
+            map.iter().fold(0u64, |sum, entry| sum.wrapping_add(mixed((tag, entry))))
         }
-        state.finish()
+        let fields = self.fields.iter()
+            .flat_map(|(at, fields)| fields.iter().map(move |field| (at, field)))
+            .fold(0u64, |sum, entry| sum.wrapping_add(mixed((0u8, entry))));
+        let function_fields = self.function_fields.iter().fold(0u64, |sum, name| sum.wrapping_add(mixed((1u8, name))));
+        let bindings = mixed(self.bindings.iter().map(|b| (&b.name, b.types, b.assigned)).collect::<Vec<_>>());
+        mixed([
+            fields,
+            function_fields,
+            bindings,
+            map(2, &self.parents),
+            map(3, &self.mixins),
+            map(4, &self.mixed_into),
+            map(5, &self.pool_objects),
+            map(6, &self.any_table_fields),
+            map(7, &self.entries),
+            map(8, &self.metatables),
+            map(9, &self.vararg_values),
+            map(10, &self.functions),
+        ])
     }
 
     /// e.g. `number?`, `Frame|string` or `function(a, b) -> string`
@@ -1204,7 +1196,7 @@ impl Analysis {
             return Some((format!("{} {}: {}", binding.kind, binding.name, self.describe_callee(r.types, r.call_returns.as_ref())), r.range))
         }
         let field = self.field_reference_at(file, offset)?;
-        Some((format!("field {}: {}", field.path(), self.describe_callee(field.types, field.call_returns.as_ref())), field.range))
+        Some((format!("field {}: {}", self.field_path(field), self.describe_callee(field.types, field.call_returns.as_ref())), field.range))
     }
 
     pub fn field_reference_at(&self, file: FileId, offset: TextSize) -> Option<&FieldReference> {
@@ -1251,6 +1243,12 @@ impl Analysis {
         Some(format!("table<{}, {}>", shown(contents.keys), values))
     }
 
+    /// How a field was reached, without whitespace or comments, like
+    /// `addonTable.hiddenTable`
+    pub fn field_path(&self, field: &FieldReference) -> String {
+        field.path(&self.roots)
+    }
+
     /// The function a value is, if it's exactly one known function
     pub fn function_info(&self, function: FunctionRef) -> Option<&FunctionInfo> {
         match function {
@@ -1277,6 +1275,8 @@ struct Scope {
 struct Walker<'a> {
     /// Results of the previous walk, used where this walk doesn't know yet
     prior: Option<&'a Analysis>,
+    /// Each file's tree
+    roots: Vec<SyntaxNode>,
     /// What changed between the previous walk and the one before it, so
     /// bodies that read none of it can be replayed
     changed: HashSet<Read>,
@@ -1460,9 +1460,10 @@ struct Record {
     with_prior: bool,
     bindings_start: usize,
     function_count_start: usize,
-    /// The bindings it declared, as they were when it ended
-    bindings: Vec<Binding>,
-    current: Vec<Type>,
+    /// The bindings it declared, as they were when it ended. Shared, like the
+    /// rest, with the records replaying it on later walks, which are the same
+    bindings: Arc<[Binding]>,
+    current: Arc<[Type]>,
     /// What it added to the walk's lists, as positions in those of the walk
     /// that recorded it
     references: std::ops::Range<usize>,
@@ -1470,13 +1471,13 @@ struct Record {
     diagnostics: std::ops::Range<usize>,
     pending_calls: std::ops::Range<usize>,
     /// Upvalue reads, by position among its references
-    deferred: Vec<usize>,
+    deferred: Arc<[usize]>,
     /// Globals it was first to use
-    globals: Vec<(String, BindingId)>,
+    globals: Arc<[(String, BindingId)]>,
     /// Functions it holds, itself included
     function_count: usize,
-    writes: Vec<Arc<Write>>,
-    reads: HashSet<Read>,
+    writes: Arc<[Arc<Write>]>,
+    reads: Arc<HashSet<Read>>,
 }
 
 /// A function body being walked, for its `Record`
@@ -1548,6 +1549,7 @@ impl<'a> Walker<'a> {
     /// Each file's top level runs in turn, so globals continue from one file to
     /// the next. Locals end with their file
     fn walk(mut self, files: &[SourceFile]) -> Analysis {
+        self.roots = files.iter().map(|file| file.root.clone()).collect();
         for (i, file) in files.iter().enumerate() {
             self.file = FileId(i as u32);
             self.in_addon = file.in_addon;
@@ -1632,6 +1634,7 @@ impl<'a> Walker<'a> {
             metatables: self.metatables,
             vararg_values: self.vararg_values,
             walks: 1,
+            roots: self.roots,
         }
     }
 
@@ -1651,7 +1654,7 @@ impl<'a> Walker<'a> {
         for field in self.field_references.iter().filter(|f| !f.write) {
             match field.types.function {
                 FunctionRef::One(function) if !field.callee => { escaped.insert(function); }
-                FunctionRef::Unknown => { unresolved.extend(field.name()); }
+                FunctionRef::Unknown => { unresolved.extend(field.name(&self.roots)); }
                 _ => {}
             }
         }
@@ -2330,7 +2333,7 @@ impl<'a> Walker<'a> {
     /// `access` is the code reaching the field (`a.b` for `b`), or for a table
     /// constructor's key, the field entry
     fn field_reference(&mut self, access: &SyntaxNode, name: &SyntaxToken, types: Type, write: bool) {
-        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: access.clone(), types, write, callee: false, call_returns: None });
+        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: crate::syntax::SyntaxNodePtr::new(access), types, write, callee: false, call_returns: None });
     }
 
     /// The field read just recorded is the function being called
@@ -2525,8 +2528,8 @@ impl<'a> Walker<'a> {
             with_prior: self.prior.is_some(),
             bindings_start: frame.bindings_start,
             function_count_start: frame.function_count_start,
-            bindings: self.bindings[frame.bindings_start..].to_vec(),
-            current: self.current[frame.bindings_start..].to_vec(),
+            bindings: self.bindings[frame.bindings_start..].into(),
+            current: self.current[frame.bindings_start..].into(),
             references: frame.references_start..self.references.len(),
             field_references: frame.field_references_start..self.field_references.len(),
             diagnostics: frame.diagnostics_start..self.diagnostics.len(),
@@ -2536,8 +2539,8 @@ impl<'a> Walker<'a> {
                 .filter_map(|name| Some((name.clone(), *self.globals.get(name)?)))
                 .collect(),
             function_count: self.function_count - frame.function_count_start,
-            writes: frame.writes,
-            reads,
+            writes: frame.writes.into(),
+            reads: Arc::new(reads),
         };
         self.mark_dirty(id, &record);
         self.pass_to_parent(&record.reads, &record.writes);
@@ -2576,14 +2579,14 @@ impl<'a> Walker<'a> {
         self.diagnostics.extend(prior.diagnostics[record.diagnostics.clone()].iter().cloned());
         self.pending_calls.extend(prior.pending_calls[record.pending_calls.clone()].iter().cloned());
         self.deferred.extend(record.deferred.iter().map(|index| index + references_start));
-        for (name, binding) in &record.globals {
+        for (name, binding) in record.globals.iter() {
             self.globals.insert(name.clone(), *binding);
             self.globals_created.push(name.clone());
         }
         self.function_count += record.function_count;
         // Recorded for the parent all at once below, rather than one by one
         let frames = std::mem::take(&mut self.frames);
-        for write in &record.writes {
+        for write in record.writes.iter() {
             self.apply((**write).clone());
         }
         self.frames = frames;
@@ -2594,17 +2597,17 @@ impl<'a> Walker<'a> {
             with_prior: true,
             bindings_start: record.bindings_start,
             function_count_start: record.function_count_start,
-            bindings: record.bindings.clone(),
-            current: record.current.clone(),
+            bindings: Arc::clone(&record.bindings),
+            current: Arc::clone(&record.current),
             references: references_start..self.references.len(),
             field_references: field_references_start..self.field_references.len(),
             diagnostics: diagnostics_start..self.diagnostics.len(),
             pending_calls: pending_calls_start..self.pending_calls.len(),
-            deferred: record.deferred.clone(),
-            globals: record.globals.clone(),
+            deferred: Arc::clone(&record.deferred),
+            globals: Arc::clone(&record.globals),
             function_count: record.function_count,
-            writes: record.writes.clone(),
-            reads: record.reads.clone(),
+            writes: Arc::clone(&record.writes),
+            reads: Arc::clone(&record.reads),
         };
         self.records.insert(id, Arc::new(replayed));
     }
@@ -4730,7 +4733,7 @@ mod tests {
             shown.push(format!("{:?} {:?} {} {} {} {}", r.file, r.range, binding.kind, binding.name, r.write, analysis.describe_callee(r.types, r.call_returns.as_ref())));
         }
         for f in &analysis.field_references {
-            shown.push(format!("{:?} {:?} {} {} {}", f.file, f.range, f.path(), f.write, analysis.describe_callee(f.types, f.call_returns.as_ref())));
+            shown.push(format!("{:?} {:?} {} {} {}", f.file, f.range, analysis.field_path(f), f.write, analysis.describe_callee(f.types, f.call_returns.as_ref())));
         }
         for d in &analysis.diagnostics {
             shown.push(format!("{d:?}"));
@@ -5102,7 +5105,7 @@ mod tests {
     /// Hover text for each use of the field reached by `path`, in source order
     fn field_hovers(analysis: &Analysis, path: &str) -> Vec<String> {
         analysis.field_references.iter()
-            .filter(|f| f.path() == path)
+            .filter(|f| analysis.field_path(f) == path)
             .map(|f| analysis.hover(f.file, f.range.start()).unwrap().0)
             .collect()
     }

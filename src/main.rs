@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
             for f in analysis.field_references.iter().filter(|f| f.file == types::FileId(i as u32)) {
                 let (line, column) = numbers.from_offset(usize::from(f.range.start()));
                 let access = if f.write { "=" } else { ":" };
-                println!("{}:{} field {}{} {}", line.0 + 1, column + 1, f.path(), access, analysis.describe_callee(f.types, f.call_returns.as_ref()));
+                println!("{}:{} field {}{} {}", line.0 + 1, column + 1, analysis.field_path(f), access, analysis.describe_callee(f.types, f.call_returns.as_ref()));
             }
             for d in analysis.diagnostics.iter().filter(|d| d.file == types::FileId(i as u32)) {
                 let (line, column) = numbers.from_offset(usize::from(d.range.start()));
