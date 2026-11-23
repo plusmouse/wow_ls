@@ -565,6 +565,22 @@ impl FieldReference {
     }
 }
 
+/// What a table holds beyond its `name = value` fields: array items, and
+/// anything stored under a computed key (`t[k] = v`, `{ [k] = v }`,
+/// `table.insert(t, v)`). Values never include nil, as storing nil removes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Entries {
+    pub keys: Type,
+    pub values: Type,
+}
+
+/// A key a table is indexed with
+enum Key {
+    /// A string literal that could be a field name: `t["a"]` is `t.a`
+    Name(String),
+    Other(Type),
+}
+
 /// A problem found while analysing, like a call of a method a WoW type
 /// doesn't have
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -595,6 +611,8 @@ pub struct Analysis {
     pub fields: HashMap<TableId, HashMap<String, Type>>,
     /// Values assigned to fields of tables whose identity wasn't known, by name
     pub any_table_fields: HashMap<String, Type>,
+    /// What each table made in the files holds beyond its named fields
+    pub entries: HashMap<TableId, Entries>,
     /// Every field name any table in the files was given a function under
     pub function_fields: std::collections::HashSet<String>,
     /// The parent of each WoW object made in the files: what it was made with
@@ -637,6 +655,7 @@ impl Analysis {
                 && next.mixed_into == result.mixed_into
                 && next.pool_objects == result.pool_objects
                 && next.any_table_fields == result.any_table_fields
+                && next.entries == result.entries
                 && next.functions.iter().all(|(id, f)| {
                     result.functions.get(id).is_some_and(|before| before.parameters == f.parameters)
                 });
@@ -673,6 +692,8 @@ impl Analysis {
             NamedRef::One(id) => self.definitions.named_type(id),
             _ => None,
         };
+        // Nested tables are just `table`, which also stops a table holding itself recursing
+        let contents = if signatures { self.describe_contents(ty) } else { None };
         // A single type that can also be nil is written `T?`
         let optional = names.len() == 2 && names[1] == "nil" && !names[0].starts_with("unknown");
         let wrap = names.len() > 1;
@@ -695,6 +716,11 @@ impl Analysis {
                     }
                 }
                 (_, _, "number") if numeric.is_some() => numeric.map_or_else(String::new, |n| n.name.clone()),
+                (_, _, "table") if contents.is_some() => {
+                    let contents = contents.clone().unwrap_or_default();
+                    // `(string[])|number`, but `string[]?`
+                    if wrap && !optional && contents.ends_with("[]") { format!("({contents})") } else { contents }
+                }
                 _ => name.to_string(),
             })
             .collect();
@@ -792,6 +818,38 @@ impl Analysis {
         (candidate.file == file && candidate.range.contains_inclusive(offset)).then_some(candidate)
     }
 
+    /// Every key and value a table made in the files holds, as `pairs` would
+    /// give them: its entries and its named fields. None if nothing's known
+    pub fn contents(&self, at: TableId) -> Option<Entries> {
+        let mut contents = self.entries.get(&at).copied().unwrap_or_default();
+        for &value in self.fields.get(&at).into_iter().flat_map(|fields| fields.values()) {
+            contents.keys |= Type::of(TypeSet::STRING);
+            contents.values |= value.without(TypeSet::NIL);
+        }
+        (contents.values.set != TypeSet::NEVER).then_some(contents)
+    }
+
+    /// A table with entries (not just named fields) shown by what it holds:
+    /// `string[]` when its keys are all numbers, otherwise `table<K, V>`
+    fn describe_contents(&self, ty: Type) -> Option<String> {
+        let NamedRef::Table(at) = ty.named else { return None };
+        if !self.entries.contains_key(&at) {
+            return None
+        }
+        let contents = self.contents(at)?;
+        // Nothing stored is nil, so `unknown (not nil)` would only be noise
+        let shown = |ty: Type| match ty.set == TypeSet::UNKNOWN.without(TypeSet::NIL) {
+            true => self.describe_shallow(Type::UNKNOWN),
+            false => self.describe_shallow(ty),
+        };
+        let values = shown(contents.values);
+        if contents.keys.set == TypeSet::NUMBER {
+            let wrap = values.contains(['|', ' ', '?']);
+            return Some(if wrap { format!("({values})[]") } else { format!("{values}[]") })
+        }
+        Some(format!("table<{}, {}>", shown(contents.keys), values))
+    }
+
     /// The function a value is, if it's exactly one known function
     pub fn function_info(&self, function: FunctionRef) -> Option<&FunctionInfo> {
         match function {
@@ -855,6 +913,11 @@ struct Walker<'a> {
     /// field can be written after (or in another function from) a read
     fields: HashMap<TableId, HashMap<String, Type>>,
     any_table_fields: HashMap<String, Type>,
+    /// Entries seen on this walk. Reads use the previous walk's, like fields
+    entries: HashMap<TableId, Entries>,
+    /// Calls to `pairs` and `ipairs`, by where they are, and the key and
+    /// value their loop gives, when what the table holds is known
+    iterated: HashMap<Location, (Type, Type)>,
     /// Parents seen on this walk. Reads use the previous walk's, like fields
     parents: HashMap<TableId, Type>,
     /// The field names each function was stored under, in any table
@@ -1024,6 +1087,7 @@ impl<'a> Walker<'a> {
             definitions: self.definitions,
             fields: self.fields,
             any_table_fields: self.any_table_fields,
+            entries: self.entries,
         }
     }
 
@@ -1064,8 +1128,17 @@ impl<'a> Walker<'a> {
                 (variable, fields) => variable.unwrap_or(true) && fields.unwrap_or(true),
             };
             let calls = self.call_arguments.get(id);
+            let definitions = &self.definitions;
+            // A table or object made in the files that meets the requirement is
+            // kept, so what it holds and its fields aren't lost to a plain `table`
+            let meets = |passed: Type, mandated: Type| {
+                passed.named.identity().is_some()
+                    && mandated.set.contains(passed.set)
+                    && mandated.named.named_id().is_none_or(|m| passed.named.named_id().is_some_and(|p| definitions.is_a(p, m)))
+            };
             for (i, parameter) in function.parameters.iter_mut().enumerate() {
                 parameter.types = match (parameter.mandated, calls) {
+                    (Some(mandated), Some(calls)) if all_calls_seen && meets(calls.get(i), mandated) => calls.get(i),
                     (Some(mandated), _) => mandated,
                     (None, Some(calls)) if all_calls_seen => calls.get(i),
                     _ => Type::UNKNOWN,
@@ -1315,8 +1388,17 @@ impl<'a> Walker<'a> {
                                 self.field_write(base, field.text(), types);
                                 self.field_reference(target.syntax(), &field, types, true);
                             }
-                            // `t[k] = v` isn't tracked, but still reads `t` and `k`
-                            None => self.identifier_parts(target.syntax()),
+                            None => match index_access(target.syntax()) {
+                                // `t[k] = v`
+                                Some((base, key)) => {
+                                    let base = self.expression(&base);
+                                    match self.index_key(&key) {
+                                        Key::Name(name) => self.field_write(base, &name, types),
+                                        Key::Other(key) => self.entry_write(base, key, types),
+                                    }
+                                }
+                                None => self.identifier_parts(target.syntax()),
+                            },
                         },
                     }
                 }
@@ -1383,12 +1465,21 @@ impl<'a> Walker<'a> {
                     [Expression::FunctionCall(call)] => self.enumerated.get(&self.location(call.syntax().text_range().start())).copied(),
                     _ => None,
                 };
+                // `for k, v in pairs(t)` over a table whose contents are known
+                let iterated = match expressions.as_slice() {
+                    [Expression::FunctionCall(call)] => self.iterated.get(&self.location(call.syntax().text_range().start())).copied(),
+                    _ => None,
+                };
                 let names = s.name_list().map(|n| n.name_tokens()).unwrap_or_default();
                 self.loop_body(|w| {
                     w.push_scope(true, s.syntax().text_range().end());
                     for (i, name) in names.iter().enumerate() {
                         if let (0, Some(object)) = (i, enumerated) {
                             w.declare(name, BindingKind::Local, object);
+                            continue
+                        }
+                        if let (0 | 1, Some((key, value))) = (i, iterated) {
+                            w.declare(name, BindingKind::Local, if i == 0 { key } else { value });
                             continue
                         }
                         let types = match (i, iterator.as_deref()) {
@@ -1780,10 +1871,20 @@ impl<'a> Walker<'a> {
                         self.field_reference(identifier.syntax(), &field, types, false);
                         types
                     }
-                    None => {
-                        self.identifier_parts(identifier.syntax());
-                        Type::UNKNOWN
-                    }
+                    None => match index_access(identifier.syntax()) {
+                        // `t[k]`
+                        Some((base, key)) => {
+                            let base = self.expression(&base);
+                            match self.index_key(&key) {
+                                Key::Name(name) => self.field_read(base, &name),
+                                Key::Other(key) => self.index_read(base, key),
+                            }
+                        }
+                        None => {
+                            self.identifier_parts(identifier.syntax());
+                            Type::UNKNOWN
+                        }
+                    },
                 },
             },
             Expression::GroupedExpression(g) => match g.get_expression() {
@@ -1841,6 +1942,9 @@ impl<'a> Walker<'a> {
         };
         let arguments = call.arguments();
         let argument_types = self.expression_values(&arguments);
+        if let Some(callee) = callee {
+            self.table_library_call(call, callee, arguments.len(), &argument_types);
+        }
         let Some(callee) = callee.filter(|c| c.set.contains(TypeSet::FUNCTION)) else {
             return Values::unknown()
         };
@@ -2306,8 +2410,11 @@ impl<'a> Walker<'a> {
     fn table_constructor(&mut self, node: &SyntaxNode) -> Type {
         let table = Type::table(self.location(node.text_range().start()));
         for field in node.children().filter(|n| n.kind() == SyntaxKind::Field) {
+            // `{ x }` is an array item, whose identifier is a value, not a key
+            let keyed = field.children_with_tokens().any(|c| c.kind() == SyntaxKind::Assign);
             let mut in_brackets = false;
             let mut after_assign = false;
+            let mut name = None;
             let mut key = None;
             for child in field.children_with_tokens() {
                 match child {
@@ -2318,22 +2425,107 @@ impl<'a> Walker<'a> {
                         _ => {}
                     },
                     // `{name = value}`: the name is a key, not a variable
-                    NodeOrToken::Node(n) if n.kind() == SyntaxKind::Identifier && !in_brackets && !after_assign => {
-                        key = Identifier::cast(n).and_then(|i| i.simple_name());
+                    NodeOrToken::Node(n) if n.kind() == SyntaxKind::Identifier && keyed && !in_brackets && !after_assign => {
+                        name = Identifier::cast(n).and_then(|i| i.simple_name());
                     }
                     NodeOrToken::Node(n) => {
-                        if let Some(e) = Expression::cast(n) {
-                            let value = self.expression(&e);
-                            if let (Some(key), true) = (&key, after_assign) {
-                                self.field_write(table, key.text(), value);
-                                self.field_reference(&key.parent().unwrap_or_else(|| field.clone()), key, value, true);
+                        let Some(e) = Expression::cast(n) else { continue };
+                        // `{[key] = value}`
+                        if in_brackets {
+                            key = Some(self.index_key(&e));
+                            continue
+                        }
+                        let value = self.expression(&e);
+                        match (keyed, &name, key.take()) {
+                            (false, ..) => self.entry_write(table, Type::of(TypeSet::NUMBER), value),
+                            (true, Some(name), _) => {
+                                self.field_write(table, name.text(), value);
+                                self.field_reference(&name.parent().unwrap_or_else(|| field.clone()), name, value, true);
                             }
+                            (true, None, Some(Key::Name(name))) => self.field_write(table, &name, value),
+                            (true, None, Some(Key::Other(key))) => self.entry_write(table, key, value),
+                            (true, None, None) => {}
                         }
                     }
                 }
             }
         }
         table
+    }
+
+    /// The key in `t[key]`: a string literal that could be a field name is
+    /// that field, and anything else is read for its type
+    fn index_key(&mut self, key: &Expression) -> Key {
+        if let Expression::Literal(literal) = key {
+            if let Some(name) = literal.get_string().as_deref().and_then(string_field_name) {
+                return Key::Name(name.to_string())
+            }
+        }
+        Key::Other(self.expression(key))
+    }
+
+    /// `t[key] = value` (or an array item, or `table.insert`) for a table made
+    /// in the files. Storing nil removes, so adds nothing
+    fn entry_write(&mut self, base: Type, key: Type, value: Type) {
+        let Some(at) = base.named.identity() else { return };
+        let value = value.without(TypeSet::NIL);
+        if value.set == TypeSet::NEVER {
+            return
+        }
+        let entries = self.entries.entry(at).or_default();
+        entries.keys |= key.without(TypeSet::NIL);
+        entries.values |= value;
+    }
+
+    /// The type of `t[key]`, from what the previous walk saw stored. It may
+    /// not be there, so it can be nil
+    fn index_read(&self, base: Type, key: Type) -> Type {
+        let (Some(prior), Some(at)) = (self.prior, base.named.identity()) else { return Type::UNKNOWN };
+        let mut found = prior.entries.get(&at).map(|e| e.values);
+        // A string key could be any of the named fields
+        if key.set.contains(TypeSet::STRING) {
+            for &value in prior.fields.get(&at).into_iter().flat_map(|fields| fields.values()) {
+                *found.get_or_insert_default() |= value;
+            }
+        }
+        match found {
+            Some(values) if values.set != TypeSet::NEVER => values | Type::NIL,
+            _ => Type::UNKNOWN,
+        }
+    }
+
+    /// `table.insert` (or `tinsert`) adds its last argument to the table, and
+    /// `pairs` and `ipairs` note what their loop gives
+    fn table_library_call(&mut self, call: &FunctionCall, callee: Type, count: usize, arguments: &Values) {
+        let builtin = |path: &str| {
+            let mut parts = path.split('.');
+            let mut ty = self.definitions.global(parts.next()?)?;
+            for part in parts {
+                ty = self.definitions.field(ty, part)?;
+            }
+            Some(ty)
+        };
+        let is = |path: &str| builtin(path) == Some(callee);
+        if (is("table.insert") || is("tinsert")) && count >= 2 {
+            self.entry_write(arguments.get(0), Type::of(TypeSet::NUMBER), arguments.get(count - 1));
+            return
+        }
+        let (ipairs, pairs) = (is("ipairs"), is("pairs"));
+        if !ipairs && !pairs {
+            return
+        }
+        let (Some(prior), Some(at)) = (self.prior, arguments.get(0).named.identity()) else { return };
+        let contents = if ipairs {
+            // Only the entries under number keys are visited
+            prior.entries.get(&at)
+                .filter(|e| e.keys.set.contains(TypeSet::NUMBER))
+                .map(|e| (Type::of(TypeSet::NUMBER), e.values))
+        } else {
+            prior.contents(at).map(|e| (e.keys, e.values))
+        };
+        if let Some(contents) = contents {
+            self.iterated.insert(self.location(call.syntax().text_range().start()), contents);
+        }
     }
 
     fn binary_expression(&mut self, b: &BinaryExpression) -> Type {
@@ -2374,6 +2566,29 @@ fn field_access(node: &SyntaxNode) -> Option<(Expression, SyntaxToken)> {
         return None
     }
     Some((Expression::cast(base)?, field))
+}
+
+/// `t[k]`: the table and the key
+fn index_access(node: &SyntaxNode) -> Option<(Expression, Expression)> {
+    let mut significant = node.children_with_tokens()
+        .filter(|t| !matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment));
+    let (Some(NodeOrToken::Node(base)), Some(NodeOrToken::Token(open)), Some(NodeOrToken::Node(key)), Some(NodeOrToken::Token(close)), None) =
+        (significant.next(), significant.next(), significant.next(), significant.next(), significant.next()) else { return None };
+    if open.kind() != SyntaxKind::LeftSquareBracket || close.kind() != SyntaxKind::RightSquareBracket {
+        return None
+    }
+    Some((Expression::cast(base)?, Expression::cast(key)?))
+}
+
+/// The field a quoted string literal names, if it could be written as one:
+/// `"name"` or `'name'`
+fn string_field_name(literal: &str) -> Option<&str> {
+    let literal = literal.trim();
+    let quote = literal.chars().next().filter(|&c| c == '"' || c == '\'')?;
+    let name = literal.strip_prefix(quote)?.strip_suffix(quote)?;
+    let mut chars = name.chars();
+    let starts_well = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    (starts_well && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')).then_some(name)
 }
 
 /// Whether every path through the block ends in a `return`. Conservative:
@@ -2767,7 +2982,7 @@ mod tests {
         assert_eq!(builtin_types_of("local b = a.b local x = b.c()", "x"), ["table"]);
         // A namespace is shown as a plain table
         assert_eq!(builtin_types_of("local s = string", "s"), ["table"]);
-        assert_eq!(builtin_types_of("local x = string['format']()", "x"), ["unknown"]);
+        assert_eq!(builtin_types_of("local x = string['format']()", "x"), ["string"]);
         // A local named `string` isn't the library
         assert_eq!(builtin_types_of("local string = {} local x = string.format()", "x"), ["unknown"]);
     }
@@ -2958,12 +3173,87 @@ mod tests {
     }
 
     #[test]
+    fn array_entries() {
+        assert_eq!(types_of("local t = { 'a', 'b' }", "t"), ["string[]"]);
+        assert_eq!(types_of("local t = { 'a', 1 }", "t"), ["(number|string)[]"]);
+        assert_eq!(types_of("local t = { 'a' } local a = t[1]", "a"), ["string?"]);
+        assert_eq!(types_of("local t = { 'a' } local i = 1 local a = t[i]", "a"), ["string?"]);
+        // Nothing known: still unknown rather than nil
+        assert_eq!(types_of("local t = {} local a = t[1]", "a"), ["unknown"]);
+        // Nested tables show as plain tables
+        assert_eq!(types_of("local t = { { 1 } } local a = t[1][1]", "a"), ["number?"]);
+        assert_eq!(types_of("local t = { { 1 } }", "t"), ["table[]"]);
+        // A table holding itself
+        assert_eq!(types_of("local t = {} t[1] = t", "t")[0], "table[]");
+        // Unknown values are just unknown, as nothing stored is nil
+        assert_eq!(types_of("local function f(x) local t = { x } end", "t"), ["unknown[]"]);
+    }
+
+    #[test]
+    fn array_items_are_read() {
+        // `{ x }` is an item, so `x` is read, not taken as a key
+        assert_eq!(types_of("local x = 1 local t = { x }", "x"), ["number", "number"]);
+    }
+
+    #[test]
+    fn computed_keys() {
+        assert_eq!(types_of("local t = {} t[1] = 'a'", "t"), ["string[]", "string[]"]);
+        assert_eq!(types_of("local t = { [true] = 1 }", "t"), ["table<true, number>"]);
+        assert_eq!(types_of("local k = 'x' .. 1 local t = {} t[k] = 1", "t"), ["table<string, number>", "table<string, number>"]);
+        // `t["name"]` is the field `name`
+        assert_eq!(types_of("local t = {} t['n'] = 1 local a = t.n", "a"), ["number"]);
+        assert_eq!(types_of("local t = { n = 1 } local a = t['n']", "a"), ["number"]);
+        // A string key could be any named field
+        assert_eq!(types_of("local t = { n = 1 } local k = 'x' .. 1 local a = t[k]", "a"), ["number?"]);
+        // Storing nil removes
+        assert_eq!(types_of("local t = {} t[1] = nil", "t"), ["table", "table"]);
+        // Only named fields: still a plain table
+        assert_eq!(types_of("local t = { n = 1 }", "t"), ["table"]);
+        // Mixed: named fields are string keys
+        assert_eq!(types_of("local t = { n = 1, 'a' }", "t"), ["table<number|string, number|string>"]);
+    }
+
+    /// With the repository's definitions, for the real Lua and WoW libraries
+    fn library_types_of(source: &str, name: &str) -> Vec<String> {
+        describe_uses(&analyse_with(source, &Arc::new(crate::definitions::load(None))), name)
+    }
+
+    #[test]
+    fn table_insert() {
+        assert_eq!(library_types_of("local t = {} table.insert(t, 'a')", "t")[0], "string[]");
+        assert_eq!(library_types_of("local t = {} table.insert(t, 1, 'a')", "t")[0], "string[]");
+        assert_eq!(library_types_of("local t = {} tinsert(t, true)", "t")[0], "true[]");
+        // A local named `table` isn't the library
+        assert_eq!(library_types_of("local table = { insert = function() end } local t = {} table.insert(t, 'a')", "t")[0], "table");
+    }
+
+    #[test]
+    fn iterating_contents() {
+        let source = "local t = { 'a' } for i, v in ipairs(t) do end";
+        assert_eq!(library_types_of(source, "i")[0], "number");
+        assert_eq!(library_types_of(source, "v")[0], "string");
+        let source = "local t = { n = 1, [true] = 'x' } for k, v in pairs(t) do end";
+        assert_eq!(library_types_of(source, "k")[0], "string|true");
+        assert_eq!(library_types_of(source, "v")[0], "number|string");
+        // ipairs only visits number keys
+        let source = "local t = { n = 1 } for i, v in ipairs(t) do end";
+        assert_eq!(library_types_of(source, "v")[0], "unknown (not nil)");
+        // Unknown contents keep the old guesses
+        let source = "local function f(t) for k, v in pairs(t) do end end";
+        assert_eq!(library_types_of(source, "k")[0], "unknown (not nil)");
+        // Through a parameter, from what calls pass
+        let source = "local function f(list) for _, b in ipairs(list) do b:Show() end end f({ CreateFrame('Button') })";
+        assert_eq!(library_types_of(source, "b")[0], "Button");
+    }
+
+    #[test]
     fn constructor_fields() {
         assert_eq!(types_of("local t = { count = 1, name = 'x' } local a = t.count", "a"), ["number"]);
         assert_eq!(types_of("local t = { count = 1, name = 'x' } local a = t.name", "a"), ["string"]);
         assert_eq!(types_of("local t = { f = function() return true end } local a = t.f()", "a"), ["true"]);
-        // Positional and bracketed entries aren't fields by name
-        assert_eq!(types_of("local t = { 1, ['k'] = 2 } local a = t.k", "a"), ["unknown"]);
+        // A string literal key is the field it names; positional entries aren't fields
+        assert_eq!(types_of("local t = { 1, ['k'] = 2 } local a = t.k", "a"), ["number"]);
+        assert_eq!(types_of("local t = { 1 } local a = t.k", "a"), ["unknown"]);
         assert_eq!(types_of("local t = {} local a = t.missing", "a"), ["unknown"]);
         // Tables never show their identity
         assert_eq!(types_of("local t = { count = 1 }", "t"), ["table"]);
