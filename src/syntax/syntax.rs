@@ -284,6 +284,10 @@ impl<'a> Generator<'a> {
     pub fn process_all(&mut self) -> rowan::GreenNode {
         if let Some(first) = self.peek_raw_token() {
             self.scan_block(None, &first);
+        } else {
+            // An empty file is an empty block, so there's still a root node
+            self.builder.start_node(to_raw(SyntaxKind::Block));
+            self.builder.finish_node();
         }
         let b = std::mem::take(&mut self.builder);
         return b.finish()
@@ -1700,6 +1704,14 @@ mod tests {
 
     fn tree_text(source: &str) -> String {
         SyntaxNode::new_root(Generator::new(source).process_all()).text().to_string()
+    }
+
+    /// Opening a new file gives the server empty text, which must still parse
+    #[test]
+    fn empty_file() {
+        let root = SyntaxNode::new_root(Generator::new("").process_all());
+        assert_eq!(root.kind(), SyntaxKind::Block);
+        assert_eq!(root.text().to_string(), "");
     }
 
     /// Every token must land in the tree in source order, or positions (hover,
