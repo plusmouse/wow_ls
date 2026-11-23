@@ -122,6 +122,33 @@ impl Definitions {
         self.member(ty.named.named_id()?, name, 0)
     }
 
+    /// Every preset global, in no particular order
+    pub fn globals(&self) -> impl Iterator<Item = (&str, Type)> {
+        self.globals.iter().map(|(name, &ty)| (name.as_str(), ty))
+    }
+
+    /// Every known member of type `id`, including inherited ones. A member
+    /// redefined lower down the hierarchy is given once, with its own type
+    pub fn members(&self, id: NamedId) -> HashMap<&str, Type> {
+        let mut members = HashMap::new();
+        self.collect_members(id, &mut members, 0);
+        members
+    }
+
+    fn collect_members<'d>(&'d self, id: NamedId, members: &mut HashMap<&'d str, Type>, depth: usize) {
+        // Deep enough for any real hierarchy, and stops a loop in a bad file
+        if depth > 32 {
+            return
+        }
+        let Some(named) = self.named_type(id) else { return };
+        for (name, &ty) in &named.fields {
+            members.entry(name.as_str()).or_insert(ty);
+        }
+        for &parent in &named.inherits {
+            self.collect_members(parent, members, depth + 1);
+        }
+    }
+
     /// Whether another type inherits from `id`
     pub fn has_subtypes(&self, id: NamedId) -> bool {
         self.named_type(id).is_some_and(|named| self.has_subtypes.contains(&named.name))

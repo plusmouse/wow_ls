@@ -283,7 +283,7 @@ impl NamedRef {
     }
 
     /// Where the table or object was made, if it's one made in the files
-    fn identity(self) -> Option<TableId> {
+    pub fn identity(self) -> Option<TableId> {
         match self {
             NamedRef::Table(at) | NamedRef::Instance { at, .. } => Some(at),
             _ => None,
@@ -491,11 +491,24 @@ pub struct Binding {
     pub declaration: Option<TextRange>,
     /// Union of every value assigned anywhere in the file
     pub types: Type,
+    /// The file declaring it, or for a global, the first file using it
+    pub file: FileId,
+    /// Where a local or parameter can be seen by name, from just after its
+    /// declaration to the end of its scope. None for globals
+    pub visible: Option<TextRange>,
     function: usize,
     scope_depth: usize,
     assigned: bool,
     /// Written after its declaration (so far, on this walk)
     reassigned: bool,
+}
+
+impl Binding {
+    /// Whether the files give it a value: always for a local or parameter, and
+    /// for a global, whether any file assigns it
+    pub fn assigned(&self) -> bool {
+        self.assigned
+    }
 }
 
 #[derive(Debug)]
@@ -779,6 +792,15 @@ impl Analysis {
         (candidate.file == file && candidate.range.contains_inclusive(offset)).then_some(candidate)
     }
 
+    /// The function a value is, if it's exactly one known function
+    pub fn function_info(&self, function: FunctionRef) -> Option<&FunctionInfo> {
+        match function {
+            FunctionRef::One(id) => self.functions.get(&id),
+            FunctionRef::Builtin(id) => self.definitions.function(id),
+            _ => None,
+        }
+    }
+
     pub fn binding(&self, reference: &Reference) -> &Binding {
         &self.bindings[reference.binding]
     }
@@ -788,6 +810,8 @@ struct Scope {
     names: HashMap<String, BindingId>,
     /// Code in this scope might not run (or might run many times)
     conditional: bool,
+    /// Where the scope's code ends, after which its locals can't be seen
+    end: TextSize,
 }
 
 #[derive(Default)]
@@ -921,7 +945,7 @@ impl<'a> Walker<'a> {
             self.file = FileId(i as u32);
             self.in_addon = file.in_addon;
             if let Some(block) = Block::cast(file.root.clone()) {
-                self.push_scope(false);
+                self.push_scope(false, file.root.text_range().end());
                 self.statements(&block);
                 self.pop_scope();
             }
@@ -1104,8 +1128,8 @@ impl<'a> Walker<'a> {
         }
     }
 
-    fn push_scope(&mut self, conditional: bool) {
-        self.scopes.push(Scope { names: HashMap::new(), conditional });
+    fn push_scope(&mut self, conditional: bool, end: TextSize) {
+        self.scopes.push(Scope { names: HashMap::new(), conditional, end });
     }
 
     fn pop_scope(&mut self) {
@@ -1119,6 +1143,8 @@ impl<'a> Walker<'a> {
             kind,
             declaration,
             types,
+            file: self.file,
+            visible: None,
             function,
             scope_depth,
             assigned: false,
@@ -1136,6 +1162,8 @@ impl<'a> Walker<'a> {
         let depth = self.scopes.len() - 1;
         let id = self.new_binding(token.text(), kind, Some(token.text_range()), types, self.function, depth);
         self.bindings[id].assigned = true;
+        let end = self.scopes[depth].end.max(token.text_range().end());
+        self.bindings[id].visible = Some(TextRange::new(token.text_range().end(), end));
         self.scopes[depth].names.insert(token.text().to_string(), id);
         self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: true, callee: false, call_returns: None });
         id
@@ -1219,15 +1247,25 @@ impl<'a> Walker<'a> {
 
     fn block(&mut self, block: Option<Block>, conditional: bool) {
         if let Some(block) = block {
-            self.push_scope(conditional);
+            self.push_scope(conditional, block.syntax().text_range().end());
             self.statements(&block);
             self.pop_scope();
         }
     }
 
     fn statements(&mut self, block: &Block) {
-        for statement in block.statements() {
-            self.statement(&statement);
+        for child in block.syntax().children() {
+            match Statement::cast(child.clone()) {
+                Some(statement) => self.statement(&statement),
+                // Half-typed code like `frame.` that isn't a statement yet: its
+                // names are still read, for hover and completion
+                None if child.kind() == SyntaxKind::Identifier => {
+                    if let Some(expression) = Expression::cast(child) {
+                        self.expression(&expression);
+                    }
+                }
+                None => {}
+            }
         }
     }
 
@@ -1237,8 +1275,22 @@ impl<'a> Walker<'a> {
                 let names = s.name_list().map(|n| n.name_tokens()).unwrap_or_default();
                 let expressions = s.expression_list().map(|e| e.expressions()).unwrap_or_default();
                 let types = self.expression_list(&expressions, names.len());
+                // `local x = x` reads the outer `x`: the new one is seen after the
+                // statement's code, not counting the whitespace it ends with
+                let after = s.syntax().descendants_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| !matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment))
+                    .last()
+                    .map_or(s.syntax().text_range().end(), |t| t.text_range().end());
+                // `local x =` with its value still to be typed: what follows is the value
+                let unfinished = expressions.is_empty()
+                    && s.syntax().children_with_tokens().any(|e| e.kind() == SyntaxKind::Assign);
                 for (i, (name, types)) in names.iter().zip(types).enumerate() {
                     let binding = self.declare(name, BindingKind::Local, types);
+                    if let Some(visible) = &mut self.bindings[binding].visible {
+                        let start = if unfinished { visible.end() } else { after.min(visible.end()) };
+                        *visible = TextRange::new(start, visible.end());
+                    }
                     if let Some(Expression::Function(def)) = expressions.get(i) {
                         self.assigned_to.insert(self.function_id(def), binding);
                     }
@@ -1281,7 +1333,7 @@ impl<'a> Walker<'a> {
             }),
             Statement::Repeat(s) => self.loop_body(|w| {
                 // The `until` condition can see the block's locals
-                w.push_scope(true);
+                w.push_scope(true, s.syntax().text_range().end());
                 if let Some(block) = s.block() {
                     w.statements(&block);
                 }
@@ -1310,7 +1362,7 @@ impl<'a> Walker<'a> {
                     self.expression(e);
                 }
                 self.loop_body(|w| {
-                    w.push_scope(true);
+                    w.push_scope(true, s.syntax().text_range().end());
                     if let Some(name) = s.name_token() {
                         w.declare(&name, BindingKind::Local, Type::of(TypeSet::NUMBER));
                     }
@@ -1333,7 +1385,7 @@ impl<'a> Walker<'a> {
                 };
                 let names = s.name_list().map(|n| n.name_tokens()).unwrap_or_default();
                 self.loop_body(|w| {
-                    w.push_scope(true);
+                    w.push_scope(true, s.syntax().text_range().end());
                     for (i, name) in names.iter().enumerate() {
                         if let (0, Some(object)) = (i, enumerated) {
                             w.declare(name, BindingKind::Local, object);
@@ -1533,7 +1585,7 @@ impl<'a> Walker<'a> {
         let outer_function = self.function;
         self.function_count += 1;
         self.function = self.function_count;
-        self.push_scope(true);
+        self.push_scope(true, def.syntax().text_range().end());
         let outer_function_scope = std::mem::replace(&mut self.function_scope, self.scopes.len() - 1);
         let outer_short_circuit = std::mem::take(&mut self.short_circuit_depth);
         self.returns.push(None);
@@ -1544,6 +1596,7 @@ impl<'a> Walker<'a> {
             // Implicit, so there's no token to declare it at
             let id = self.new_binding("self", BindingKind::Parameter, None, self_type, self.function, depth);
             self.bindings[id].assigned = true;
+            self.bindings[id].visible = Some(def.syntax().text_range());
             self.scopes[depth].names.insert("self".to_string(), id);
         }
         let params = def.params();

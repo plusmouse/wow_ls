@@ -14,23 +14,19 @@
 //along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
-use lsp_types::{request, Diagnostic, DiagnosticSeverity, Position, PublishDiagnosticsParams, Range, Uri};
+use lsp_types::{request, Diagnostic, DiagnosticSeverity, PublishDiagnosticsParams, Range, Uri};
 
 /// Publishes a document's syntax errors, along with `warnings` (byte ranges
 /// and messages) found by type analysis
 pub fn publish(connection: &Connection, uri: Uri, text: &str, warnings: &[(rowan::TextRange, String)]) {
     let mut parser = crate::syntax::syntax::Generator::new(text);
-    let numbers = line_numbers::LinePositions::from(text);
     let _green_tree = parser.process_all();
     let errors = parser.errors();
 
     let mut diagnostics: Vec<Diagnostic> = Vec::with_capacity(errors.len() + warnings.len());
     let range = |start: usize, end: usize| {
-        let (start, end) = (numbers.from_offset(start), numbers.from_offset(end));
-        Range {
-            start: Position { line: start.0.0, character: start.1 as u32 },
-            end: Position { line: end.0.0, character: end.1 as u32 },
-        }
+        let range = rowan::TextRange::new(rowan::TextSize::from(start as u32), rowan::TextSize::from(end as u32));
+        crate::lsp::position::range_of(text, range)
     };
     let diagnostic = |range: Range, severity: DiagnosticSeverity, message: String| Diagnostic {
         range,

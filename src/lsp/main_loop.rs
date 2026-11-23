@@ -22,17 +22,18 @@ use crate::syntax::{
 use std::error::Error;
 use lsp_types::{
     ClientCapabilities, Hover, HoverContents, HoverProviderCapability, InitializeParams, MarkedString, Position, Range, ServerCapabilities, notification, request,
-    MarkupKind, MarkupContent,
+    MarkupKind, MarkupContent, CompletionOptions, CompletionItem, CompletionItemKind, CompletionList, CompletionResponse,
 };
 use lsp_types::{TextDocumentSyncCapability, TextDocumentSyncKind};
 
 use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
-use rowan::{TextSize, TokenAtOffset};
+use rowan::TokenAtOffset;
 
-use crate::lsp::diagnostics;
+use crate::lsp::{diagnostics, position};
 use crate::types::{Analysis, FileId};
 use crate::definitions::{self, Definitions};
 use crate::project::{self, Addon};
+use crate::completion::{self, CandidateKind};
 
 pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
     // Note that  we must have our logging only write out to stderr.
@@ -61,6 +62,10 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
     let server_capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
+            ..CompletionOptions::default()
+        }),
         ..ServerCapabilities::default()
     };
 
@@ -177,28 +182,22 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                     "textDocument/hover" => {
                         if let Ok((id, params)) = cast_req::<request::HoverRequest>(req) {
                             let pos = params.text_document_position_params.position;
-                            let s = text.get(&params.text_document_position_params.text_document.uri.to_string()).expect("missing");
-                            let lines: Vec<_> = s.lines().collect();
-                            let mut offset = 0;
-                            let wanted_line = usize::try_from(pos.line).unwrap();
-                            for i in 0..lines.len() {
-                                if i == wanted_line {
-                                    offset = offset + pos.character;
-                                    break
-                                } else {
-                                    offset = offset + u32::try_from(lines[i].len()).unwrap() + 1;
-                                }
-                            }
+                            // Not a document we were told about, so nothing to show
+                            let Some(s) = text.get(&params.text_document_position_params.text_document.uri.to_string()) else {
+                                let resp = Response { id, result: Some(serde_json::Value::Null), error: None };
+                                connection.sender.send(Message::Response(resp))?;
+                                continue;
+                            };
+                            let offset = position::offset_of(s, pos);
                             let mut lexer = syntax::Generator::new(&s);
                             let all = SyntaxNode::new_root(lexer.process_all());
-                            let token = all.token_at_offset(TextSize::from(offset));
-                            let numbers = line_numbers::LinePositions::from(s.as_str());
+                            let token = all.token_at_offset(offset);
                             let node;
                             match token.clone() {
                                 TokenAtOffset::Single(t) => {
                                     node = t.parent().unwrap();
                                 }
-                                TokenAtOffset::Between(t1, t2) => {
+                                TokenAtOffset::Between(_, t2) => {
                                     node = t2.parent().unwrap();
                                 }
                                 TokenAtOffset::None => {
@@ -220,7 +219,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                             let path = project::uri_to_path(&uri);
                             let (analysis, file) = workspace.analysis(path.as_deref(), &all, &definitions);
                             let analysis = &analysis.0;
-                            let (output, text_range) = match analysis.hover(file, TextSize::from(offset)) {
+                            let (output, text_range) = match analysis.hover(file, offset) {
                                 Some(hover) => hover,
                                 None => {
                                     let n = node.ancestors().filter(|a| a.kind() != SyntaxKind::Identifier).nth(0);
@@ -231,9 +230,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                                     (output, node.text_range())
                                 }
                             };
-                            let (start, end) = (text_range.start(), text_range.end());
-                            let (start, end) = (numbers.from_offset(usize::from(start)), numbers.from_offset(usize::from(end)));
-                            let range: Option<Range> = Some(Range{start: Position{line: start.0.0, character: start.1.try_into().unwrap()}, end: Position{line: end.0.0, character: end.1.try_into().unwrap()}});
+                            let range: Option<Range> = Some(position::range_of(s, text_range));
                             let result = Some(Hover{contents: HoverContents::Markup(MarkupContent{kind: MarkupKind::PlainText, value: output}), range});
                             let result = serde_json::to_value(&result).unwrap();
                             let resp = Response {
@@ -241,6 +238,23 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                                 result: Some(result),
                                 error: None,
                             };
+                            connection.sender.send(Message::Response(resp))?;
+                        }
+                    }
+                    "textDocument/completion" => {
+                        if let Ok((id, params)) = cast_req::<request::Completion>(req) {
+                            let position = params.text_document_position.position;
+                            let uri = params.text_document_position.text_document.uri.to_string();
+                            let result = match text.get(&uri) {
+                                Some(s) => {
+                                    let definitions = loaded_definitions
+                                        .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
+                                        .clone();
+                                    Some(complete(&mut workspace, &uri, s, position, &definitions))
+                                }
+                                None => None,
+                            };
+                            let resp = Response { id, result: Some(serde_json::to_value(&result).unwrap()), error: None };
                             connection.sender.send(Message::Response(resp))?;
                         }
                     }
@@ -308,6 +322,38 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
         }
     }
     Ok(())
+}
+
+/// The completion list at `position` in the open document `uri`, whose text is `s`
+fn complete(workspace: &mut Workspace, uri: &str, s: &str, position: Position, definitions: &Arc<Definitions>) -> CompletionResponse {
+    let offset = position::offset_of(s, position);
+    let root = SyntaxNode::new_root(syntax::Generator::new(s).process_all());
+    let path = project::uri_to_path(uri);
+    let (analysis, file) = workspace.analysis(path.as_deref(), &root, definitions);
+    let analysis = &analysis.0;
+    let completions = completion::complete(analysis, file, &root, s, offset);
+    let items = completions.candidates.iter().map(|candidate| {
+        let (kind, order) = match candidate.kind {
+            CandidateKind::Local | CandidateKind::Parameter => (CompletionItemKind::VARIABLE, 0),
+            CandidateKind::Field => (CompletionItemKind::FIELD, 0),
+            CandidateKind::Method => (CompletionItemKind::METHOD, 0),
+            CandidateKind::Global => (CompletionItemKind::VARIABLE, 1),
+            CandidateKind::Keyword => (CompletionItemKind::KEYWORD, 2),
+        };
+        let kind = match candidate.kind {
+            CandidateKind::Local | CandidateKind::Parameter | CandidateKind::Global if completion::is_function(candidate) => CompletionItemKind::FUNCTION,
+            _ => kind,
+        };
+        CompletionItem {
+            label: candidate.name.clone(),
+            kind: Some(kind),
+            detail: completion::detail(analysis, candidate),
+            // Locals before globals before keywords, alphabetically within each
+            sort_text: Some(format!("{order}{}", candidate.name)),
+            ..CompletionItem::default()
+        }
+    }).collect();
+    CompletionResponse::List(CompletionList { is_incomplete: completions.incomplete, items })
 }
 
 fn cast_req<R>(req: Request) -> Result<(RequestId, R::Params), ExtractError<Request>>

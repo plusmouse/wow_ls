@@ -26,6 +26,7 @@ mod types;
 mod definitions;
 mod project;
 mod ast;
+mod completion;
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let args: Vec<String> = env::args().collect();
