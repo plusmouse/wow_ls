@@ -170,12 +170,61 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
     let mut text: HashMap<String, String> = HashMap::new();
     let mut workspace = Workspace { root, ..Workspace::default() };
 
-    for msg in &connection.receiver {
+    // Files whose diagnostics are out of date. They're published once no
+    // messages are waiting, so a burst of keystrokes is analysed once, for the
+    // last of them, rather than once each
+    let mut owed: Vec<PathBuf> = Vec::new();
+    // The transport hands over one message at a time, and only when asked, so
+    // a thread asks for them as they come and queues them here. Otherwise
+    // keystrokes typed during an analysis would wait in the transport, out of
+    // sight, and each would be analysed in turn
+    let (queue, inbox) = std::sync::mpsc::channel::<Message>();
+    let transport = connection.receiver.clone();
+    std::thread::spawn(move || {
+        for msg in transport {
+            if queue.send(msg).is_err() {
+                break
+            }
+        }
+    });
+    // A message taken from the queue while checking whether any were waiting
+    let mut next: Option<Message> = None;
+    let mut shutting_down = false;
+    loop {
+        let msg = match next.take().map(Ok).unwrap_or_else(|| inbox.try_recv()) {
+            Ok(msg) => msg,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if !owed.is_empty() {
+                    let definitions = loaded_definitions
+                        .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
+                        .clone();
+                    while let Some(path) = owed.first().cloned() {
+                        owed.remove(0);
+                        workspace.publish_diagnostics(&connection, &path, &definitions);
+                        // Something arrived meanwhile: handle it before the rest
+                        if let Ok(msg) = inbox.try_recv() {
+                            next = Some(msg);
+                            break
+                        }
+                    }
+                    continue
+                }
+                match inbox.recv() {
+                    Ok(msg) => msg,
+                    Err(_) => break,
+                }
+            }
+        };
         //eprintln!("got msg: {msg:?}");
         match msg {
             Message::Request(req) => {
-                if connection.handle_shutdown(&req)? {
-                    return Ok(());
+                // As `Connection::handle_shutdown`, which can't be used as the
+                // queue's thread is the one reading the transport
+                if req.method == "shutdown" {
+                    connection.sender.send(Message::Response(Response::new_ok(req.id.clone(), ())))?;
+                    shutting_down = true;
+                    continue;
                 }
                 //eprint!("got req {}", &*req.method);
                 match &*req.method {
@@ -266,6 +315,9 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
             Message::Response(resp) => {
                 //eprintln!("got response: {resp:?}");
             }
+            Message::Notification(not) if not.method == "exit" => {
+                return if shutting_down { Ok(()) } else { Err("exit without shutdown".into()) };
+            }
             Message::Notification(not) => {
                 //eprint!("got not {}", &*not.method);
                 match &*not.method {
@@ -281,10 +333,9 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                                     text.insert(params.text_document.uri.to_string(), params.content_changes[0].text.clone());
                                     match &path {
                                         Some(path) => {
-                                            let definitions = loaded_definitions
-                                                .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
-                                                .clone();
-                                            workspace.publish_diagnostics(&connection, path, &definitions);
+                                            if !owed.contains(path) {
+                                                owed.push(path.clone());
+                                            }
                                         }
                                         None => diagnostics::publish(&connection, params.text_document.uri, &params.content_changes[0].text, &[]),
                                     }
@@ -304,10 +355,9 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                             if params.text_document.language_id == "lua" {
                                 match &path {
                                     Some(path) => {
-                                        let definitions = loaded_definitions
-                                            .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
-                                            .clone();
-                                        workspace.publish_diagnostics(&connection, path, &definitions);
+                                        if !owed.contains(path) {
+                                            owed.push(path.clone());
+                                        }
                                     }
                                     None => diagnostics::publish(&connection, params.text_document.uri, &params.text_document.text, &[]),
                                 }
