@@ -20,8 +20,9 @@ use lsp_types::{request, Diagnostic, DiagnosticSeverity, PublishDiagnosticsParam
 /// and messages) found by type analysis
 pub fn publish(connection: &Connection, uri: Uri, text: &str, warnings: &[(rowan::TextRange, String)]) {
     let mut parser = crate::syntax::syntax::Generator::new(text);
-    let _green_tree = parser.process_all();
-    let errors = parser.errors();
+    let root = crate::syntax::SyntaxNode::new_root(parser.process_all());
+    let mut errors = parser.errors().clone();
+    errors.extend(crate::syntax::checks::check(&root));
 
     let mut diagnostics: Vec<Diagnostic> = Vec::with_capacity(errors.len() + warnings.len());
     let range = |start: usize, end: usize| {
@@ -40,7 +41,7 @@ pub fn publish(connection: &Connection, uri: Uri, text: &str, warnings: &[(rowan
         data: None,
     };
 
-    for e in errors {
+    for e in &errors {
         diagnostics.push(diagnostic(range(e.start, e.end), DiagnosticSeverity::ERROR, format!("{:?}", e.kind)));
     }
     for (text_range, message) in warnings {

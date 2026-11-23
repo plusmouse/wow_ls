@@ -118,7 +118,7 @@ pub enum SyntaxKind {
     __LAST,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     NotClosedBlock,
     NotClosedComment,
@@ -143,6 +143,16 @@ pub enum ErrorKind {
     AmbiguousSyntax,
     InvalidName,
     InvalidFunction,
+    /// Found by `checks` once the file has parsed: a statement after a
+    /// `return` or `break` in the same block, which could never run
+    CodeAfterReturn,
+    CodeAfterBreak,
+    /// `break` with no loop around it in its function
+    BreakOutsideLoop,
+    /// `...` in a function not declared with it
+    VarArgsOutsideVarArgFunction,
+    /// A numeric `for` needs a start and limit, and at most a step
+    ExpectingForLimit,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct Error {
@@ -407,12 +417,13 @@ impl<'a> Generator<'a> {
                 }
             }
             skip_forward = true;
+            // `a . b : c` can have whitespace and comments between its parts
+            self.eat_whitespace();
             if let Some(next) = self.peek_raw_token() {
                 t = next;
             } else {
                 break;
             }
-            self.eat_whitespace();
         }
         self.builder.finish_node();
 
@@ -596,6 +607,8 @@ impl<'a> Generator<'a> {
                                 binary_possible = false;
                             } else {
                                 self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                                // Kept in the tree, or every later position would drift
+                                self.builder.token(to_raw(SyntaxKind::Invalid), text);
                             }
                         }
                         SyntaxKind::OrKeyword => {
@@ -607,6 +620,8 @@ impl<'a> Generator<'a> {
                                 binary_possible = false;
                             } else {
                                 self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                                // Kept in the tree, or every later position would drift
+                                self.builder.token(to_raw(SyntaxKind::Invalid), text);
                             }
                         }
                         _ => break,
@@ -634,6 +649,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::Asterisk => {
@@ -645,6 +662,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::Slash => {
@@ -656,6 +675,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::Modulo => {
@@ -667,6 +688,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::Hash => {
@@ -688,6 +711,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::DoubleDot => {
@@ -699,6 +724,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::LessThan => {
@@ -710,6 +737,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::LessThanOrEquals => {
@@ -721,6 +750,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::GreaterThan => {
@@ -732,6 +763,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::GreaterThanOrEquals => {
@@ -743,6 +776,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::EqualsBoolean => {
@@ -754,6 +789,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 TokenKind::NotEqualsBoolean => {
@@ -765,6 +802,8 @@ impl<'a> Generator<'a> {
                         binary_possible = false;
                     } else {
                         self.errors.push(Error{ start: t.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                     }
                 }
                 _ => {
@@ -1101,6 +1140,8 @@ impl<'a> Generator<'a> {
                     let text = &self.text[t.start..t.end];
                     if t.kind != TokenKind::Identifier {
                         self.errors.push(Error { start: token.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
+                        // Kept in the tree, or every later position would drift
+                        self.builder.token(to_raw(SyntaxKind::Invalid), text);
                         return;
                     } else {
                         let keyword = str_to_keyword(text);
@@ -1704,6 +1745,49 @@ mod tests {
 
     fn tree_text(source: &str) -> String {
         SyntaxNode::new_root(Generator::new(source).process_all()).text().to_string()
+    }
+
+    fn error_kinds(source: &str) -> Vec<ErrorKind> {
+        let mut generator = Generator::new(source);
+        generator.process_all();
+        generator.errors().iter().map(|e| e.kind).collect()
+    }
+
+    #[test]
+    fn function_names_with_whitespace() {
+        for source in [
+            "function a . b() end",
+            "function a . b : c() end",
+            "function a :m() end",
+            "function a: m() end",
+            "function a\n.b() end",
+            "function a --[[c]] .b() end",
+            "function a.b () end",
+        ] {
+            assert_eq!(error_kinds(source), [], "{source}");
+            assert_eq!(tree_text(source), source);
+        }
+    }
+
+    #[test]
+    fn number_formats() {
+        for valid in ["3", "3.0", "314.16e-2", "0.31416E1", "0xff", "0XFF", "0xA", ".5", "5.", "1e+10", "1E-2"] {
+            assert_eq!(error_kinds(&format!("local n = {valid}")), [], "{valid}");
+        }
+        for invalid in ["0x", "1e", "1e+", "0x1G", "3..2"] {
+            let source = format!("local n = {invalid}\nlocal after = 1");
+            assert!(error_kinds(&source).contains(&ErrorKind::InvalidNumberFormat), "{invalid}");
+            assert_eq!(tree_text(&source), source, "{invalid}");
+        }
+    }
+
+    /// Text the parser rejects is still in the tree, or every position after it drifts
+    #[test]
+    fn rejected_tokens_stay_in_the_tree() {
+        for source in ["local 1 = 2\nlocal after = 1", "local x = 7 // 2\nlocal after = 1", "local x = 1 + * 2", "local x = 1 and or 2"] {
+            assert!(!error_kinds(source).is_empty(), "{source}");
+            assert_eq!(tree_text(source), source);
+        }
     }
 
     /// Opening a new file gives the server empty text, which must still parse

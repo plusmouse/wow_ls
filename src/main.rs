@@ -42,7 +42,9 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         let dur  = std::time::Instant::now() - before;
         syntax::debug::print_tree(&res);
         //println!("{:#?}", res);
-        println!("{:#?}", a.errors());
+        let mut errors = a.errors().clone();
+        errors.extend(syntax::checks::check(&root));
+        println!("{:#?}", errors);
         //println!("{:?}", numbers.from_offset(a.errors()[0].start));
         //println!("syntax: {:?}", dur);
         Ok(())

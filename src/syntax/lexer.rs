@@ -354,10 +354,16 @@ impl<'a> Generator<'a> {
     fn scan_number(&mut self, start: usize, ch: char, end: usize) -> Option<Token> {
         let mut modifier = token_modifier::Number::Integer;
         let mut validity = token_validity::Number::Valid;
+        // Everything consumed must be in the token, or later positions drift
+        let mut end = end;
+        // `0x` and an exponent need digits after them
+        let mut needs_digit = false;
         match ch {
             '0' => match self.peek_char() {
-                Some((_, 'x', _)) => {
+                Some((_, 'x' | 'X', x_end)) => {
                     self.next_char();
+                    end = x_end;
+                    needs_digit = true;
                     modifier = token_modifier::Number::Hex;
                 },
                 _ => (),
@@ -365,11 +371,11 @@ impl<'a> Generator<'a> {
             '.' => modifier = token_modifier::Number::Decimal,
             _ => ()
         }
-        let mut end = end;
         while let Some((_, ch, end_2)) = self.peek_char() {
             if ch.is_alphanumeric() || ch == '.' {
                 end = end_2;
                 self.next_char();
+                needs_digit = false;
                 match modifier {
                     token_modifier::Number::Hex => {
                         if !ch.is_ascii_hexdigit() {
@@ -381,9 +387,11 @@ impl<'a> Generator<'a> {
                             modifier = token_modifier::Number::Decimal;
                         } else if end - start > 0 && (ch == 'E' || ch == 'e') {
                             modifier = token_modifier::Number::Exponential;
+                            needs_digit = true;
                             match self.peek_char() { // Eat + or - at the start of the exponent
-                                Some((_, '+', _)) | Some((_, '-', _)) => {
+                                Some((_, '+' | '-', sign_end)) => {
                                     self.next_char();
+                                    end = sign_end;
                                 }
                                 _ => ()
                             }
@@ -394,9 +402,11 @@ impl<'a> Generator<'a> {
                     token_modifier::Number::Decimal => {
                         if ch == 'E' || ch == 'e' {
                             modifier = token_modifier::Number::Exponential;
+                            needs_digit = true;
                             match self.peek_char() { // Eat + or - at the start of the exponent
-                                Some((_, '+', _)) | Some((_, '-', _)) => {
+                                Some((_, '+' | '-', sign_end)) => {
                                     self.next_char();
+                                    end = sign_end;
                                 }
                                 _ => ()
                             }
@@ -413,6 +423,9 @@ impl<'a> Generator<'a> {
             } else {
                 break;
             }
+        }
+        if needs_digit {
+            validity = token_validity::Number::Invalid;
         }
         Some(Token{ kind: TokenKind::Number { validity, modifier }, start, end })
     }

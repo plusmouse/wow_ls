@@ -1,5 +1,6 @@
 pub mod lexer;
 pub mod syntax;
+pub mod checks;
 
 pub mod debug;
 
