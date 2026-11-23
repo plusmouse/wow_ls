@@ -83,7 +83,9 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
                 println!("warning {}:{}:{} {}", path.display(), line.0 + 1, column + 1, d.message);
             }
         }
-        eprintln!("{} files, {} bindings, {} references in {:?}", paths.len(), analysis.bindings.len(), analysis.references.len(), dur);
+        let bodies = analysis.replayed + analysis.walked;
+        let replayed = if bodies == 0 { 0 } else { analysis.replayed * 100 / bodies };
+        eprintln!("{} files, {} bindings, {} references in {:?} ({} walks, {}% of function bodies replayed)", paths.len(), analysis.bindings.len(), analysis.references.len(), dur, analysis.walks, replayed);
         Ok(())
     } else {
         lsp::start_ls()

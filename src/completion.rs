@@ -208,6 +208,8 @@ fn last_name(node: &SyntaxNode) -> Option<SyntaxToken> {
 /// The members of a value of type `ty`: those its definitions give, and the
 /// fields the files give it (or its mixins). Only functions for a `:` call
 fn members(analysis: &Analysis, ty: Type, methods_only: bool) -> Vec<Candidate> {
+    // A string's members are the `string` library's
+    let ty = analysis.definitions.member_source(ty);
     let mut found: HashMap<String, Type> = HashMap::new();
     if let Some(at) = ty.named.identity() {
         own_fields(analysis, at, &mut found, 0);
@@ -242,6 +244,14 @@ fn own_fields(analysis: &Analysis, at: TableId, found: &mut HashMap<String, Type
         if let Some(mixin) = mixin.named.identity() {
             own_fields(analysis, mixin, found, depth + 1);
         }
+    }
+    // Then what the metatable's `__index` table gives, as a class's methods
+    let index = analysis.metatables.get(&at)
+        .and_then(|metatable| metatable.named.identity())
+        .and_then(|metatable| analysis.fields.get(&metatable)?.get("__index"))
+        .and_then(|index| index.named.identity());
+    if let Some(index) = index {
+        own_fields(analysis, index, found, depth + 1);
     }
 }
 
@@ -376,6 +386,19 @@ mod tests {
     fn namespace_members() {
         let c = complete_at("string.|");
         assert!(names_of(&c).contains(&"format"));
+    }
+
+    #[test]
+    fn class_methods_through_metatable() {
+        let c = complete_at("local C = {} C.__index = C\nfunction C:go() end\nlocal o = setmetatable({}, C)\no:|");
+        assert!(names_of(&c).contains(&"go"), "{:?}", names_of(&c));
+    }
+
+    #[test]
+    fn string_members() {
+        let c = complete_at("local s = 'x'\ns:|");
+        let names = names_of(&c);
+        assert!(names.contains(&"upper") && names.contains(&"format"), "{names:?}");
     }
 
     #[test]

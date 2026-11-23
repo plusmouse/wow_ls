@@ -52,6 +52,10 @@
     "tremove": {"parameters": ["t: table", "position: number|nil"], "returns": ["unknown"]},
     "wipe": {"parameters": ["t: table"], "returns": ["table"]}
   },
+  "values": {
+    "_G": "table",
+    "_VERSION": "string"
+  },
   "tables": {
     "coroutine": {
       "functions": {
@@ -84,7 +88,18 @@
         "random": {"parameters": ["m: number|nil", "n: number|nil"], "returns": ["number"]},
         "sin": {"parameters": ["x: number"], "returns": ["number"]},
         "sqrt": {"parameters": ["x: number"], "returns": ["number"]},
-        "tan": {"parameters": ["x: number"], "returns": ["number"]}
+        "tan": {"parameters": ["x: number"], "returns": ["number"]},
+        "acos": {"parameters": ["x: number"], "returns": ["number"]},
+        "asin": {"parameters": ["x: number"], "returns": ["number"]},
+        "atan": {"parameters": ["x: number"], "returns": ["number"]},
+        "atan2": {"parameters": ["y: number", "x: number"], "returns": ["number"]},
+        "cosh": {"parameters": ["x: number"], "returns": ["number"]},
+        "sinh": {"parameters": ["x: number"], "returns": ["number"]},
+        "tanh": {"parameters": ["x: number"], "returns": ["number"]}
+      },
+      "values": {
+        "pi": "number",
+        "huge": "number"
       }
     },
     "os": {

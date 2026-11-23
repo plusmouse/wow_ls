@@ -122,6 +122,22 @@ impl Definitions {
         self.member(ty.named.named_id()?, name, 0)
     }
 
+    /// The `string` library's type. Every string has it as its metatable's
+    /// `__index`, so `s:upper()` is `string.upper(s)`
+    pub fn string_library(&self) -> Option<Type> {
+        self.global("string").filter(|ty| ty.named.named_id().is_some())
+    }
+
+    /// The type whose members a value of type `ty` has: the `string` library
+    /// for a string (that may be nil), otherwise `ty` itself
+    pub fn member_source(&self, ty: Type) -> Type {
+        let only_string = ty.set.contains(TypeSet::STRING) && ty.set.without(TypeSet::STRING | TypeSet::NIL) == TypeSet::NEVER;
+        match only_string {
+            true => self.string_library().unwrap_or(ty),
+            false => ty,
+        }
+    }
+
     /// Every preset global, in no particular order
     pub fn globals(&self) -> impl Iterator<Item = (&str, Type)> {
         self.globals.iter().map(|(name, &ty)| (name.as_str(), ty))
