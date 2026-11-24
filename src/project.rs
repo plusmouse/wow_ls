@@ -378,7 +378,7 @@ mod tests {
     fn assigned(analysed: &Analysed, name: &str) -> String {
         let analysis = &analysed.analysis;
         analysis.references.iter()
-            .find(|r| r.write && analysis.binding(r).name == name)
+            .find(|r| r.write && analysis.binding(r).name.as_ref() == name)
             .map(|r| analysis.describe(r.types))
             .unwrap()
     }
@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(top.involves.len(), 3);
         // Alone, Lib's global is unknown to User
         let (alone, _) = user.analyse(Arc::default(), &HashMap::new(), &definitions);
-        let from_lib = alone.references.iter().find(|r| r.write && alone.binding(r).name == "fromLib").unwrap();
+        let from_lib = alone.references.iter().find(|r| r.write && alone.binding(r).name.as_ref() == "fromLib").unwrap();
         assert_eq!(alone.describe(from_lib.types), "unknown");
     }
 

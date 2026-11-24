@@ -117,8 +117,8 @@ fn names(analysis: &Analysis, file: FileId, offset: TextSize, prefix: &str) -> C
             continue
         }
         let kind = if binding.kind == BindingKind::Parameter { CandidateKind::Parameter } else { CandidateKind::Local };
-        let candidate = Candidate { name: binding.name.clone(), kind, types: binding.types };
-        match locals.get(binding.name.as_str()) {
+        let candidate = Candidate { name: binding.name.to_string(), kind, types: binding.types };
+        match locals.get(&*binding.name) {
             Some((start, _)) if *start > visible.start() => {}
             _ => { locals.insert(&binding.name, (visible.start(), candidate)); }
         }
@@ -135,8 +135,8 @@ fn names(analysis: &Analysis, file: FileId, offset: TextSize, prefix: &str) -> C
     let mut globals: Vec<Candidate> = Vec::new();
     // Globals the files assign, then the preset ones they don't
     for binding in &analysis.bindings {
-        if binding.kind == BindingKind::Global && binding.assigned() && matches(&binding.name, prefix) && seen.insert(binding.name.clone()) {
-            globals.push(Candidate { name: binding.name.clone(), kind: CandidateKind::Global, types: binding.types });
+        if binding.kind == BindingKind::Global && binding.assigned() && matches(&binding.name, prefix) && seen.insert(binding.name.to_string()) {
+            globals.push(Candidate { name: binding.name.to_string(), kind: CandidateKind::Global, types: binding.types });
         }
     }
     // Those of addons depended on before the preset ones, which they can replace

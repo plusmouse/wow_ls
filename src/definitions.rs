@@ -66,12 +66,11 @@
 //! file's definition of a name replaces an earlier one. Tables are merged member
 //! by member, so a later file can replace or add single members of `string`.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::types::{FunctionInfo, FunctionRef, NamedRef, Parameter, Type, TypeSet, Values};
+use crate::types::{HashMap, HashSet, FunctionInfo, FunctionRef, NamedRef, Parameter, Type, TypeSet, Values};
 
 pub type BuiltinId = u32;
 pub type NamedId = u32;
@@ -107,13 +106,23 @@ pub struct Definitions {
     /// every file is loaded
     compositions: HashMap<NamedId, (Vec<String>, Vec<String>)>,
     /// Types another type inherits from
-    has_subtypes: std::collections::HashSet<String>,
+    has_subtypes: HashSet<String>,
 }
 
 impl Definitions {
     /// The preset type of a global, if it has one
     pub fn global(&self, name: &str) -> Option<Type> {
         self.globals.get(name).copied()
+    }
+
+    /// The preset type at a path like `table.insert`
+    pub fn at_path(&self, path: &str) -> Option<Type> {
+        let mut parts = path.split('.');
+        let mut ty = self.global(parts.next()?)?;
+        for part in parts {
+            ty = self.field(ty, part)?;
+        }
+        Some(ty)
     }
 
     /// The type of member `name` of a value of type `ty`, if it's known,
@@ -146,7 +155,7 @@ impl Definitions {
     /// Every known member of type `id`, including inherited ones. A member
     /// redefined lower down the hierarchy is given once, with its own type
     pub fn members(&self, id: NamedId) -> HashMap<&str, Type> {
-        let mut members = HashMap::new();
+        let mut members = HashMap::default();
         self.collect_members(id, &mut members, 0);
         members
     }
@@ -185,7 +194,7 @@ impl Definitions {
     pub fn common_ancestor(&self, a: NamedId, b: NamedId) -> Option<NamedId> {
         // Breadth first through `a`'s ancestors, so the closest is found first
         let mut queue = std::collections::VecDeque::from([a]);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::default();
         while let Some(id) = queue.pop_front() {
             if !seen.insert(id) {
                 continue
@@ -312,7 +321,7 @@ impl Definitions {
                     let id = self.types.len() as NamedId;
                     self.type_names.insert(name.clone(), id);
                     self.types.push(NamedType {
-                        name: name.clone(), base, fields: HashMap::new(), inherits: Vec::new(), has_methods: false, namespace: false,
+                        name: name.clone(), base, fields: HashMap::default(), inherits: Vec::new(), has_methods: false, namespace: false,
                     });
                     id
                 }
@@ -364,7 +373,7 @@ impl Definitions {
                 let parent = self.named_type_id(parent).ok_or_else(|| format!("{name} inherits unknown type {parent}"))?;
                 parents.push(parent);
             }
-            let mut fields = HashMap::new();
+            let mut fields = HashMap::default();
             for table in &method_tables {
                 let methods = self.method_tables.get(table).ok_or_else(|| format!("{name}: no method table {table}"))?;
                 for (method, ty) in methods {
@@ -422,7 +431,7 @@ impl Definitions {
                     None => {
                         let id = self.types.len() as NamedId;
                         self.types.push(NamedType {
-                            name: path.clone(), base: TypeSet::TABLE, fields: HashMap::new(), inherits: Vec::new(), has_methods: false, namespace: true,
+                            name: path.clone(), base: TypeSet::TABLE, fields: HashMap::default(), inherits: Vec::new(), has_methods: false, namespace: true,
                         });
                         self.set_member(namespace, name, Type::named(id, TypeSet::TABLE));
                         id
@@ -464,7 +473,7 @@ impl Definitions {
             Some(Value::String(t)) => self.parse_type(t)?,
             Some(_) => return Err("`rest` should be a string".to_string()),
         };
-        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns: Vec::new() })
+        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns: Vec::new(), calls: Vec::new() })
     }
 
     /// `"name"` or `"name: type"`

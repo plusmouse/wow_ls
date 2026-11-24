@@ -68,9 +68,14 @@ format and how wow_ls finds them.
   function, ...). It can also carry a named WoW type (`Frame`), the identity of
   a table made in the code, or a WoW object made in the code
 - The analysis walks the code repeatedly, each walk reading what the one
-  before settled, until nothing changes. Function bodies whose inputs haven't
-  changed are replayed rather than walked again. Loops that won't settle are
-  widened after a few passes, so every walk ends
+  before settled, until nothing changes. Types start from nothing known and
+  only grow. Function bodies whose inputs haven't changed are replayed rather
+  than walked again. Loops that won't settle are widened after a few passes,
+  so every walk ends
+- A call is recursive when the function called can come back round to the
+  caller through the functions each calls, directly or through others. Its
+  results keep the first apart and join the rest together, so returns like
+  `return x, f()` settle rather than gaining a value every walk
 - What it models:
   - parameters typed by every call that passes them, when every call is seen
   - table fields and contents
@@ -88,8 +93,8 @@ format and how wow_ls finds them.
   a dependency also refreshes the open files of addons depending on it
 - A burst of keystrokes is analysed once, for the last of them
 
-On a release build, Syndicator (32 files) takes about 70ms and Baganator (123
-files) about 420ms per edit, with Syndicator's analysis cached.
+On a release build, Syndicator (32 files) takes about 60ms and Baganator (122
+files) about 350ms per edit, with Syndicator's analysis cached.
 
 # Layout
 
