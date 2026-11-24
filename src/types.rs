@@ -255,6 +255,11 @@ const POOL_OBJECT: u32 = 1 << 31;
 /// unknown origin is given where it's declared
 const PSEUDO: u32 = 1 << 30;
 
+/// Added to the slot of a table a deep copy makes inside the copy a
+/// `CopyTable` call makes, with the rest of the slot a hash of where in it
+/// that table is, so it's the same on every walk
+const COPY: u32 = 1 << 29;
+
 /// Which function a value is, when it can be one
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum FunctionRef {
@@ -3816,6 +3821,7 @@ impl<'a> Walker<'a> {
                 .or_else(|| self.create_frame(call, callee, &arguments, &argument_types))
                 .or_else(|| self.create_pool(call, callee, &arguments, &argument_types))
                 .or_else(|| self.mix(call, callee, &arguments, &argument_types))
+                .or_else(|| self.copy_table(call, callee, &arguments, &argument_types))
                 .unwrap_or_else(|| documented.clone()),
         };
         if let (Some(receiver), Some(method)) = (receiver, call.method_name()) {
@@ -4396,6 +4402,76 @@ impl<'a> Walker<'a> {
             return
         }
         self.apply(Write::MixedInto(mixin, object));
+    }
+
+    /// `CopyTable(t)` (and `CopyTableSafe`): a new table, made at the call,
+    /// with what `t` holds: its fields, contents and mixins, and a copy of each
+    /// table among them, as the copy is deep. `CopyTable(t, true)` copies
+    /// only `t`, sharing the tables it holds
+    fn copy_table(&mut self, call: &FunctionCall, callee: Type, expressions: &[Expression], arguments: &Values) -> Option<Values> {
+        let safe = self.definitions.global("CopyTableSafe") == Some(callee);
+        if !safe && self.definitions.global("CopyTable") != Some(callee) {
+            return None
+        }
+        let source = arguments.get(0);
+        let NamedRef::Table(from) = source.named else { return None };
+        let shallow = matches!(expressions.get(1), Some(Expression::Literal(literal)) if literal.get_bool().as_deref() == Some("true"));
+        let at = self.location(call.syntax().text_range().start());
+        self.copy_into(from, at, shallow, &mut vec![from]);
+        let mut copy = Type::table(at);
+        // `CopyTableSafe(nil)` gives nil
+        if safe && source.set.intersection(TypeSet::NIL | TypeSet::FALSE) != TypeSet::NEVER {
+            copy |= Type::NIL;
+        }
+        Some(Values { values: vec![copy], rest: Type::NIL })
+    }
+
+    /// Gives table `to` what table `from` holds, as the previous walk (or a
+    /// dependency) knows it, each table in it copied too unless `shallow`.
+    /// `within` are the tables being copied, which a table holding one of
+    /// them shares rather than copying forever
+    fn copy_into(&mut self, from: TableId, to: TableId, shallow: bool, within: &mut Vec<TableId>) {
+        let Some(prior) = self.prior else { return };
+        self.note(Read::Fields(from));
+        let mut fields: Vec<(String, Type)> = Vec::new();
+        for (name, &ty) in [prior.fields.get(&from), self.layer.fields.get(&from)].into_iter().flatten().flatten() {
+            match fields.iter_mut().find(|(n, _)| n == name) {
+                Some((_, found)) => *found |= ty,
+                None => fields.push((name.clone(), ty)),
+            }
+        }
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, ty) in fields {
+            let ty = self.copied(ty, to, &name, shallow, within);
+            self.apply(Write::Field(to, name, ty));
+        }
+        self.note(Read::Entries(from));
+        if let Some(entries) = prior.entries.get(&from).or_else(|| self.layer.entries.get(&from)).cloned() {
+            let values = self.copied(entries.values, to, "[]", shallow, within);
+            self.apply(Write::Entry(to, entries.keys, values));
+        }
+        // Mixins' fields were copied into it, so they're the copy's too
+        self.note(Read::Mixins(from));
+        let mixins = prior.mixins.get(&from).or_else(|| self.layer.mixins.get(&from)).cloned().unwrap_or_default();
+        for mixin in mixins {
+            self.apply(Write::MixinAdded(to, mixin));
+        }
+    }
+
+    /// What a copy into table `into` holds under `key` for a value of type
+    /// `ty`: a copy of the table it is, made in `into`, unless `shallow`
+    fn copied(&mut self, ty: Type, into: TableId, key: &str, shallow: bool, within: &mut Vec<TableId>) -> Type {
+        let NamedRef::Table(nested) = ty.named else { return ty };
+        // Deep enough for any real table, and a table holding itself is shared
+        if shallow || nested.slot & PSEUDO != 0 || within.contains(&nested) || within.len() > 8 {
+            return ty
+        }
+        let place = name_key(&format!("{}/{key}", into.slot)) as u32 & (COPY - 1);
+        let copy = Location { slot: COPY | place, ..into };
+        within.push(nested);
+        self.copy_into(nested, copy, false, within);
+        within.pop();
+        Type { named: NamedRef::Table(copy), ..ty }
     }
 
     /// What `mixin` was mixed into on this walk, following tables made from it
@@ -6319,6 +6395,8 @@ mod tests {
                 "Parent": {"parameters": ["frame: Frame"]},
                 "CreateFromMixins": {"parameters": ["..."], "returns": ["unknown"]},
                 "Mixin": {"parameters": ["object", "..."], "returns": ["unknown"]},
+                "CopyTable": {"parameters": ["settings", "shallow"], "returns": ["table"]},
+                "CopyTableSafe": {"parameters": ["settings", "shallow"], "returns": ["table|nil"]},
                 "CreateFramePool": {"parameters": ["frameType: string|nil", "parent: Frame|nil", "frameTemplate: string|nil", "resetFunc: function|nil", "forbidden: boolean|nil", "frameInitFunc: function|nil"], "returns": ["ObjectPool"]},
                 "CreateFontStringPool": {"parameters": ["parent: Frame|nil", "layer: string|nil", "subLayer: number|nil", "fontStringTemplate: string|nil", "resetFunc: function|nil"], "returns": ["ObjectPool"]},
                 "CreateObjectPool": {"parameters": ["createFunc: function|nil", "resetFunc: function|nil"], "returns": ["ObjectPool"]}
@@ -6439,6 +6517,29 @@ mod tests {
         assert_eq!(widget_types_of(&format!("{group} local a = g:CreateAnimation('Button')"), "a"), ["Animation"]);
         assert_eq!(widget_types_of(&format!("{group} local a = g:CreateAnimation(kind)"), "a"), ["Animation"]);
         assert_eq!(warnings(&format!("{group} g:CreateAnimation():SetFromAlpha()")), ["Animation has no method `SetFromAlpha`"]);
+    }
+
+    #[test]
+    fn copied_tables() {
+        let made = "local t = { n = 1, sub = { s = 'x' }, list = { 1, 2 } } local M = {} function M:Go() return true end Mixin(t, M)
+            local c = CopyTable(t) ";
+        // What it holds, however deep, and its mixins'
+        assert_eq!(widget_types_of(&format!("{made} local n, s, l, g = c.n, c.sub.s, c.list, c:Go()"), "n"), ["number"]);
+        assert_eq!(widget_types_of(&format!("{made} local n, s = c.n, c.sub.s"), "s"), ["string"]);
+        assert_eq!(widget_types_of(&format!("{made} local l = c.list"), "l"), ["number[]"]);
+        assert_eq!(widget_types_of(&format!("{made} local g = c:Go()"), "g"), ["true"]);
+        // A table of its own, its tables copied too: writes to it don't reach the original
+        assert_eq!(widget_types_of(&format!("{made} c.added = 1 c.sub.extra = 1 local a, e = t.added, t.sub.extra"), "a"), ["unknown"]);
+        assert_eq!(widget_types_of(&format!("{made} c.sub.extra = 1 local e = t.sub.extra"), "e"), ["unknown"]);
+        assert_eq!(widget_types_of(&format!("{made} c.sub.extra = 1 local e = c.sub.extra"), "e"), ["number"]);
+        // A shallow copy shares the tables it holds
+        assert_eq!(widget_types_of(&format!("{made} local h = CopyTable(t, true) h.sub.extra = 1 local e = t.sub.extra"), "e"), ["number"]);
+        // A table holding itself is shared rather than copied forever
+        assert_eq!(widget_types_of("local t = { n = 1 } t.me = t local c = CopyTable(t) local n = c.me.n", "n"), ["number"]);
+        // `CopyTableSafe` gives nil for nil
+        assert_eq!(widget_types_of("local t = c and { n = 1 } or nil local s = CopyTableSafe(t)", "s"), ["table?"]);
+        // Not a table made in the files: as the definitions say
+        assert_eq!(widget_types_of("local c = CopyTable(unknown)", "c"), ["table"]);
     }
 
     #[test]

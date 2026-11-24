@@ -114,6 +114,9 @@ format and how wow_ls finds them.
     known is reported (``This may be a Button, which has no method `Init` ``),
     and a field only some have isn't known. A field set or `SetParent`, or a
     `Mixin`, on it applies to each, and `GetParent` gives each one's parent
+  - `CopyTable(t)` (and `CopyTableSafe`) makes a new table holding what `t`
+    holds, with each table in it copied too, so writes to the copy don't
+    reach `t`. `CopyTable(t, true)` shares the tables it holds
   - `CreateAnimation("Alpha")` makes the kind of animation it names, as
     `CreateFrame("Button")` does the kind of frame
   - the parents of WoW objects, and of `self` in a mixin: what its template
