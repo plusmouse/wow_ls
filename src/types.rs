@@ -3909,6 +3909,10 @@ impl<'a> Walker<'a> {
                 Expression::Identifier(i) if !is_method && field_access(i.syntax()).is_some() => {
                     self.last_field_is_callee();
                     callee_read = self.field_references.len().checked_sub(1).map(CalleeRead::Field);
+                    if let Some((_, name)) = field_access(i.syntax()) {
+                        let base = self.field_references.last().map_or(NamedRef::None, |field| field.base);
+                        self.check_called_field(base, &name, types);
+                    }
                 }
                 _ => {}
             }
@@ -3922,6 +3926,7 @@ impl<'a> Walker<'a> {
                 self.field_reference(call.syntax(), &method, base, types, false);
                 self.last_field_is_callee();
                 callee_read = Some(CalleeRead::Field(self.field_references.len() - 1));
+                self.check_called_field(base.named, &method, types);
                 self.check_method(base, &method);
                 Some(types)
             }
@@ -4107,7 +4112,12 @@ impl<'a> Walker<'a> {
                 // May have it
                 _ => return,
             };
-            let Some(named) = self.definitions.named_type(id).filter(|named| named.has_methods) else { return };
+            let Some(named) = self.definitions.named_type(id) else { return };
+            // A data table's members are all known too, and none are methods,
+            // unless it's given ones that can't be named
+            if !named.has_methods && !(self.definitions.has_fixed_fields(id) && !self.is_opened(prior, id)) {
+                return
+            }
             if !self.lua_mixins_known(prior, id) {
                 return
             }
@@ -4158,6 +4168,46 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// Reports calling field `name` of a table (`t.name()` or `t:name()`) when
+    /// it's known to hold a value that can't be called: a number, string or
+    /// boolean, and nothing that can be (a function, or a table or userdata,
+    /// which may have `__call`). Only for a field whose type is sure: one the
+    /// definitions give, or one a table made in the files is given, not the
+    /// guess from fields of that name on other tables. Nil alone isn't
+    /// reported, as a field not yet seen set reads as nothing
+    fn check_called_field(&mut self, base: NamedRef, name: &SyntaxToken, types: Type) {
+        let Some(prior) = self.prior else { return };
+        let callable = types.set.intersection(TypeSet::FUNCTION | OBJECTS) != TypeSet::NEVER;
+        if callable || types.set.intersection(TypeSet::BOOLEAN | TypeSet::NUMBER | TypeSet::STRING) == TypeSet::NEVER {
+            return
+        }
+        let text = name.text();
+        let sure = match base {
+            NamedRef::One(id) | NamedRef::Extended(id) => {
+                self.definitions.field(Type::named(id, TypeSet::TABLE), text).is_some()
+                    && !(self.definitions.has_fixed_fields(id) && self.is_opened(prior, id))
+            }
+            NamedRef::Table(at) | NamedRef::Instance { at, .. } => self.own_field(prior, at, text, 0).is_some(),
+            _ => false,
+        };
+        if !sure {
+            return
+        }
+        // Some table given a function of that name might be this one
+        self.note(Read::FunctionField(name_key(text)));
+        if prior.function_fields.contains(text) || self.layer.function_fields.contains(text) {
+            return
+        }
+        let message = format!("`{text}` is {}, not a function", self.definitions.type_text(types));
+        self.diagnostics.push(Diagnostic { file: self.file, range: name.text_range(), message });
+    }
+
+    /// Whether data type `id` was given fields that can't be named (see `open`)
+    fn is_opened(&self, prior: &Analysis, id: NamedId) -> bool {
+        self.note(Read::Opened(id));
+        prior.opened_types.contains(&id) || self.layer.opened_types.contains(&id)
+    }
+
     /// Reports reading field `name` (at `token`) of a data table whose fields
     /// the definitions give all of (`values`), when it has none of that name
     /// and no code in the files gives one of that name to a table like it.
@@ -4172,8 +4222,7 @@ impl<'a> Walker<'a> {
         if !self.definitions.has_fixed_fields(id) || self.definitions.field(base, name).is_some() {
             return
         }
-        self.note(Read::Opened(id));
-        if prior.opened_types.contains(&id) || self.layer.opened_types.contains(&id) {
+        if self.is_opened(prior, id) {
             return
         }
         // Writes to it, as to any table whose identity isn't known, are by name
@@ -6691,6 +6740,22 @@ mod tests {
         assert!(warnings("local i = GetInfo() setmetatable(i, {__index = {extra = 1}}) print(i.extra)").is_empty());
         // Numbered entries don't give it names
         assert_eq!(warnings("local i = GetInfo() i[1] = true print(i.extra)"), ["Info has no field `extra`"]);
+        // Nor methods, unless the addon gives it some
+        assert_eq!(warnings("local i = GetInfo() i:Describe()"), ["Info has no method `Describe`"]);
+        assert!(warnings("local i = GetInfo() i:Describe() function i:Describe() end").is_empty());
+        assert!(warnings("local i = GetInfo() i:Describe() Mixin(i, {Describe = function() end})").is_empty());
+        assert!(warnings("local l = GetLoose() l:Anything()").is_empty());
+        // Calling a field that isn't a function
+        assert_eq!(warnings("local i = GetInfo() i.count()"), ["`count` is number, not a function"]);
+        assert_eq!(warnings("local i = GetInfo() i:link()"), ["`link` is string|nil, not a function"]);
+        assert_eq!(warnings("local t = {n = 1} t.n()"), ["`n` is number, not a function"]);
+        assert_eq!(warnings("local t = {} t.flag = true t:flag()"), ["`flag` is true, not a function"]);
+        // Not when it may be one, or what it is is a guess
+        assert!(warnings("local t = {n = 1} t.n = function() end t.n()").is_empty());
+        assert!(warnings("local t = {c = setmetatable({}, {__call = function() end})} t.c()").is_empty());
+        assert!(warnings("local function f(x) x.n() end local a = {} a.n = 1 f(a) local b = {} b.n = print f(b)").is_empty());
+        assert_eq!(warnings("local function f(x) x.n() end local a = {} a.n = 1 f(a)"), ["`n` is number, not a function"]);
+        assert!(warnings("local t = {} t.n()").is_empty());
     }
 
     #[test]
@@ -7179,8 +7244,8 @@ mod tests {
         assert!(warnings("local t = {} t:Tree() function t:Tree() end").is_empty());
         assert!(warnings("local t = {} t:Tree() local u = {} u.Tree = function() end").is_empty());
         assert!(warnings("local t = {} t:Tree() function SomeGlobal:Tree() end").is_empty());
-        // A field that isn't a function is another problem
-        assert!(warnings("local t = { Tree = 1 } t:Tree()").is_empty());
+        // A field that isn't a function is another problem, reported as that
+        assert_eq!(warnings("local t = { Tree = 1 } t:Tree()"), ["`Tree` is number, not a function"]);
         // A WoW object's method, so it may be a mixin for one
         assert!(warnings("local M = {} function M:OnLoad() self:SetScript() end").is_empty());
         // Somewhere the analysis can't see into

@@ -41,11 +41,16 @@ from the code itself, with no annotations needed.
     methods it can't see (functions stored under computed keys, or a Lua
     mixin with no table in the addon or its dependencies)
   - reads of fields a table the WoW API returns doesn't come with
-    (``ContainerItemInfo has no field `stackCont` ``). Not reported when the
+    (``ContainerItemInfo has no field `stackCont` ``), and calls of methods
+    on one, as it comes with none. Not reported when the
     addon or its dependencies give a field of that name to a table whose
     identity the analysis doesn't know, as the table is the addon's to change,
     or give a table of that type fields it can't name (under a computed key,
     by `rawset`, `Mixin` or `setmetatable`)
+  - calls of a field that holds a number, string or boolean and nothing that
+    could be called (`` `stackCount` is number, not a function ``), when the
+    field is one the WoW API declares or one a table made in the code is
+    given, not when its type is a guess from fields of that name elsewhere
   - XML files that don't parse, at the error
   - calls to methods of a table made in the code when nothing in the addon or
     its dependencies defines a function by that name
