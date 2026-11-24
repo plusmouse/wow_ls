@@ -1256,7 +1256,7 @@
     }},
     "AlertMountEquipmentFeatureMixin": {"functions": {
         "ClearAlert": {},
-        "GetTextWidth": {"returns":["string"]},
+        "GetTextWidth": {"returns":["number"]},
         "NewFeatureLabel_OnShow": {},
         "OnHide": {},
         "OnLoad": {},
@@ -1803,31 +1803,30 @@
         "newItem": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "numArtifactTraitsRefunded": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "powerButtonPool": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "textureKit": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "traitRefundSoundEmitter": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "ArtifactPowerButtonMixin": {"functions": {
         "ApplyRelicType": {"parameters":["relicType","relicLink","suppressAnimation"]},
         "ApplyTemporaryRelicType": {"parameters":["relicType","relicLink"]},
         "AreLinksEnabled": {"returns":["unknown"]},
-        "ArePrereqsMet": {"returns":["unknown"]},
+        "ArePrereqsMet": {"returns":["boolean|nil"]},
         "ClearOldData": {},
         "CouldSpendPoints": {"returns":["boolean|nil"]},
         "EvaluateStyle": {},
         "GenerateRune": {"returns":["string"]},
-        "GetCurrentRank": {"returns":["unknown"]},
-        "GetLinearIndex": {"returns":["unknown"]},
+        "GetCurrentRank": {"returns":["number|nil"]},
+        "GetLinearIndex": {"returns":["number|nil"]},
         "GetPowerID": {"returns":["number|nil"]},
-        "GetTier": {"returns":["unknown"]},
+        "GetTier": {"returns":["number|nil"]},
         "HasBonusMaxRanksFromTier": {"returns":["boolean"]},
         "HasRanksFromCurrentTier": {"returns":["boolean"]},
         "HasSpentAny": {"returns":["boolean|nil"]},
-        "IsActiveForLinks": {"returns":["unknown"]},
-        "IsCompletelyPurchased": {"returns":["unknown"]},
-        "IsFinal": {"returns":["unknown"]},
-        "IsGoldMedal": {"returns":["unknown"]},
+        "IsActiveForLinks": {"returns":["boolean"]},
+        "IsCompletelyPurchased": {"returns":["boolean|nil"]},
+        "IsFinal": {"returns":["boolean|nil"]},
+        "IsGoldMedal": {"returns":["boolean|nil"]},
         "IsMaxRank": {"returns":["boolean|nil"]},
-        "IsStart": {"returns":["unknown"]},
+        "IsStart": {"returns":["boolean|nil"]},
         "OnClick": {"parameters":["button"]},
         "OnDragStart": {},
         "OnEnter": {},
@@ -1848,27 +1847,14 @@
         "UpdateIcon": {},
         "UpdatePowerType": {},
         "UpdateTooltip": {},
-        "bonusRanks": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "cost": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "currentRank": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "isCompletelyPurchased": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "isFinal": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "isGoldMedal": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "isStart": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "linearIndex": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "linksEnabled": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "locked": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "maxRank": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "numMaxRankBonusFromTier": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "originalRelicLink": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "originalRelicType": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "prereqsMet": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "queuedRevealDelay": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "relicLink": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "relicType": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "spellID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "textureKit": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "tier": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "textureKit": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "ArtifactTickMixin": {"functions": {
         "OnEnter": {},
@@ -2012,8 +1998,7 @@
         "OnHide": {},
         "OnLoad": {},
         "SetIconShown": {"parameters":["shown"]},
-        "SetSelected": {"parameters":["selected"]},
-        "pendingItemID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "SetSelected": {"parameters":["selected"]}
     }},
     "AuctionHouseAuctionsSummaryListMixin": {"functions": {
         "OnLoad": {},
@@ -2432,7 +2417,7 @@
         "GetCommoditiesSellListFrames": {"returns":["AuctionHouseCommoditiesSellListTemplate","unknown"]},
         "GetDisplayMode": {"returns":["unknown"]},
         "GetItemSellList": {"returns":["AuctionHouseItemListTemplate"]},
-        "GetMaxPriceWidth": {"parameters":["cache","key","fontObject","maxPrice"],"returns":["string"]},
+        "GetMaxPriceWidth": {"parameters":["cache","key","fontObject","maxPrice"],"returns":["number"]},
         "GetMutableCallbacksByEvent": {"parameters":["callbackType","event"],"returns":["unknown"]},
         "GetSortOrderState": {"parameters":["searchContext","sortOrder"],"returns":["unknown"]},
         "GetSortsForContext": {"parameters":["searchContext"],"returns":["unknown"]},
@@ -3821,11 +3806,7 @@
         "PlayRevealEffect": {},
         "ShouldShowUnlockState": {"rest":"unknown","returns":["unknown"]},
         "ShowStateFrame": {"parameters":["stateFrame"]},
-        "UpdateMilestoneInfo": {},
-        "canUnlock": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "rank": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "requiredLevel": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "unlocked": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "UpdateMilestoneInfo": {}
     }},
     "AzeriteMilestoneRankedMixin": {"functions": {
         "AddStateToTooltip": {"parameters":["requiredLevelString","returnToForgeString"]},
@@ -3847,11 +3828,7 @@
         "ShouldShowUnlockState": {"rest":"unknown","returns":["unknown"]},
         "ShowStateFrame": {"parameters":["stateFrame"]},
         "UpdateMilestoneInfo": {},
-        "UpdateModelScenes": {"parameters":["forceUpdate"]},
-        "canUnlock": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "rank": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "requiredLevel": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "unlocked": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "UpdateModelScenes": {"parameters":["forceUpdate"]}
     }},
     "AzeriteMilestoneSlotMixin": {"functions": {
         "AddStateToTooltip": {"parameters":["requiredLevelString","returnToForgeString"]},
@@ -3874,11 +3851,7 @@
         "ShouldShowUnlockState": {"rest":"unknown","returns":["unknown"]},
         "ShowStateFrame": {"parameters":["stateFrame"]},
         "UpdateMilestoneInfo": {},
-        "UpdateModelScenes": {"parameters":["forceUpdate"]},
-        "canUnlock": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "rank": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "requiredLevel": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "unlocked": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "UpdateModelScenes": {"parameters":["forceUpdate"]}
     }},
     "AzeriteMilestoneStaminaMixin": {"functions": {
         "AddStateToTooltip": {"parameters":["requiredLevelString","returnToForgeString"]},
@@ -3899,11 +3872,7 @@
         "Refresh": {},
         "ShouldShowUnlockState": {"rest":"unknown","returns":["unknown"]},
         "ShowStateFrame": {"parameters":["stateFrame"]},
-        "UpdateMilestoneInfo": {},
-        "canUnlock": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "rank": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "requiredLevel": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "unlocked": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "UpdateMilestoneInfo": {}
     }},
     "AzeritePaperDollItemOverlayMixin": {"functions": {
         "DisplayAsAzeriteEmpoweredItem": {"parameters":["itemLocation"]},
@@ -4074,8 +4043,7 @@
         "Update": {},
         "UpdateIfVisible": {},
         "UpdateTokenAnchoring": {},
-        "isCombined": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "tokenWidth": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "isCombined": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "BackpackTokenMixin": {"functions": {
         "OnClick": {},
@@ -5491,7 +5459,7 @@
         "powerType": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "BulletPointMixin": {"functions": {
-        "GetEffectiveHeight": {"returns":["string"]},
+        "GetEffectiveHeight": {"returns":["number"]},
         "IsDirty": {"returns":["boolean"]},
         "MarkDirty": {},
         "OnUpdate": {},
@@ -5971,10 +5939,8 @@
         "UpdateState": {},
         "UpdateTimeRemaining": {},
         "cardDisplayData": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "defaultCardModelSceneID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "isSelected": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "notificationFrame": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "overrideCardModelSceneID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "productInfo": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "CatalogShopErrorFrameMixin": {"functions": {
@@ -6011,7 +5977,7 @@
         "GetBaseProductInfo": {"parameters":["productID"],"rest":"unknown"},
         "GetBundleProductInfo": {"parameters":["productID"],"rest":"unknown"},
         "GetCatalogShopLinkProductID": {"returns":["unknown"]},
-        "GetCatalogShopLinkTag": {"returns":["unknown"]},
+        "GetCatalogShopLinkTag": {"returns":["string|nil"]},
         "GetCurrencyInfo": {"returns":["unknown"]},
         "GetCurrentActor": {"returns":["unknown"]},
         "GetCurrentCardModelSceneData": {"returns":["table"]},
@@ -6075,7 +6041,6 @@
         "hidePlayerArmorSetting": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "justPurchasedProductID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "linkProductID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "linkTag": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "onCloseCallback": {"returns":["false"]},
         "searchText": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
@@ -6092,8 +6057,7 @@
         "OnShow": {},
         "UpdateFormButtonVisibility": {"parameters":["forceHideFormButtons"]},
         "UpdatePlayerModel": {"parameters":["data"]},
-        "currentData": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "previousMainModelSceneID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "currentData": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "CatalogShopPersistentRefundContainerFrameMixin": {"functions": {
         "OnCategorySelected": {"parameters":["categoryID"]},
@@ -6910,8 +6874,7 @@
         "UpdateSmartNavJumps": {},
         "count": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "opaqueChannel": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "updateChannelRosterEntryFn": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "voiceChannelID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "updateChannelRosterEntryFn": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "CharCustomizeAlteredFormButtonMixin": {"functions": {
         "AddBlankTooltipLine": {},
@@ -8777,7 +8740,7 @@
         "GetComparisonFunction": {"returns":["function"]},
         "GetConfigApplicationState": {"returns":["boolean|nil","boolean|nil","string|nil"]},
         "GetConfigCommitErrorString": {"returns":["string"]},
-        "GetConfigID": {"returns":["unknown"]},
+        "GetConfigID": {"returns":["number"]},
         "GetCostStrings": {"parameters":["traitCurrenciesCost"],"returns":["table"]},
         "GetDefinitionInfoForEntry": {"parameters":["entryID"],"rest":"unknown","returns":["unknown"]},
         "GetFallbackConfigID": {"returns":["nil"]},
@@ -8971,7 +8934,7 @@
         "ShouldAddEdgeRequirementsToTooltip": {"parameters":["requiresAllPrecedingTraits","numOfEdges","areAllPrecedingEdgesActive"],"returns":["boolean"]},
         "ShouldButtonShowEdges": {"parameters":["button"],"rest":"unknown"},
         "ShouldDisplayGate": {"parameters":["firstButton","condInfo"],"returns":["boolean|nil"]},
-        "ShouldHideSingleRankNumbers": {"returns":["unknown"]},
+        "ShouldHideSingleRankNumbers": {"returns":["boolean"]},
         "ShouldInstantiateInvisibleButtons": {"returns":["false"]},
         "ShouldInstantiateNode": {"parameters":["nodeID","nodeInfo"],"returns":["boolean"]},
         "ShouldNodeBeVisible": {"parameters":["_nodeInfo"],"returns":["true"]},
@@ -9020,7 +8983,6 @@
         "autoLoadNewConfigID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "buttonOverlayPool": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "commitTimer": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "commitedConfigID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "comparisonFunction": {"parameters":["lhsButton","rhsButton"],"returns":["unknown"]},
         "edgePool": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "getButtonOverlayTemplate": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
@@ -9448,8 +9410,7 @@
         "SetExpandedState": {"parameters":["expanded","locked"]},
         "UpdateContent": {"parameters":["upgradeButtonText","upgradeLogo","features"]},
         "featureFramePool": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "isExpanded": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "textureKit": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "isExpanded": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "CollapseAndExpandButtonMixin": {"functions": {
         "IsEnabled": {"returns":["boolean|nil"]},
@@ -9463,7 +9424,7 @@
         "collapsed": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "CollapsibleServerAlertMixin": {"functions": {
-        "GetMaxFrameHeight": {"returns":["string"]},
+        "GetMaxFrameHeight": {"returns":["number"]},
         "NarrationGetContext": {"returns":["string|nil"]},
         "NarrationGetDescription": {"rest":"unknown","returns":["unknown"]},
         "NarrationGetName": {"returns":["string"]},
@@ -9750,8 +9711,7 @@
         "UpdateCrowdControlAuras": {},
         "UpdateHealthBorderOverride": {"returns":["true"]},
         "UpdateNameOverride": {"returns":["true"]},
-        "UpdateNameText": {},
-        "ccDisplayText": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "UpdateNameText": {}
     }},
     "CommentatorScoreboardMixin": {"functions": {
         "AddScore": {"parameters":["teamIndex"]},
@@ -9844,7 +9804,6 @@
         "UpdatePlayerNameText": {},
         "UpdateRacialAbilityTracker": {},
         "UpdateSpellTrays": {"parameters":["elapsed"]},
-        "ccDisplayText": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "playerData": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "role": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "teamIndex": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
@@ -10280,7 +10239,7 @@
         "GetSelectedClubInfo": {"rest":"unknown"},
         "GetSelectedStreamId": {"rest":"unknown"},
         "GetVoiceChannel": {"parameters":["voiceChannel"],"returns":["VoiceChatChannel|nil"]},
-        "GetVoiceChannelID": {"returns":["unknown"]},
+        "GetVoiceChannelID": {"returns":["number|nil"]},
         "IsDisplayingProfessions": {"returns":["boolean"]},
         "IsMemberListDirty": {"returns":["true|nil"]},
         "IsSortDirty": {"returns":["true|nil"]},
@@ -10349,7 +10308,7 @@
     "CommunitiesSettingsDialogMixin": {"functions": {
         "GetAvatarId": {"returns":["number"]},
         "GetClubId": {"returns":["string"]},
-        "GetClubType": {"returns":["unknown"]},
+        "GetClubType": {"returns":["Enum.ClubType"]},
         "GetCrossFaction": {"returns":["boolean"]},
         "GetDescription": {"returns":["string"]},
         "GetMessageOfTheDay": {"returns":["string"]},
@@ -10370,8 +10329,7 @@
         "SmartNavigationCloseHandler": {"returns":["true"]},
         "UpdateCreateButton": {},
         "UpdateSettingsInfoFromClubInfo": {},
-        "UpdatedPostingInformationInit": {},
-        "clubType": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "UpdatedPostingInformationInit": {}
     }},
     "CommunitiesStreamDropdownMixin": {"functions": {
         "GetCommunitiesFrame": {"returns":["CommunitiesFrame"]},
@@ -10581,7 +10539,7 @@
         "CheckToggleAllowed": {},
         "GetSelectionNodeID": {"returns":["number|nil"]},
         "GetSlotLabelText": {"returns":["string|nil"]},
-        "HasActiveEntry": {"returns":["unknown"]},
+        "HasActiveEntry": {"returns":["number|false|nil"]},
         "HasSelectionAndInfo": {"returns":["false|table|nil"]},
         "OnEnter": {},
         "OnEvent": {"parameters":["event"]},
@@ -11783,7 +11741,6 @@
         "continuableSpellContainer": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "cooldownChargesCount": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "cooldownDuration": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "cooldownEnabled": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "cooldownID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "cooldownInfo": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "cooldownModRate": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
@@ -12536,7 +12493,6 @@
         "continuableSpellContainer": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "cooldownChargesCount": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "cooldownDuration": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "cooldownEnabled": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "cooldownID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "cooldownInfo": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "cooldownModRate": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
@@ -12839,7 +12795,7 @@
     }},
     "CovenantSanctumUpgradeReservoirMixin": {"functions": {
         "CancelAnimaGainEffect": {},
-        "GetAnimaAmount": {"returns":["unknown"]},
+        "GetAnimaAmount": {"returns":["number"]},
         "GetDescriptionText": {"returns":["unknown"]},
         "GetTier": {"returns":["number"]},
         "IsSelected": {"returns":["boolean"]},
@@ -12859,8 +12815,7 @@
         "fullAnimaSoundHandle": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "researchTalentID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "reverseDir": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "strandRate": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "value": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "strandRate": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "CovenantSanctumUpgradeTalentMixin": {"functions": {
         "OnEnter": {},
@@ -13083,11 +13038,11 @@
         "CheckPlayTransferringSpinner": {},
         "ClearTransferData": {},
         "FullRefresh": {},
-        "GetCurrencyID": {"returns":["unknown"]},
-        "GetCurrencyIcon": {"returns":["unknown"]},
+        "GetCurrencyID": {"returns":["number|nil"]},
+        "GetCurrencyIcon": {"returns":["number|nil"]},
         "GetCurrencyInfo": {"returns":["CurrencyInfo|nil"]},
         "GetCurrencyTransferLoss": {"rest":"unknown"},
-        "GetPlayerCurrencyQuantity": {"returns":["unknown"]},
+        "GetPlayerCurrencyQuantity": {"returns":["number|nil"]},
         "GetRequestedCurrencyTransferAmount": {"rest":"unknown"},
         "GetSourceCharacterCurrencyQuantity": {"returns":["unknown"]},
         "GetSourceCharacterData": {"returns":["unknown"]},
@@ -14032,7 +13987,7 @@
         "GetBackgroundInsetsForStyle": {"parameters":["style"],"returns":["number","number","number","number"]},
         "GetBackgroundRegionAlpha": {"returns":["number"]},
         "GetBackgroundRegions": {"returns":["table"]},
-        "GetBarHeight": {"returns":["string"]},
+        "GetBarHeight": {"returns":["number"]},
         "GetClassificationAtlasElement": {"returns":["string|nil"]},
         "GetCreatureStatusBarColor": {"returns":["unknown"]},
         "GetDefaultStatusBarColor": {"returns":["unknown"]},
@@ -14679,7 +14634,7 @@
         "CalculateVisualState": {"returns":["number"]},
         "FullUpdate": {},
         "GetActiveIcon": {"returns":["unknown"]},
-        "GetButtonSize": {"returns":["string","string"]},
+        "GetButtonSize": {"returns":["number","number"]},
         "GetDefinitionID": {"returns":["unknown"]},
         "GetDefinitionInfo": {"returns":["unknown"]},
         "GetDescription": {"returns":["unknown"]},
@@ -15145,7 +15100,6 @@
         "SetIllusion": {"parameters":["slotID","transmogID"],"returns":["boolean"]},
         "SetItemInfo": {"parameters":["transmogID","appearanceInfo","isSecondary"]},
         "SetUp": {"parameters":["slotID","transmogInfo","field"],"returns":["boolean|nil"]},
-        "isHiddenVisual": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "itemDataLoadedCancelFunc": {"returns":["boolean"]},
         "slotState": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
@@ -16743,17 +16697,13 @@
     }},
     "EncounterBossButtonMixin": {"functions": {
         "Init": {"parameters":["elementData"]},
-        "encounterID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "link": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "encounterID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "EncounterJournalItemHeaderMixin": {"functions": {
         "Init": {"parameters":["elementData"]}
     }},
     "EncounterJournalItemMixin": {"functions": {
-        "Init": {"parameters":["elementData"]},
-        "encounterID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "itemID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "link": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "Init": {"parameters":["elementData"]}
     }},
     "EncounterJournalLinkButtonMixin": {"functions": {
         "IsLinkDataAvailable": {"returns":["boolean"]},
@@ -18001,8 +17951,7 @@
         "OnLoad": {},
         "TryShow": {"parameters":["checkSpectating"]},
         "TryShowMatchDetails": {},
-        "TryUpdateMatchDetails": {},
-        "matchEnded": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "TryUpdateMatchDetails": {}
     }},
     "EquipmentFlyoutMixin": {"functions":{}},
     "EssencePointButtonMixin": {"functions": {
@@ -18242,7 +18191,7 @@
         "GetCallbacksByEvent": {"parameters":["callbackType","event"],"returns":["unknown"]},
         "GetCursorHeight": {"returns":["unknown"]},
         "GetCursorOffset": {"returns":["unknown"]},
-        "GetFontHeight": {"returns":["string","string"]},
+        "GetFontHeight": {"returns":["number","string"]},
         "GetInputText": {"returns":["string"]},
         "GetMutableCallbacksByEvent": {"parameters":["callbackType","event"],"returns":["unknown"]},
         "HasRegistrantsForEvent": {"parameters":["event"],"returns":["boolean"]},
@@ -19293,7 +19242,6 @@
         "SetupGamepad": {},
         "UnfocusGamepad": {},
         "Update": {},
-        "bnetIDAccount": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "selection": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "view": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
@@ -19773,7 +19721,6 @@
         "OnUpdate": {"parameters":["elapsed"]},
         "SetDate": {},
         "SetDisplacedRegions": {"parameters":["x","y","..."]},
-        "calendarDay": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "displaceX": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "displaceY": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
@@ -20145,7 +20092,7 @@
     "GamepadFlyoutMixin": {"functions": {
         "AddLayoutChildren": {"parameters":["layoutChildren","..."]},
         "AttachToButton": {"parameters":["button"]},
-        "CalculateFrameSize": {"returns":["string","string"]},
+        "CalculateFrameSize": {"returns":["number","number"]},
         "ClearFixedSize": {},
         "DetatchFromButton": {},
         "GetAdditionalRegions": {},
@@ -20456,7 +20403,7 @@
         "CreateBackground": {"parameters":["GroupName","height"]},
         "CreateEntry": {"parameters":["GroupName","ColumnIndex","RowIndex","IconString","LabelString"],"returns":["Frame"]},
         "DoesGroupUseHeader": {"parameters":["GroupName"],"returns":["boolean"]},
-        "GetColumnWidth": {"parameters":["GroupName"],"returns":["string"]},
+        "GetColumnWidth": {"parameters":["GroupName"],"returns":["number"]},
         "GetGroupWidth": {"parameters":["GroupName"],"returns":["number"]},
         "HideAllGroups": {},
         "OnGamepadShowPersistentInputLegendChanged": {},
@@ -20662,7 +20609,7 @@
     "GamepadSpellFlyoutMixin": {"functions": {
         "AddLayoutChildren": {"parameters":["layoutChildren","..."]},
         "AttachToButton": {"parameters":["button"]},
-        "CalculateFrameSize": {"returns":["string","string"]},
+        "CalculateFrameSize": {"returns":["number","number"]},
         "ClearFixedSize": {},
         "DetatchFromButton": {},
         "GetAdditionalRegions": {},
@@ -20886,8 +20833,7 @@
         "UpdateMissionParty": {"parameters":["followers"]},
         "UpdateMissions": {},
         "UpdateRewards": {"parameters":["itemID"]},
-        "abilityCountersForMechanicTypes": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "materialAmount": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "abilityCountersForMechanicTypes": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "GarrisonFollowerMissionComplete": {"functions": {
         "AnimCheckEncounters": {"parameters":["entry"]},
@@ -21184,8 +21130,7 @@
         "UpdateMissionData": {"parameters":["frame"]},
         "UpdateMissionParty": {"parameters":["followers"]},
         "UpdateMissions": {},
-        "UpdateStartButton": {"parameters":["missionPage"]},
-        "materialAmount": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "UpdateStartButton": {"parameters":["missionPage"]}
     }},
     "GarrisonShipyardMissionComplete": {"functions": {
         "AnimBoatDeath": {"parameters":["entry"]},
@@ -22367,7 +22312,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["string|nil","string|nil","string","string"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string","string"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -22419,7 +22364,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["string|nil","string|nil","string","string"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string","string"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -22469,7 +22414,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -22520,7 +22465,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -22763,7 +22708,7 @@
         "LeaveMode": {}
     }},
     "HouseEditorInstructionMixin": {"functions": {
-        "GetControlWidth": {"returns":["string"]},
+        "GetControlWidth": {"returns":["number"]},
         "OnLoad": {},
         "SetControlWidth": {"parameters":["width"]},
         "SetEnabled": {"parameters":["enabled"]},
@@ -23725,7 +23670,7 @@
         "DoesFocusedCategoryShowSubcategories": {"returns":["boolean"]},
         "DoesSubcategoryPassFilters": {"parameters":["subcategoryID"],"returns":["unknown"]},
         "GetCategorySearchParams": {"returns":["unknown"]},
-        "GetFocusedCategoryString": {"returns":["unknown"]},
+        "GetFocusedCategoryString": {"returns":["string|nil"]},
         "Initialize": {"parameters":["onFocusChangedCallback","initialSearchParams"]},
         "IsAllCategoryFocused": {"returns":["boolean"]},
         "IsFeaturedCategoryFocused": {"returns":["boolean"]},
@@ -24300,7 +24245,7 @@
         "AddItemToList": {"parameters":["item"]},
         "AddServiceEvents": {"parameters":["services"]},
         "CurrencyRefreshTicker": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "CustomElementExtentCalc": {"parameters":["dataIndex","elementData"],"returns":["unknown"]},
+        "CustomElementExtentCalc": {"parameters":["dataIndex","elementData"],"returns":["number"]},
         "FullUpdate": {},
         "GetCartCurrencyInfo": {"returns":["number|nil","string","true"]},
         "GetElementInitInfoFunc": {"returns":["function"]},
@@ -24560,8 +24505,7 @@
     "HousingVisitorControlsLayoutMixin": {"functions": {
         "GetButtons": {"returns":["unknown"]},
         "SetActive": {"parameters":["active"]},
-        "UpdateOwnerInfomation": {},
-        "ownerName": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "UpdateOwnerInfomation": {}
     }},
     "HoverFadeVisibilityControllerMixin": {"functions": {
         "SetAffectedFramesVisibility": {"parameters":["shown"]}
@@ -24877,7 +24821,6 @@
         "UpdateBackground": {},
         "currentlyViewedNeighborhoodGUID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "playerHouseList": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "targetValue": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "thresholdMax": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "InputIconTextureMixin": {"functions": {
@@ -25189,13 +25132,13 @@
         "CompleteItemInteraction": {},
         "CostsCurrency": {"returns":["boolean|nil"]},
         "CostsGold": {"returns":["boolean"]},
-        "GetButtonTooltip": {"returns":["unknown"]},
+        "GetButtonTooltip": {"returns":["string|nil"]},
         "GetChargeConfirmationText": {"returns":["string|nil"]},
-        "GetConfirmationDescription": {"rest":"unknown","returns":["unknown"]},
-        "GetConfirmationInfo": {"returns":["unknown","unknown"]},
-        "GetCost": {"returns":["unknown"]},
+        "GetConfirmationDescription": {"returns":["string|nil"]},
+        "GetConfirmationInfo": {"returns":["string|nil","string|nil"]},
+        "GetCost": {"returns":["number|nil"]},
         "GetDescriptionColor": {"returns":["unknown"]},
-        "GetInteractionType": {"returns":["unknown"]},
+        "GetInteractionType": {"returns":["Enum.UIItemInteractionType"]},
         "GetItemLocation": {"returns":["unknown"]},
         "GetRechargeMessage": {"returns":["string|nil"]},
         "GetValidItemInteractionItemsCallback": {"parameters":["filterFunction","resultsTable"]},
@@ -25222,25 +25165,10 @@
         "UpdateDescriptionColor": {},
         "UpdateMoney": {},
         "UsesCharges": {"returns":["boolean"]},
-        "buttonTooltip": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "castLineID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "chargeCost": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "chargeCurrencyTypeId": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "closeSoundKitID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "confirmationDescription": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "confirmationText": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "cost": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "currencyTypeId": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "descriptionText": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "dropInSlotSoundKitId": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "flags": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "interactionType": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "itemLocation": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "openSoundKitID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "slotTooltip": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "textureKit": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "tutorialBitFlag": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "tutorialText": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "tutorialBitFlag": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "ItemQualityColorOverrideMixin": {"functions": {
         "ColorOverrideFramePool": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
@@ -25688,7 +25616,7 @@
         "UpdateTabs": {}
     }},
     "LFGParentFrameRightTabMixin": {"functions": {
-        "CalculateTabSizeBasedOnTabArt": {"returns":["unknown","number"]},
+        "CalculateTabSizeBasedOnTabArt": {"returns":["number","number"]},
         "GetFinalIconAnchorOffsets": {"returns":["number","number"]},
         "GetIconAnchorOffsetsForTabArt": {"returns":["number","number"]},
         "GetPressedIconAnchorOffsets": {"returns":["number","number"]},
@@ -26067,8 +25995,7 @@
         "SetupProgressDetails": {},
         "SetupRewardTrack": {},
         "UpdateProgressBarMask": {"parameters":["shouldMask"]},
-        "centerIndex": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "maxLevel": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "centerIndex": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "LegacySystemFrameMixin": {"functions": {
         "FocusGamepad": {},
@@ -26097,7 +26024,7 @@
         "currentPage": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "LegacySystemFrameTabMixin": {"functions": {
-        "CalculateTabSizeBasedOnTabArt": {"returns":["unknown","number"]},
+        "CalculateTabSizeBasedOnTabArt": {"returns":["number","number"]},
         "GetFinalIconAnchorOffsets": {"returns":["number","number"]},
         "GetIconAnchorOffsetsForTabArt": {"returns":["number","number"]},
         "GetPressedIconAnchorOffsets": {"returns":["number","number"]},
@@ -27279,7 +27206,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -27330,7 +27257,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -28353,8 +28280,7 @@
         "GetColorIndex": {"parameters":["currentRank","numRanks","numColors"],"returns":["number"]},
         "OnEnter": {},
         "OnLoad": {},
-        "Update": {"parameters":["factionID"]},
-        "friendshipFactionID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "Update": {"parameters":["factionID"]}
     }},
     "NameChoiceMixin": {"functions": {
         "OnEvent": {"parameters":["event","..."]},
@@ -28896,7 +28822,7 @@
     }},
     "NewFeatureLabelMixin": {"functions": {
         "ClearAlert": {},
-        "GetTextWidth": {"returns":["string"]},
+        "GetTextWidth": {"returns":["number"]},
         "NewFeatureLabel_OnShow": {},
         "OnHide": {},
         "OnLoad": {}
@@ -29720,12 +29646,12 @@
         "GetButtonType": {"returns":["unknown"]},
         "GetCustomButtonData": {"returns":["unknown"]},
         "GetInProgressDisplay": {"returns":["unknown"]},
-        "GetMapPinInfo": {"parameters":["info"],"returns":["unknown"]},
+        "GetMapPinInfo": {"parameters":["info"],"returns":["UIMapPinInfo|nil"]},
         "GetMapPinInfoButtonField": {"parameters":["fieldName"],"returns":["unknown"]},
         "GetMapPinInfo_Display": {"returns":["unknown"]},
         "GetMapPinInfo_Highlight": {"returns":["unknown"]},
         "GetMapPinInfo_Normal": {"returns":["unknown"]},
-        "GetMapPinInfo_OuterGlow": {"returns":["unknown"]},
+        "GetMapPinInfo_OuterGlow": {"returns":["string"]},
         "GetMapPinInfo_Pressed": {"returns":["unknown"]},
         "GetPinScale": {"returns":["number"]},
         "GetPingWorldMap": {"returns":["unknown"]},
@@ -29774,7 +29700,6 @@
         "UpdateUnderlay": {},
         "areaPOIID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "areaPOIInfo": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "mapPinInfo": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "pingWorldMap": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "questID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "selected": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
@@ -29846,7 +29771,7 @@
     }},
     "PVPCellHonorLevelMixin": {"functions": {
         "GetIconAtlas": {"parameters":["rowData"],"returns":["nil"]},
-        "GetIconTexture": {"parameters":["rowData"],"returns":["unknown"]},
+        "GetIconTexture": {"parameters":["rowData"],"returns":["number|nil"]},
         "GetTooltipText": {"parameters":["rowData"],"returns":["string|nil"]},
         "OnEnter": {},
         "OnLeave": {},
@@ -30087,7 +30012,7 @@
     }},
     "PVPSpecialEventLabelMixin": {"functions": {
         "ClearAlert": {},
-        "GetTextWidth": {"returns":["string"]},
+        "GetTextWidth": {"returns":["number"]},
         "NewFeatureLabel_OnShow": {},
         "OnHide": {},
         "OnLoad": {},
@@ -30953,7 +30878,7 @@
         "GetCategories": {"returns":["table"]},
         "GetCategoryText": {"parameters":["categoryID"],"returns":["string"]},
         "GetCurrencyIconMarkup": {"returns":["string"]},
-        "GetDefaultModelSceneID": {"parameters":["categoryID"],"returns":["unknown"]},
+        "GetDefaultModelSceneID": {"parameters":["categoryID"],"returns":["number|nil"]},
         "GetDefaultSortAscending": {"parameters":["sortField"],"returns":["boolean"]},
         "GetFilterState": {"parameters":["categoryID"],"returns":["unknown"]},
         "GetFrozenPerksVendorItemInfo": {"returns":["PerksVendorItemInfo|nil"]},
@@ -31409,7 +31334,7 @@
         "UpdateShownState": {}
     }},
     "PetHappinessIndicatorMixin": {"functions": {
-        "GetHappinessStats": {"returns":["unknown","number|nil","number|nil"]},
+        "GetHappinessStats": {"returns":["number|nil","number|nil","number|nil"]},
         "OnEnter": {},
         "OnEvent": {"parameters":["event","..."]},
         "OnLeave": {},
@@ -31782,7 +31707,7 @@
         "AlignOptionHeights": {"parameters":["skipAlignSections"]},
         "AreOptionsAligned": {"returns":["boolean"]},
         "FadeOutAllOptions": {},
-        "GetObjectGUID": {"returns":["unknown"]},
+        "GetObjectGUID": {"returns":["string"]},
         "GetOptionDataForOptionFrame": {"parameters":["optionFrame"],"returns":["unknown"]},
         "GetPlayerChoiceOptionHeightData": {"returns":["table"]},
         "GetTextureKitInfo": {"returns":["table"]},
@@ -31802,8 +31727,7 @@
         "SetupTextureKits": {"parameters":["frame","regions"]},
         "TryShow": {},
         "onCloseCallback": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "optionPools": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "uiTextureKit": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "optionPools": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "PlayerChoiceGenericPowerChoiceOptionTemplateMixin": {"functions": {
         "GetTextureKitRegionTable": {"returns":["table"]},
@@ -33177,10 +33101,6 @@
         "attachedCard": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "buttonOverlay": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "entryInfo": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "flipBookBRx": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "flipBookBRy": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "flipBookULx": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "flipBookULy": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "isGhosted": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "nodeID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "nodeInfo": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
@@ -33766,7 +33686,7 @@
         "GetDetailedPanelPath": {"returns":["unknown"]},
         "GetProfessionID": {"returns":["unknown"]},
         "GetProfessionInfo": {"returns":["unknown"]},
-        "GetRootNodeID": {"returns":["unknown"]},
+        "GetRootNodeID": {"returns":["number"]},
         "GetSpendCurrencyTypesID": {"returns":["number|nil"]},
         "HasAnyConfigChanges": {"returns":["boolean"]},
         "HasUnlockableTab": {"returns":["boolean"]},
@@ -34154,7 +34074,6 @@
         "OnEnter": {},
         "OnLeave": {},
         "SetUpMajorFactionReputationReward": {"parameters":["reputationRewardInfo"]},
-        "factionName": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "rewardAmount": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "QuestInfoRewardSpellCodeMixin": {"functions": {
@@ -35790,8 +35709,7 @@
         "UpdateLayout": {},
         "UpdateTraitTree": {},
         "UpdateTreeCurrencyInfo": {},
-        "continuableContainer": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "textureKit": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "continuableContainer": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "RemixArtifactModelMixin": {"functions": {
         "OnEvent": {},
@@ -35905,8 +35823,7 @@
     }},
     "ReputationDetailViewRenownButtonMixin": {"functions": {
         "OnClick": {},
-        "Refresh": {},
-        "disabledTooltip": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "Refresh": {}
     }},
     "ReputationDetailWatchFactionCheckboxMixin": {"functions": {
         "OnClick": {},
@@ -35988,10 +35905,7 @@
         "OnShow": {},
         "Update": {},
         "UpdateBarTextures": {"parameters":["reactionLevel","overrideUseBlueBar"]},
-        "UpdateCurrentText": {},
-        "factionID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "friendshipID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "name": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "UpdateCurrentText": {}
     }},
     "ReputationSubHeaderMixin": {"functions": {
         "CopyDeferredCallbacks": {"parameters":["callbackType","event","target"]},
@@ -38774,7 +38688,7 @@
         "mode": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "SidePanelTabButtonMixin": {"functions": {
-        "CalculateTabSizeBasedOnTabArt": {"returns":["unknown","number"]},
+        "CalculateTabSizeBasedOnTabArt": {"returns":["number","number"]},
         "GetFinalIconAnchorOffsets": {"returns":["number","number"]},
         "GetIconAnchorOffsetsForTabArt": {"returns":["number","number"]},
         "GetPressedIconAnchorOffsets": {"returns":["number","number"]},
@@ -38938,7 +38852,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -39499,7 +39413,7 @@
         "TriggerSocialUIEvent": {"parameters":["event","..."]}
     }},
     "SocialUITabMixin": {"functions": {
-        "CalculateTabSizeBasedOnTabArt": {"returns":["unknown","number"]},
+        "CalculateTabSizeBasedOnTabArt": {"returns":["number","number"]},
         "GetFinalIconAnchorOffsets": {"returns":["number","number"]},
         "GetIconAnchorOffsetsForTabArt": {"returns":["number","number"]},
         "GetPressedIconAnchorOffsets": {"returns":["number","number"]},
@@ -39544,7 +39458,7 @@
         "GetCallbackTables": {"returns":["table"]},
         "GetCallbacksByEvent": {"parameters":["callbackType","event"],"returns":["unknown"]},
         "GetMutableCallbacksByEvent": {"parameters":["callbackType","event"],"returns":["unknown"]},
-        "GetPosition": {"returns":["string|nil","string|nil"]},
+        "GetPosition": {"returns":["number|nil","number|nil"]},
         "GetScaledPosition": {"returns":["number","number"]},
         "HasRegistrantsForEvent": {"parameters":["event"],"returns":["boolean"]},
         "IsMoving": {"returns":["boolean"]},
@@ -40127,8 +40041,8 @@
         "ClearSpellData": {},
         "GamepadAdjustTooltipAnchor": {"parameters":["tooltip"]},
         "GetDragTarget": {"returns":["unknown"]},
-        "GetItemType": {"returns":["unknown"]},
-        "GetName": {"returns":["unknown"]},
+        "GetItemType": {"returns":["Enum.SpellBookItemType|false|nil"]},
+        "GetName": {"returns":["string|false|nil"]},
         "GetTexture": {"returns":["string|false|nil"]},
         "HasValidData": {"returns":["false|SpellBookItemInfo|nil"]},
         "Init": {"parameters":["elementData"]},
@@ -40184,8 +40098,8 @@
         "ClearSpellData": {},
         "GamepadAdjustTooltipAnchor": {"parameters":["tooltip"]},
         "GetDragTarget": {"returns":["unknown"]},
-        "GetItemType": {"returns":["unknown"]},
-        "GetName": {"returns":["unknown"]},
+        "GetItemType": {"returns":["Enum.SpellBookItemType|false|nil"]},
+        "GetName": {"returns":["string|false|nil"]},
         "GetOutfitID": {"returns":["unknown"]},
         "GetTexture": {"returns":["string|false|nil"]},
         "HasValidData": {"returns":["boolean"]},
@@ -41546,7 +41460,7 @@
         "GetButtonsInOrder": {"parameters":["comparison"],"returns":["table"]},
         "GetComparisonFunction": {"returns":["function"]},
         "GetConfigCommitErrorString": {"returns":["nil"]},
-        "GetConfigID": {"returns":["unknown"]},
+        "GetConfigID": {"returns":["number"]},
         "GetCostStrings": {"parameters":["traitCurrenciesCost"],"returns":["table"]},
         "GetFrameLevelForButton": {"parameters":["_nodeInfo","_visualState"],"returns":["number"]},
         "GetFrameLevelForEdge": {"parameters":["startButton","_endButton"],"returns":["number"]},
@@ -41664,7 +41578,7 @@
         "ShouldAddEdgeRequirementsToTooltip": {"parameters":["requiresAllPrecedingTraits","numOfEdges","areAllPrecedingEdgesActive"],"returns":["boolean"]},
         "ShouldButtonShowEdges": {"parameters":["button"],"rest":"unknown"},
         "ShouldDisplayGate": {"parameters":["firstButton","condInfo"],"returns":["boolean|nil"]},
-        "ShouldHideSingleRankNumbers": {"returns":["unknown"]},
+        "ShouldHideSingleRankNumbers": {"returns":["boolean"]},
         "ShouldInstantiateInvisibleButtons": {"returns":["false"]},
         "ShouldInstantiateNode": {"parameters":["nodeID","nodeInfo"],"returns":["true"]},
         "ShouldNodeBeVisible": {"parameters":["_nodeInfo"],"returns":["true"]},
@@ -41689,7 +41603,6 @@
         "UpdateTreeInfo": {"parameters":["skipButtonUpdates"]},
         "buttonOverlayPool": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "commitTimer": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "commitedConfigID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "comparisonFunction": {"parameters":["lhsButton","rhsButton"],"returns":["unknown"]},
         "edgePool": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "getButtonOverlayTemplate": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
@@ -42684,7 +42597,7 @@
     "TransmogAppearanceSlotMixin": {"functions": {
         "GetCurrentIcons": {"returns":["table"]},
         "GetCurrentOptionInfo": {"returns":["unknown"]},
-        "GetEffectiveTransmogID": {"returns":["unknown"]},
+        "GetEffectiveTransmogID": {"returns":["number"]},
         "GetIllusionSlotFrame": {"returns":["unknown"]},
         "GetSlot": {"rest":"unknown","returns":["unknown"]},
         "GetSlotInfo": {"returns":["ViewedTransmogOutfitSlotInfo|nil"]},
@@ -42807,7 +42720,7 @@
     }},
     "TransmogIllusionSlotMixin": {"functions": {
         "GetCurrentOptionInfo": {"returns":["unknown"]},
-        "GetEffectiveTransmogID": {"returns":["unknown"]},
+        "GetEffectiveTransmogID": {"returns":["number"]},
         "GetSlot": {"rest":"unknown","returns":["unknown"]},
         "GetSlotInfo": {"returns":["ViewedTransmogOutfitSlotInfo|nil"]},
         "GetTransmogLocation": {"returns":["unknown"]},
@@ -42830,7 +42743,7 @@
     "TransmogItemModelMixin": {"functions": {
         "CanCheckDressUpClick": {"returns":["false"]},
         "GetAppearanceInfo": {"returns":["unknown"]},
-        "GetAppearanceLink": {"returns":["unknown"]},
+        "GetAppearanceLink": {"returns":["string|nil"]},
         "GetCollectionFrame": {"returns":["unknown"]},
         "GetIllusionLink": {"returns":["string|nil"]},
         "Init": {"parameters":["elementData"]},
@@ -43012,7 +42925,7 @@
         "Init": {"parameters":["wardrobeCollection"]},
         "InitFilterButton": {},
         "IsAppearanceUsableForActiveCategory": {"parameters":["appearanceInfo"],"returns":["boolean"]},
-        "IsValidWeaponCategoryForSlot": {"parameters":["categoryID"],"returns":["unknown"]},
+        "IsValidWeaponCategoryForSlot": {"parameters":["categoryID"],"returns":["boolean|nil"]},
         "OnEvent": {"parameters":["event","..."]},
         "OnHide": {},
         "OnKeyDown": {"parameters":["key"],"returns":["boolean"]},
@@ -43044,7 +42957,6 @@
         "UpdateSlot": {"parameters":["slotData","forceRefresh"]},
         "ValidateChosenVisualSources": {},
         "activeCategoryID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "jumpToTransmogID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "lastWeaponCategoryID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "outfitSlotSaved": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "tooltipModel": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
@@ -43196,8 +43108,8 @@
     "UIDropDownCustomMenuEntryMixin": {"functions": {
         "GetContextData": {"returns":["unknown"]},
         "GetOwningDropdown": {"rest":"unknown"},
-        "GetPreferredEntryHeight": {"returns":["string"]},
-        "GetPreferredEntryWidth": {"returns":["string"]},
+        "GetPreferredEntryHeight": {"returns":["number"]},
+        "GetPreferredEntryWidth": {"returns":["number"]},
         "OnSetOwningButton": {},
         "SetContextData": {"parameters":["contextData"]},
         "SetOwningButton": {"parameters":["button"]},
@@ -43730,7 +43642,6 @@
         "initFunc": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "layoutFunc": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "ticker": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "verticalAnchorYOffset": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "widgetPools": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "widgetSetLayoutDirection": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
@@ -45223,7 +45134,7 @@
     }},
     "UnitPopupVoiceLevelsMixin": {"functions": {
         "GetContextData": {"returns":["unknown"]},
-        "GetDesiredSize": {"returns":["string","string"]},
+        "GetDesiredSize": {"returns":["number","number"]},
         "GetVoiceChannel": {"returns":["unknown"]},
         "GetVoiceChannelID": {"returns":["unknown"]},
         "GetVoiceMemberID": {"returns":["unknown"]},
@@ -45535,7 +45446,6 @@
         "OnMouseLeave": {"parameters":["motion"]},
         "OnUpdate": {},
         "Refresh": {},
-        "name": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "vehicleIndex": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
     }},
     "VehicleSeatIndicatorButtonMixin": {"functions": {
@@ -45565,7 +45475,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["string|nil","string|nil","string","string"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string","string"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -45618,7 +45528,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -45670,7 +45580,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -45721,7 +45631,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -46170,7 +46080,7 @@
     "WarbandSceneEntryMixin": {"functions": {
         "GetIsFavorite": {"returns":["boolean|nil"]},
         "GetIsOwned": {"returns":["boolean|nil"]},
-        "GetWarbandSceneID": {"returns":["unknown"]},
+        "GetWarbandSceneID": {"returns":["number|nil"]},
         "Init": {"parameters":["elementData"]},
         "OnEnter": {},
         "OnLeave": {},
@@ -46182,7 +46092,7 @@
     "WarbandSceneGlueEntryMixin": {"functions": {
         "GetIsFavorite": {"returns":["boolean|nil"]},
         "GetIsOwned": {"returns":["boolean|nil"]},
-        "GetWarbandSceneID": {"returns":["unknown"]},
+        "GetWarbandSceneID": {"returns":["number|nil"]},
         "Init": {"parameters":["elementData"]},
         "OnClick": {"parameters":["button"]},
         "OnEnter": {},
@@ -46302,7 +46212,7 @@
     "WardrobeItemModelMixin": {"functions": {
         "CanCheckDressUpClick": {"returns":["true"]},
         "GetAppearanceInfo": {"returns":["unknown"]},
-        "GetAppearanceLink": {"returns":["unknown"]},
+        "GetAppearanceLink": {"returns":["string|nil"]},
         "GetCollectionFrame": {"returns":["unknown"]},
         "GetIllusionLink": {"returns":["string|nil"]},
         "GetSourceInfoForTracking": {"returns":["unknown"]},
@@ -46340,7 +46250,7 @@
         "GetFilteredVisualsList": {"returns":["table|nil"]},
         "GetTooltipSourceIndex": {"rest":"unknown"},
         "GetTransmogLocation": {"returns":["unknown"]},
-        "GetWeaponInfoForEnchant": {"returns":["unknown","unknown","unknown"]},
+        "GetWeaponInfoForEnchant": {"returns":["unknown","number|nil","number|nil"]},
         "GoToSourceID": {"parameters":["sourceID","transmogLocation","forceGo","forTransmog","overrideCategoryID"]},
         "IsAppearanceUsableForActiveCategory": {"parameters":["appearanceInfo"],"returns":["boolean"]},
         "IsValidWeaponCategoryForSlot": {"parameters":["categoryID"],"returns":["boolean"]},
@@ -46372,7 +46282,6 @@
         "ValidateChosenVisualSources": {},
         "activeCategory": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "illusionWeaponAppearanceID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
-        "jumpToVisualID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "lastWeaponCategory": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "slotAllowed": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
         "tooltipModel": {"parameters":["..."],"rest":"unknown","returns":["unknown"]},
@@ -46426,8 +46335,7 @@
         "OnLeave": {},
         "OnMouseDown": {"parameters":["button"]},
         "OnMouseUp": {"parameters":["button"]},
-        "OnShow": {},
-        "visualID": {"parameters":["..."],"rest":"unknown","returns":["unknown"]}
+        "OnShow": {}
     }},
     "WardrobeSetsDetailsModelMixin": {"functions": {
         "GetPanAndZoomLimits": {"returns":["table|nil"]},
@@ -53755,7 +53663,7 @@
     "AccountReactivate_CloseDialogs": {"parameters":["preserveSubscription"]},
     "AccountReactivate_ReactivateNow": {},
     "AccountReactivate_RecheckEligibility": {},
-    "AccountUpgradePanel_GetBannerInfo": {"returns":["unknown","boolean","string|nil","unknown","unknown","unknown"]},
+    "AccountUpgradePanel_GetBannerInfo": {"returns":["unknown","boolean","string|nil","table|nil","string|nil","unknown"]},
     "AccountUpgradePanel_GetDisplayExpansionLevel": {"returns":["unknown","unknown"]},
     "Accumulate": {"parameters":["tbl"],"returns":["number"]},
     "AccumulateOp": {"parameters":["tbl","op"],"returns":["number"]},
@@ -54087,7 +53995,7 @@
     "AzeriteEmpoweredItemUI_LoadUI": {"rest":"unknown"},
     "AzeriteEssenceUI_LoadUI": {"rest":"unknown"},
     "AzeriteRespecFrame_LoadUI": {"rest":"unknown"},
-    "BNGetFriendInviteInfo": {"parameters":["inviteIndex"],"returns":["unknown","unknown","boolean|nil","nil","unknown"]},
+    "BNGetFriendInviteInfo": {"parameters":["inviteIndex"],"returns":["number|nil","string|nil","boolean|nil","nil","number|nil"]},
     "BNInviteFriend": {"parameters":["gameAccountID"]},
     "BNSendGameData": {"parameters":["gameAccountID","prefix","data"]},
     "BNSendVerifiedBattleTagInvite": {},
@@ -54097,7 +54005,7 @@
     "BNet_GetAccountNameForDisplay": {"parameters":["accountName","bnetIDAccount","chatFrame"],"returns":["unknown"]},
     "BNet_GetBNetAccountName": {"parameters":["accountInfo"],"returns":["unknown"]},
     "BNet_GetBNetIDAccount": {"parameters":["name"],"returns":["number|nil"]},
-    "BNet_GetBNetIDAccountFromCharacterName": {"parameters":["name"],"returns":["unknown"]},
+    "BNet_GetBNetIDAccountFromCharacterName": {"parameters":["name"],"returns":["number|nil"]},
     "BNet_GetBattleTagComponents": {"parameters":["battleTag"],"returns":["table|nil"]},
     "BNet_GetBattleTagForDisplay": {"parameters":["battleTag","isPlayer"],"returns":["unknown"]},
     "BNet_GetBattleTagSelf": {"returns":["unknown"]},
@@ -54650,7 +54558,7 @@
     "ChatConfig_UpdateTieredCheckboxFrame": {"parameters":["frame"]},
     "ChatConfig_UpdateTieredCheckboxes": {"parameters":["frame","index"]},
     "ChatEdit_CustomTabPressed": {"parameters":["editBox"]},
-    "ChatFrame_WargameTargetsVerifyBNetAccounts": {"parameters":["target1","target2"],"returns":["unknown","unknown"]},
+    "ChatFrame_WargameTargetsVerifyBNetAccounts": {"parameters":["target1","target2"],"returns":["number|nil","number|nil"]},
     "ChatHistory_GetAccessID": {"parameters":["chatType","chatTarget","chanSender"],"returns":["number|nil"]},
     "ChatHistory_GetAllAccessIDsByChanSender": {"parameters":["chanSender"],"returns":["table"]},
     "ChatHistory_GetChatType": {"parameters":["accessID"],"returns":["string|nil","unknown","unknown"]},
@@ -54739,9 +54647,9 @@
     "ClubFinderGetClubPostingExpirationTime": {"parameters":["clubId"],"returns":["number|nil"]},
     "ClubFinderGetCurrentClubListingInfo": {"parameters":["clubId"],"returns":["RecruitingClubInfo|nil"]},
     "ClubFinderGetFocusStringFromFlags": {"parameters":["recruitmentFlags"],"returns":["string|nil"]},
-    "ClubFinderGetPlayerSettingsByValue": {"parameters":["value"],"returns":["unknown"]},
+    "ClubFinderGetPlayerSettingsByValue": {"parameters":["value"],"returns":["boolean|nil"]},
     "ClubFinderGetPlayerSpecIds": {"returns":["table|nil"]},
-    "ClubFinderGetRecruitmentSettingByValue": {"parameters":["value"],"returns":["unknown"]},
+    "ClubFinderGetRecruitmentSettingByValue": {"parameters":["value"],"returns":["boolean|nil"]},
     "ClubFinderMessageApplicant": {},
     "ClubFinderReportPosting": {"parameters":["clubFinderGUID","clubName","playerGUID"]},
     "CoinPickupFrameCancel_Click": {},
@@ -54898,7 +54806,7 @@
     "CommunitiesSettingsDialogCancelButton_OnClick": {},
     "CommunitiesSettingsDialogChangeAvatarButton_OnClick": {},
     "CommunitiesSettingsDialogDeleteButton_OnClick": {},
-    "CommunitiesSettingsGetRecruitmentSettingByValue": {"parameters":["value"],"returns":["unknown"]},
+    "CommunitiesSettingsGetRecruitmentSettingByValue": {"parameters":["value"],"returns":["boolean|nil"]},
     "CommunitiesTicketManagerDialog_OnStreamChanged": {"parameters":["clubId","streamId"]},
     "CommunitiesTicketManagerDialog_Open": {"parameters":["clubId","streamId"]},
     "CompactArenaFrame_Generate": {"returns":["unknown","boolean"]},
@@ -55506,7 +55414,7 @@
     "EncounterJournal_GetIconIndexFromFlag": {"parameters":["flag"],"returns":["unknown"]},
     "EncounterJournal_GetLootJournalPanels": {"parameters":["view"],"returns":["unknown","unknown"]},
     "EncounterJournal_GetLootJournalView": {"returns":["unknown"]},
-    "EncounterJournal_GetSearchDisplay": {"parameters":["index"],"returns":["nil","unknown","unknown","unknown","string|nil","number|nil","unknown","unknown","unknown"]},
+    "EncounterJournal_GetSearchDisplay": {"parameters":["index"],"returns":["number|nil","unknown","unknown","unknown","string|nil","number|nil","number|nil","unknown","unknown"]},
     "EncounterJournal_HasChangedContext": {"parameters":["instanceID","instanceType","difficultyID"],"returns":["boolean"]},
     "EncounterJournal_HideCreatures": {"parameters":["clearDisplayInfo"]},
     "EncounterJournal_HideGreatVaultButton": {},
@@ -55601,7 +55509,7 @@
     "EquipmentManager_EquipInventoryItem": {"parameters":["action"],"returns":["boolean"]},
     "EquipmentManager_EquipItemByLocation": {"parameters":["location","invSlot"],"returns":["table|nil"]},
     "EquipmentManager_EquipSet": {"parameters":["setID"]},
-    "EquipmentManager_GetItemInfoByLocation": {"parameters":["location"],"returns":["unknown","string|nil","unknown","unknown","unknown","unknown","string|nil","unknown","unknown","unknown","unknown","function|nil","unknown","nil","unknown"]},
+    "EquipmentManager_GetItemInfoByLocation": {"parameters":["location"],"returns":["unknown","string|nil","number|nil","unknown","unknown","unknown","string|nil","boolean|nil","unknown","unknown","unknown","function|nil","unknown","nil","boolean|nil"]},
     "EquipmentManager_GetLocationData": {"parameters":["location"],"returns":["table"]},
     "EquipmentManager_OnEvent": {"parameters":["event","..."]},
     "EquipmentManager_PutItemInInventory": {"parameters":["action"],"returns":["true|nil"]},
@@ -55858,14 +55766,14 @@
     "FriendsFrame_ClickSummonButton": {},
     "FriendsFrame_FriendButtonSetSelection": {"parameters":["button","selected"]},
     "FriendsFrame_GetBNetAccountNameAndStatus": {"parameters":["accountInfo","noCharacterName"],"returns":["unknown","unknown","string|nil"]},
-    "FriendsFrame_GetBestUIPanelWidth": {"returns":["number|string"]},
-    "FriendsFrame_GetDisplayedInviteTypeAndGuid": {"parameters":["index"],"returns":["string","unknown","unknown"]},
+    "FriendsFrame_GetBestUIPanelWidth": {"returns":["number"]},
+    "FriendsFrame_GetDisplayedInviteTypeAndGuid": {"parameters":["index"],"returns":["string","string|nil","string|nil"]},
     "FriendsFrame_GetFormattedCharacterName": {"parameters":["characterName","battleTag","client","timerunningSeasonID"],"returns":["unknown"]},
     "FriendsFrame_GetInviteRestriction": {"parameters":["index"],"returns":["number"]},
     "FriendsFrame_GetInviteRestrictionText": {"parameters":["restriction"],"returns":["string"]},
     "FriendsFrame_GetLastOnline": {"parameters":["timeDifference","isAbsolute"],"returns":["string"]},
     "FriendsFrame_GetLastOnlineText": {"parameters":["accountInfo"],"returns":["string"]},
-    "FriendsFrame_GetPlayerGUIDFromIndex": {"parameters":["index"],"returns":["unknown"]},
+    "FriendsFrame_GetPlayerGUIDFromIndex": {"parameters":["index"],"returns":["string|nil"]},
     "FriendsFrame_GroupInvite": {},
     "FriendsFrame_HideAllPotentialSubFrames": {},
     "FriendsFrame_InviteOrRequestToJoin": {"parameters":["guid","gameAccountID"]},
@@ -55878,7 +55786,7 @@
     "FriendsFrame_SelectSquelched": {"parameters":["squelchType","index"]},
     "FriendsFrame_SendMessage": {},
     "FriendsFrame_SetupTravelPassDropdown": {"parameters":["friendIndex","attachedTo"]},
-    "FriendsFrame_ShouldShowSummonButton": {"returns":["boolean","unknown","Enum.RecruitAFriendFailure|nil"]},
+    "FriendsFrame_ShouldShowSummonButton": {"returns":["boolean","boolean|nil","Enum.RecruitAFriendFailure|nil"]},
     "FriendsFrame_ShowBNDropdown": {"parameters":["name","connected","lineID","chatType","chatFrame","friendsList","bnetIDAccount","communityClubID","communityStreamID","communityEpoch","communityPosition","battleTag"]},
     "FriendsFrame_ShowDropdown": {"parameters":["name","connected","lineID","chatType","chatFrame","friendsList","communityClubID","communityStreamID","communityEpoch","communityPosition","guid"]},
     "FriendsFrame_ShowSubFrame": {"parameters":["frameName"]},
@@ -55900,7 +55808,7 @@
     "FriendsListFrame_OnShow": {},
     "FriendsListFrame_SetInviteHeaderAnimPlaying": {"parameters":["playing"]},
     "FriendsListFrame_ToggleInvites": {},
-    "FriendsList_CanWhisperFriend": {"parameters":["friendType","friendIndex"],"returns":["unknown"]},
+    "FriendsList_CanWhisperFriend": {"parameters":["friendType","friendIndex"],"returns":["boolean"]},
     "FriendsList_CheckRIDWarning": {},
     "FriendsList_ClosePendingInviteDialogs": {},
     "FriendsList_Update": {"parameters":["forceUpdate"]},
@@ -56379,17 +56287,17 @@
     "GetActionAutocast": {"parameters":["actionID"],"returns":["boolean","boolean"]},
     "GetActionBarPage": {"returns":["number"]},
     "GetActionButtonForID": {"parameters":["id"],"returns":["unknown"]},
-    "GetActionCharges": {"parameters":["actionID"],"returns":["unknown","unknown","unknown","unknown","unknown"]},
-    "GetActionCooldown": {"parameters":["actionID"],"returns":["unknown","unknown","unknown","unknown"]},
+    "GetActionCharges": {"parameters":["actionID"],"returns":["number","number","number","number","number"]},
+    "GetActionCooldown": {"parameters":["actionID"],"returns":["number","number","boolean","number"]},
     "GetActionCount": {"parameters":["actionID"],"returns":["number"]},
-    "GetActionLossOfControlCooldown": {"parameters":["actionID"],"returns":["unknown","unknown"]},
+    "GetActionLossOfControlCooldown": {"parameters":["actionID"],"returns":["number|nil","number|nil"]},
     "GetActionText": {"parameters":["actionID"],"returns":["string|nil"]},
     "GetActionTexture": {"parameters":["actionID"],"returns":["number"]},
     "GetActiveSpecGroup": {"parameters":["isInspect","isPet"],"returns":["number"]},
     "GetAppropriateTooltip": {"returns":["GameTooltipTemplate"]},
     "GetAppropriateTopLevelParent": {"parameters":["optionalExcludedParent"],"returns":["unknown"]},
     "GetAreaPOIsForPlayerByMapIDCached": {"parameters":["mapID"],"returns":["unknown"]},
-    "GetAtlasSize": {"parameters":["atlasName"],"returns":["unknown","unknown"]},
+    "GetAtlasSize": {"parameters":["atlasName"],"returns":["number|nil","number|nil"]},
     "GetAutoCompletePresenceID": {"parameters":["name"],"returns":["number|nil"]},
     "GetAutoCompleteRealms": {"returns":["table"]},
     "GetAutoCompleteResults": {"parameters":["name","numResults","cursorPosition","allowFullMatch","includeFlags","excludeFlags"],"returns":["table"]},
@@ -56403,7 +56311,7 @@
     "GetBalanceRedemptionString": {"returns":["string"]},
     "GetBalanceString": {"parameters":["amount"],"rest":"unknown","returns":["unknown"]},
     "GetBattlePetAbilityHyperlink": {"parameters":["abilityID","maxHealth","power","speed"],"returns":["string"]},
-    "GetBattlefieldScore": {"parameters":["playerIndex"],"returns":["unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown"]},
+    "GetBattlefieldScore": {"parameters":["playerIndex"],"returns":["string|nil","number","number","number","number","number","string|nil","string|nil","string|nil","number","number","number","number","unknown","number","string|nil","number"]},
     "GetBattlefieldStatData": {"parameters":["playerIndex","statIndex"],"returns":["unknown"]},
     "GetBindWarning": {"parameters":["itemLocation"],"returns":["string|nil"]},
     "GetBindingFromClick": {"parameters":["input"],"returns":["string"]},
@@ -56452,7 +56360,7 @@
     "GetDifficultyColor": {"parameters":["difficulty"],"returns":["unknown","unknown"]},
     "GetDiscordUserCommunityLink": {"parameters":["linkDisplayText","bnetIDAccount","discordUserID","clubId","streamId","epoch","position"],"returns":["string"]},
     "GetDiscordUserLink": {"parameters":["linkDisplayText","bnetIDAccount","discordUserID","lineID","chatGroup","chatTarget"],"returns":["string"]},
-    "GetDisplayedExpansionLogo": {"parameters":["expansionLevel","releaseType"],"returns":["unknown"]},
+    "GetDisplayedExpansionLogo": {"parameters":["expansionLevel","releaseType"],"returns":["number|string|nil"]},
     "GetDisplayedInviteType": {"parameters":["guid"],"returns":["string"]},
     "GetDuelerInfoOverride": {"returns":["string","number"]},
     "GetDungeonScoreLink": {"parameters":["dungeonScore","playerName"],"rest":"unknown"},
@@ -56567,7 +56475,7 @@
     "GetSpellNameColor": {"returns":["unknown","unknown","unknown"]},
     "GetSpellQueueWindow": {"returns":["number"]},
     "GetTableColor": {"parameters":["color"],"returns":["unknown","unknown","unknown"]},
-    "GetTalentInfo": {"parameters":["talentTier","talentColumn","specGroupIndex","isInspect","target"],"returns":["unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown","unknown"]},
+    "GetTalentInfo": {"parameters":["talentTier","talentColumn","specGroupIndex","isInspect","target"],"returns":["number|nil","string|nil","number|nil","boolean|nil","boolean|nil","number|nil","boolean|nil","number|nil","number|nil","boolean|nil","unknown"]},
     "GetTalentMicroButton": {"returns":["PlayerSpellsMicroButton"]},
     "GetTasksOnMapCached": {"parameters":["mapID"],"returns":["unknown"]},
     "GetTempShapeshiftBarIndex": {"returns":["number"]},
@@ -56597,7 +56505,7 @@
     "GetValueOrCallFunction": {"parameters":["tbl","key","..."],"rest":"unknown","returns":["unknown"]},
     "GetValuesArray": {"parameters":["table"],"returns":["unknown"]},
     "GetVehicleBarIndex": {"returns":["number"]},
-    "GetWeaponEnchantInfo": {"rest":"unknown"},
+    "GetWeaponEnchantInfo": {"rest":"number|boolean|nil"},
     "GetWowStyle1ArrowButtonShadowlessState": {"parameters":["button"],"returns":["string"]},
     "GetWowStyle1ArrowButtonState": {"parameters":["button"],"returns":["string"]},
     "GlobalGlueContextMenu_Acquire": {"parameters":["owner","extraMenuHeight","extraMenuWidth"],"returns":["GlueContextMenu"]},
@@ -57060,7 +56968,7 @@
     "LFGBrowseSearchEntry_OnLoad": {},
     "LFGBrowseSearchEntry_SetSelection": {"parameters":["selected"]},
     "LFGBrowseSearchEntry_Update": {},
-    "LFGBrowseUtil_GetBestDisplayTypeForActivityIDs": {"parameters":["activityIDs"],"returns":["unknown","unknown"]},
+    "LFGBrowseUtil_GetBestDisplayTypeForActivityIDs": {"parameters":["activityIDs"],"returns":["Enum.LFGListDisplayType|nil","number"]},
     "LFGBrowseUtil_GetInviteActionForResult": {"parameters":["resultID"],"returns":["string","function|nil"]},
     "LFGBrowseUtil_MapRoleStatesToRoleIcons": {"parameters":["iconArray","isTank","isHealer","isDPS","useSimple","useDisabled"]},
     "LFGBrowseUtil_ReportAdvertisement": {"parameters":["searchResultID","leaderName"]},
@@ -57262,14 +57170,14 @@
     "LFGListSearchPanel_ValidateSelected": {},
     "LFGListUpdateHeaderEnabledAndLockedStates": {"parameters":["dungeonList","enabledList","hiddenByCollapseList"]},
     "LFGListUtil_AppendStatistic": {"parameters":["label","value","title","lastTitle"]},
-    "LFGListUtil_AugmentWithBest": {"parameters":["filters","categoryID","groupID","activityID"],"returns":["number|nil","number|nil","unknown","unknown"]},
+    "LFGListUtil_AugmentWithBest": {"parameters":["filters","categoryID","groupID","activityID"],"returns":["number|nil","number|nil","number|nil","unknown"]},
     "LFGListUtil_CanListGroup": {"returns":["boolean"]},
     "LFGListUtil_CanSearchForGroup": {"returns":["boolean"]},
     "LFGListUtil_FindQuestGroup": {"parameters":["questID","isFromGreenEyeButton"]},
     "LFGListUtil_FindScenarioGroup": {"parameters":["scenarioID","shouldShowCreateGroupButton"]},
     "LFGListUtil_GetActiveQueueMessage": {"parameters":["isApplication"],"returns":["string|nil"]},
     "LFGListUtil_GetCurrentExpansion": {"rest":"unknown","returns":["unknown"]},
-    "LFGListUtil_GetDecoratedCategoryName": {"parameters":["categoryName","filter","useColors"],"returns":["unknown"]},
+    "LFGListUtil_GetDecoratedCategoryName": {"parameters":["categoryName","filter","useColors"],"returns":["string"]},
     "LFGListUtil_GetQuestCategoryData": {"parameters":["questID"],"returns":["unknown","number|nil","number|nil","string|nil"]},
     "LFGListUtil_GetQuestDescription": {"parameters":["questID"],"returns":["string"]},
     "LFGListUtil_IsAppEmpowered": {"returns":["boolean"]},
@@ -57281,7 +57189,7 @@
     "LFGListUtil_SortActivitiesByRelevancy": {"parameters":["activities"]},
     "LFGListUtil_SortActivitiesByRelevancyCB": {"parameters":["activityID1","activityID2"],"returns":["boolean"]},
     "LFGListUtil_SortApplicants": {"parameters":["applicants"]},
-    "LFGListUtil_SortApplicantsCB": {"parameters":["applicantID1","applicantID2"],"returns":["unknown"]},
+    "LFGListUtil_SortApplicantsCB": {"parameters":["applicantID1","applicantID2"],"returns":["boolean"]},
     "LFGListUtil_SortSearchResults": {},
     "LFGListUtil_SortSearchResultsCB": {"parameters":["searchResultID1","searchResultID2"],"returns":["boolean"]},
     "LFGListUtil_ValidateHonorLevelReq": {"parameters":["text"],"returns":["string|nil"]},
@@ -57353,8 +57261,8 @@
     "LFGRole_GetChecked": {"parameters":["button"],"returns":["boolean"]},
     "LFGRole_SetChecked": {"parameters":["button","checked"]},
     "LFGSpecificChoiceEnableButton_SetIsRadio": {"parameters":["button","isRadio"]},
-    "LFGUtil_GetActivityGroupForActivity": {"parameters":["activityID"],"returns":["unknown"]},
-    "LFGUtil_GetActivityInfoName": {"parameters":["activityInfo"],"returns":["unknown"]},
+    "LFGUtil_GetActivityGroupForActivity": {"parameters":["activityID"],"returns":["number|nil"]},
+    "LFGUtil_GetActivityInfoName": {"parameters":["activityInfo"],"returns":["string"]},
     "LFGUtil_GetFilteredActivities": {"parameters":["categoryID","activityGroupID"],"returns":["unknown"]},
     "LFGUtil_OrganizeActivitiesByActivityGroup": {"parameters":["activities"],"returns":["table"]},
     "LFGUtil_SortActivityGroupIDs": {"parameters":["activityGroupIDList"]},
@@ -58318,7 +58226,7 @@
     "QuestUtils_IsQuestWithinLowTimeThreshold": {"parameters":["questID"],"returns":["boolean"]},
     "QuestUtils_IsQuestWithinTimeThreshold": {"parameters":["questID","threshold"],"returns":["boolean"]},
     "QuestUtils_IsQuestWorldQuest": {"parameters":["questID"],"returns":["boolean"]},
-    "QuestUtils_ShouldDisplayExpirationWarning": {"parameters":["questID"],"returns":["unknown"]},
+    "QuestUtils_ShouldDisplayExpirationWarning": {"parameters":["questID"],"returns":["boolean|nil"]},
     "QueueStatusDropdown_AcceptQueuedPVPMatch": {},
     "QueueStatusDropdown_AddBattlefieldButtons": {"parameters":["description","idx"]},
     "QueueStatusDropdown_AddLFGButtons": {"parameters":["description","category"]},
@@ -58346,7 +58254,7 @@
     "QueueStatus_InActiveBattlefield": {"returns":["true|nil","boolean|nil"]},
     "QuickJoinToast_GetPriority": {"parameters":["group","queues","players"],"returns":["number"]},
     "QuickJoinToast_GetPriorityFromPlayers": {"parameters":["players"],"returns":["number"]},
-    "QuickJoinToast_GetPriorityFromQueue": {"parameters":["queue"],"returns":["unknown"]},
+    "QuickJoinToast_GetPriorityFromQueue": {"parameters":["queue"],"returns":["number|nil"]},
     "RGBTableToColorCode": {"parameters":["rgbTable"],"returns":["string"]},
     "RGBToColorCode": {"parameters":["r","g","b"],"returns":["string"]},
     "RafRewardDeliveredAlertFrame_SetUp": {"parameters":["frame","type","icon","name","payloadID","showFancyToast","rafVersion"]},
@@ -62685,7 +62593,7 @@
     "AlertMountEquipmentFeatureMixin": {
       "functions": {
         "ClearAlert": {},
-        "GetTextWidth": {"returns":["string"]},
+        "GetTextWidth": {"returns":["number"]},
         "NewFeatureLabel_OnShow": {},
         "OnHide": {},
         "OnLoad": {},
@@ -63715,7 +63623,7 @@
         "powerButtonPool": "unknown",
         "preppingTierTwoReveal": "true|nil",
         "queuePlayingReveal": "boolean",
-        "textureKit": "unknown",
+        "textureKit": "string|nil",
         "tierGlowSeen": "number|nil",
         "traitRefundSoundEmitter": "unknown"
       },
@@ -63739,24 +63647,24 @@
         "ApplyRelicType": {"parameters":["relicType","relicLink","suppressAnimation"]},
         "ApplyTemporaryRelicType": {"parameters":["relicType","relicLink"]},
         "AreLinksEnabled": {"returns":["unknown"]},
-        "ArePrereqsMet": {"returns":["unknown"]},
+        "ArePrereqsMet": {"returns":["boolean|nil"]},
         "ClearOldData": {},
         "CouldSpendPoints": {"returns":["boolean|nil"]},
         "EvaluateStyle": {},
         "GenerateRune": {"returns":["string"]},
-        "GetCurrentRank": {"returns":["unknown"]},
-        "GetLinearIndex": {"returns":["unknown"]},
+        "GetCurrentRank": {"returns":["number|nil"]},
+        "GetLinearIndex": {"returns":["number|nil"]},
         "GetPowerID": {"returns":["number|nil"]},
-        "GetTier": {"returns":["unknown"]},
+        "GetTier": {"returns":["number|nil"]},
         "HasBonusMaxRanksFromTier": {"returns":["boolean"]},
         "HasRanksFromCurrentTier": {"returns":["boolean"]},
         "HasSpentAny": {"returns":["boolean|nil"]},
-        "IsActiveForLinks": {"returns":["unknown"]},
-        "IsCompletelyPurchased": {"returns":["unknown"]},
-        "IsFinal": {"returns":["unknown"]},
-        "IsGoldMedal": {"returns":["unknown"]},
+        "IsActiveForLinks": {"returns":["boolean"]},
+        "IsCompletelyPurchased": {"returns":["boolean|nil"]},
+        "IsFinal": {"returns":["boolean|nil"]},
+        "IsGoldMedal": {"returns":["boolean|nil"]},
         "IsMaxRank": {"returns":["boolean|nil"]},
-        "IsStart": {"returns":["unknown"]},
+        "IsStart": {"returns":["boolean|nil"]},
         "OnClick": {"parameters":["button"]},
         "OnDragStart": {},
         "OnEnter": {},
@@ -63779,33 +63687,33 @@
         "UpdateTooltip": {}
       },
       "values": {
-        "bonusRanks": "unknown",
-        "cost": "unknown",
-        "currentRank": "unknown",
+        "bonusRanks": "number|nil",
+        "cost": "number|nil",
+        "currentRank": "number|nil",
         "hasEnoughPower": "boolean|nil",
         "hasSpentAny": "boolean|nil",
-        "isCompletelyPurchased": "unknown",
-        "isFinal": "unknown",
-        "isGoldMedal": "unknown",
+        "isCompletelyPurchased": "boolean|nil",
+        "isFinal": "boolean|nil",
+        "isGoldMedal": "boolean|nil",
         "isMaxRank": "boolean|nil",
-        "isStart": "unknown",
-        "linearIndex": "unknown",
+        "isStart": "boolean|nil",
+        "linearIndex": "number|nil",
         "linksEnabled": "unknown",
         "locked": "unknown",
-        "maxRank": "unknown",
-        "numMaxRankBonusFromTier": "unknown",
+        "maxRank": "number|nil",
+        "numMaxRankBonusFromTier": "number|nil",
         "originalRelicLink": "unknown",
         "originalRelicType": "unknown",
         "powerID": "number|nil",
-        "prereqsMet": "unknown",
+        "prereqsMet": "boolean|nil",
         "queuedRevealDelay": "unknown",
         "relicLink": "unknown",
         "relicType": "unknown",
         "sequenceIndex": "number|nil",
-        "spellID": "unknown",
+        "spellID": "number|nil",
         "style": "number",
         "textureKit": "unknown",
-        "tier": "unknown",
+        "tier": "number|nil",
         "wasBonusRankJustIncreased": "boolean|nil"
       }
     },
@@ -64101,7 +64009,7 @@
         "SetSelected": {"parameters":["selected"]}
       },
       "values": {
-        "pendingItemID": "unknown"
+        "pendingItemID": "number|nil"
       }
     },
     "AuctionHouseAuctionsSummaryListMixin": {
@@ -64540,8 +64448,8 @@
         "UpdateTotalPrice": {}
       },
       "values": {
-        "fixedHeight": "string",
-        "fixedWidth": "string",
+        "fixedHeight": "number",
+        "fixedWidth": "number",
         "isInitialized": "true",
         "itemLocation": "unknown",
         "pendingPost": "table|nil",
@@ -64698,7 +64606,7 @@
         "GetCommoditiesSellListFrames": {"returns":["AuctionHouseCommoditiesSellListTemplate","unknown"]},
         "GetDisplayMode": {"returns":["unknown"]},
         "GetItemSellList": {"returns":["AuctionHouseItemListTemplate"]},
-        "GetMaxPriceWidth": {"parameters":["cache","key","fontObject","maxPrice"],"returns":["string"]},
+        "GetMaxPriceWidth": {"parameters":["cache","key","fontObject","maxPrice"],"returns":["number"]},
         "GetMutableCallbacksByEvent": {"parameters":["callbackType","event"],"returns":["unknown"]},
         "GetSortOrderState": {"parameters":["searchContext","sortOrder"],"returns":["unknown"]},
         "GetSortsForContext": {"parameters":["searchContext"],"returns":["unknown"]},
@@ -65106,8 +65014,8 @@
         "UpdateTotalPrice": {}
       },
       "values": {
-        "fixedHeight": "string",
-        "fixedWidth": "string",
+        "fixedHeight": "number",
+        "fixedWidth": "number",
         "itemLocation": "unknown",
         "itemSellListIsInitialized": "true",
         "listDisplayedItemKey": "ItemKey|nil",
@@ -65251,8 +65159,8 @@
         "UpdateTotalPrice": {}
       },
       "values": {
-        "fixedHeight": "string",
-        "fixedWidth": "string",
+        "fixedHeight": "number",
+        "fixedWidth": "number",
         "itemLocation": "unknown",
         "searchContext": "unknown",
         "searchResultPrice": "unknown"
@@ -67226,7 +67134,7 @@
         "GetAllTierInfo": {"returns":["table|nil"]},
         "GetItem": {"returns":["table|nil"]},
         "GetItemLocation": {"returns":["unknown"]},
-        "GetPowerSpellID": {"parameters":["powerID"],"returns":["unknown"]},
+        "GetPowerSpellID": {"parameters":["powerID"],"returns":["number|nil"]},
         "GetValidationInfo": {"returns":["number|nil"]},
         "HasBeenViewed": {"returns":["boolean"]},
         "IsFromEquipmentSlot": {"parameters":["equipmentSlotIndex"],"returns":["boolean|nil"]},
@@ -67660,7 +67568,7 @@
     "AzeriteEssenceUtil": {
       "functions": {
         "GetMilestoneAtPowerLevel": {"parameters":["powerLevel"],"returns":["unknown"]},
-        "GetMilestoneSpellInfo": {"parameters":["milestoneID"],"returns":["unknown","unknown"]},
+        "GetMilestoneSpellInfo": {"parameters":["milestoneID"],"returns":["string","number"]},
         "HasAnyUnlockableMilestones": {"returns":["boolean","boolean|nil"]}
       }
     },
@@ -67747,10 +67655,10 @@
         "UpdateMilestoneInfo": {}
       },
       "values": {
-        "canUnlock": "unknown",
-        "rank": "unknown",
-        "requiredLevel": "unknown",
-        "unlocked": "unknown"
+        "canUnlock": "boolean",
+        "rank": "number|nil",
+        "requiredLevel": "number",
+        "unlocked": "boolean"
       }
     },
     "AzeriteMilestoneRankedMixin": {
@@ -67777,11 +67685,11 @@
         "UpdateModelScenes": {"parameters":["forceUpdate"]}
       },
       "values": {
-        "canUnlock": "unknown",
+        "canUnlock": "boolean",
         "needsUnlock": "boolean",
-        "rank": "unknown",
-        "requiredLevel": "unknown",
-        "unlocked": "unknown"
+        "rank": "number|nil",
+        "requiredLevel": "number",
+        "unlocked": "boolean"
       }
     },
     "AzeriteMilestoneSlotMixin": {
@@ -67809,10 +67717,10 @@
         "UpdateModelScenes": {"parameters":["forceUpdate"]}
       },
       "values": {
-        "canUnlock": "unknown",
-        "rank": "unknown",
-        "requiredLevel": "unknown",
-        "unlocked": "unknown"
+        "canUnlock": "boolean",
+        "rank": "number|nil",
+        "requiredLevel": "number",
+        "unlocked": "boolean"
       }
     },
     "AzeriteMilestoneStaminaMixin": {
@@ -67838,10 +67746,10 @@
         "UpdateMilestoneInfo": {}
       },
       "values": {
-        "canUnlock": "unknown",
-        "rank": "unknown",
-        "requiredLevel": "unknown",
-        "unlocked": "unknown"
+        "canUnlock": "boolean",
+        "rank": "number|nil",
+        "requiredLevel": "number",
+        "unlocked": "boolean"
       }
     },
     "AzeritePaperDollItemOverlayMixin": {
@@ -68538,7 +68446,7 @@
         "isCombined": "unknown",
         "numWatchedTokens": "number",
         "tokenPool": "ObjectPool",
-        "tokenWidth": "unknown"
+        "tokenWidth": "number"
       },
       "tables": {
         "Tokens": {}
@@ -68647,7 +68555,7 @@
         "VerticalDividersPool": "ObjectPool",
         "bagBarExpandToggleInitialHeight": "unknown",
         "bagBarExpandToggleInitialWidth": "unknown",
-        "initialHeight": "string"
+        "initialHeight": "number"
       }
     },
     "BankAutoSortButtonMixin": {
@@ -71129,7 +71037,7 @@
     },
     "BulletPointMixin": {
       "functions": {
-        "GetEffectiveHeight": {"returns":["string"]},
+        "GetEffectiveHeight": {"returns":["number"]},
         "IsDirty": {"returns":["boolean"]},
         "MarkDirty": {},
         "OnUpdate": {},
@@ -72844,10 +72752,10 @@
       "values": {
         "appliesOverrideActorPosition": "boolean",
         "cardDisplayData": "unknown",
-        "defaultCardModelSceneID": "unknown",
+        "defaultCardModelSceneID": "number",
         "isSelected": "unknown",
         "notificationFrame": "unknown",
-        "overrideCardModelSceneID": "unknown",
+        "overrideCardModelSceneID": "number|nil",
         "productInfo": "unknown"
       }
     },
@@ -72929,7 +72837,7 @@
         "GetBaseProductInfo": {"parameters":["productID"],"rest":"unknown"},
         "GetBundleProductInfo": {"parameters":["productID"],"rest":"unknown"},
         "GetCatalogShopLinkProductID": {"returns":["unknown"]},
-        "GetCatalogShopLinkTag": {"returns":["unknown"]},
+        "GetCatalogShopLinkTag": {"returns":["string|nil"]},
         "GetCurrencyInfo": {"returns":["unknown"]},
         "GetCurrentActor": {"returns":["unknown"]},
         "GetCurrentCardModelSceneData": {"returns":["table"]},
@@ -73006,7 +72914,7 @@
         "isRewardsShopInteraction": "boolean",
         "justPurchasedProductID": "unknown",
         "linkProductID": "unknown",
-        "linkTag": "unknown",
+        "linkTag": "string|nil",
         "searchText": "unknown",
         "shoppingSessionUUIDStr": "string|nil",
         "showBYOB": "boolean",
@@ -73059,7 +72967,7 @@
         "currentData": "unknown",
         "formButtonsInitialized": "true",
         "hasAlternateForm": "boolean",
-        "previousMainModelSceneID": "unknown"
+        "previousMainModelSceneID": "number"
       },
       "tables": {
         "buttonGroup": {
@@ -74358,7 +74266,7 @@
       "values": {
         "count": "unknown",
         "opaqueChannel": "unknown",
-        "voiceChannelID": "unknown"
+        "voiceChannelID": "number|nil"
       }
     },
     "CharCustomizeAlteredFormButtonMixin": {
@@ -76995,7 +76903,7 @@
         "GetCommunitiesChannelLocalID": {"parameters":["clubId","streamId"],"returns":["unknown"]},
         "GetCommunitiesChannelName": {"parameters":["clubId","streamId"],"returns":["string"]},
         "GetCommunityAndStreamFromChannel": {"parameters":["communityChannel"],"returns":["number|nil","number|nil"]},
-        "GetCommunityAndStreamName": {"parameters":["clubId","streamId"],"returns":["unknown"]},
+        "GetCommunityAndStreamName": {"parameters":["clubId","streamId"],"returns":["string"]},
         "GetDecoratedSenderName": {"parameters":["event","..."],"returns":["unknown"]},
         "GetDecoratedSenderNameForFrame": {"parameters":["chatFrame","event","..."],"returns":["unknown"]},
         "GetDecoratedSenderNameInternal": {"parameters":["chatFrame","event","..."],"returns":["unknown"]},
@@ -77062,7 +76970,7 @@
         "StopFlash": {"parameters":["region","animGroup","showWhenDone"]},
         "SubstituteChatMessageBeforeSend": {"parameters":["msg"],"returns":["string"]},
         "TimeBreakDown": {"parameters":["time"],"returns":["number","number","number","number"]},
-        "TruncateToMaxLength": {"parameters":["text","maxLength"],"returns":["unknown"]},
+        "TruncateToMaxLength": {"parameters":["text","maxLength"],"returns":["string"]},
         "TryInsertChatLink": {"parameters":["link"],"returns":["boolean|nil"]},
         "TryInsertQuestLinkForQuestID": {"parameters":["questID"],"returns":["boolean|nil"]},
         "UnregisterForStickyFocus": {"parameters":["frame"]},
@@ -78202,7 +78110,7 @@
         "hiddenByPersonalResourceDisplay": "unknown",
         "maxUsablePoints": "number",
         "unit": "nil",
-        "xOffset": "number|string|nil"
+        "xOffset": "number|nil"
       }
     },
     "ClassSpecContentFrameMixin": {
@@ -79377,7 +79285,7 @@
         "GetComparisonFunction": {"returns":["function"]},
         "GetConfigApplicationState": {"returns":["boolean|nil","boolean|nil","string|nil"]},
         "GetConfigCommitErrorString": {"returns":["string"]},
-        "GetConfigID": {"returns":["unknown"]},
+        "GetConfigID": {"returns":["number"]},
         "GetCostStrings": {"parameters":["traitCurrenciesCost"],"returns":["table"]},
         "GetDefinitionInfoForEntry": {"parameters":["entryID"],"rest":"unknown","returns":["unknown"]},
         "GetFallbackConfigID": {"returns":["nil"]},
@@ -79571,7 +79479,7 @@
         "ShouldAddEdgeRequirementsToTooltip": {"parameters":["requiresAllPrecedingTraits","numOfEdges","areAllPrecedingEdgesActive"],"returns":["boolean"]},
         "ShouldButtonShowEdges": {"parameters":["button"],"rest":"unknown"},
         "ShouldDisplayGate": {"parameters":["firstButton","condInfo"],"returns":["boolean|nil"]},
-        "ShouldHideSingleRankNumbers": {"returns":["unknown"]},
+        "ShouldHideSingleRankNumbers": {"returns":["boolean"]},
         "ShouldInstantiateInvisibleButtons": {"returns":["false"]},
         "ShouldInstantiateNode": {"parameters":["nodeID","nodeInfo"],"returns":["boolean"]},
         "ShouldNodeBeVisible": {"parameters":["_nodeInfo"],"returns":["true"]},
@@ -79633,7 +79541,7 @@
         "buttonsWithDirtyEdges": "table",
         "cachedSearchableNodesMap": "table|nil",
         "commitTimer": "function|nil",
-        "commitedConfigID": "unknown",
+        "commitedConfigID": "number|nil",
         "condInfoCache": "table",
         "configIDs": "table",
         "configurationInfo": "nil",
@@ -80428,7 +80336,7 @@
         "MAX_UPGRADE_FEATURES": "number",
         "featureFramePool": "unknown",
         "isExpanded": "unknown",
-        "textureKit": "unknown"
+        "textureKit": "string|nil"
       }
     },
     "CollapseAndExpandButtonMixin": {
@@ -80454,7 +80362,7 @@
     },
     "CollapsibleServerAlertMixin": {
       "functions": {
-        "GetMaxFrameHeight": {"returns":["string"]},
+        "GetMaxFrameHeight": {"returns":["number"]},
         "NarrationGetContext": {"returns":["string|nil"]},
         "NarrationGetDescription": {"rest":"unknown","returns":["unknown"]},
         "NarrationGetName": {"returns":["string"]},
@@ -80473,7 +80381,7 @@
       "values": {
         "isActive": "true",
         "isSuppressed": "unknown",
-        "originalHeight": "string"
+        "originalHeight": "number"
       }
     },
     "CollectionMicroButtonMixin": {
@@ -80498,7 +80406,7 @@
         "AddTrackingTooltipLine": {"parameters":["tooltip","sourceID"]},
         "AreAllSourcesDisplayableOnPlayer": {"parameters":["sources"],"returns":["boolean"]},
         "CompareAppearance": {"parameters":["source1","source2"],"returns":["unknown"]},
-        "GetAppearanceItemHyperlink": {"parameters":["appearanceInfo","preferArtifact"],"returns":["unknown"]},
+        "GetAppearanceItemHyperlink": {"parameters":["appearanceInfo","preferArtifact"],"returns":["string|nil"]},
         "GetAppearanceNameTextAndColor": {"parameters":["appearanceInfo","inLegionArtifactCategory"],"returns":["unknown","unknown"]},
         "GetAppearanceSourceTextAndColor": {"parameters":["appearanceInfo"],"returns":["unknown","unknown"]},
         "GetAppearanceVisibilityWarning": {"parameters":["sources"],"returns":["string|nil"]},
@@ -81954,7 +81862,7 @@
         "UpdateNameText": {}
       },
       "values": {
-        "ccDisplayText": "unknown",
+        "ccDisplayText": "string|nil",
         "ccExpirationTime": "number|nil",
         "ccSpellID": "number|nil"
       },
@@ -82105,7 +82013,7 @@
       },
       "values": {
         "alignment": "string",
-        "ccDisplayText": "unknown",
+        "ccDisplayText": "string|nil",
         "ccExpirationTime": "number|nil",
         "ccSpellID": "number|nil",
         "guid": "string|nil",
@@ -82230,9 +82138,7 @@
         "requestedMoreHistory": "boolean"
       },
       "tables": {
-        "broadcastSent": {
-          "open": true
-        },
+        "broadcastSent": {},
         "eventsSent": {},
         "pendingMemberInfo": {
           "open": true
@@ -82805,7 +82711,7 @@
         "GetSelectedClubInfo": {"rest":"unknown"},
         "GetSelectedStreamId": {"rest":"unknown"},
         "GetVoiceChannel": {"parameters":["voiceChannel"],"returns":["VoiceChatChannel|nil"]},
-        "GetVoiceChannelID": {"returns":["unknown"]},
+        "GetVoiceChannelID": {"returns":["number|nil"]},
         "IsDisplayingProfessions": {"returns":["boolean"]},
         "IsMemberListDirty": {"returns":["true|nil"]},
         "IsSortDirty": {"returns":["true|nil"]},
@@ -82907,7 +82813,7 @@
       "functions": {
         "GetAvatarId": {"returns":["number"]},
         "GetClubId": {"returns":["string"]},
-        "GetClubType": {"returns":["unknown"]},
+        "GetClubType": {"returns":["Enum.ClubType"]},
         "GetCrossFaction": {"returns":["boolean"]},
         "GetDescription": {"returns":["string"]},
         "GetMessageOfTheDay": {"returns":["string"]},
@@ -82934,7 +82840,7 @@
         "avatarId": "number",
         "clubId": "string",
         "clubPostingInfo": "RecruitingClubInfo",
-        "clubType": "unknown",
+        "clubType": "Enum.ClubType",
         "waitingForResponseToShow": "boolean"
       }
     },
@@ -83370,7 +83276,7 @@
         "CheckToggleAllowed": {},
         "GetSelectionNodeID": {"returns":["number|nil"]},
         "GetSlotLabelText": {"returns":["string|nil"]},
-        "HasActiveEntry": {"returns":["unknown"]},
+        "HasActiveEntry": {"returns":["number|false|nil"]},
         "HasSelectionAndInfo": {"returns":["false|table|nil"]},
         "OnEnter": {},
         "OnEvent": {"parameters":["event"]},
@@ -84207,7 +84113,7 @@
       "functions": {
         "AcquireNewItemButton": {"returns":["unknown"]},
         "AddItemsForRefresh": {},
-        "CalculateExtraHeight": {"returns":["number|string"]},
+        "CalculateExtraHeight": {"returns":["number"]},
         "CalculateHeight": {"returns":["number"]},
         "CalculateWidth": {"returns":["number"]},
         "CanUseForBagID": {"parameters":["id"],"returns":["unknown"]},
@@ -85644,7 +85550,7 @@
         "cooldownChargesShown": "boolean|nil",
         "cooldownDesaturated": "boolean",
         "cooldownDuration": "unknown",
-        "cooldownEnabled": "unknown",
+        "cooldownEnabled": "boolean",
         "cooldownID": "unknown",
         "cooldownInfo": "unknown",
         "cooldownIsActive": "boolean",
@@ -86068,7 +85974,7 @@
         "cooldownChargesShown": "boolean|nil",
         "cooldownDesaturated": "boolean",
         "cooldownDuration": "unknown",
-        "cooldownEnabled": "unknown",
+        "cooldownEnabled": "boolean",
         "cooldownID": "unknown",
         "cooldownInfo": "unknown",
         "cooldownIsActive": "boolean",
@@ -87580,7 +87486,7 @@
         "cooldownChargesShown": "boolean|nil",
         "cooldownDesaturated": "boolean",
         "cooldownDuration": "unknown",
-        "cooldownEnabled": "unknown",
+        "cooldownEnabled": "boolean",
         "cooldownID": "unknown",
         "cooldownInfo": "unknown",
         "cooldownIsActive": "boolean",
@@ -88105,7 +88011,7 @@
     "CovenantSanctumUpgradeReservoirMixin": {
       "functions": {
         "CancelAnimaGainEffect": {},
-        "GetAnimaAmount": {"returns":["unknown"]},
+        "GetAnimaAmount": {"returns":["number"]},
         "GetDescriptionText": {"returns":["unknown"]},
         "GetTier": {"returns":["number"]},
         "IsSelected": {"returns":["boolean"]},
@@ -88132,7 +88038,7 @@
         "showingTooltip": "boolean",
         "strandRate": "unknown",
         "tier": "number",
-        "value": "unknown",
+        "value": "number",
         "vertProgress": "number"
       }
     },
@@ -88311,7 +88217,7 @@
       },
       "values": {
         "creditsInfos": "table",
-        "creditsTextWidth": "string",
+        "creditsTextWidth": "number",
         "data": "table",
         "header1Pool": "unknown",
         "header2Pool": "unknown",
@@ -88363,8 +88269,8 @@
     },
     "CurrencyContainerUtil": {
       "functions": {
-        "GetCurrencyContainerInfo": {"parameters":["currencyID","numItems","name","texture","quality"],"returns":["unknown","unknown","unknown","unknown"]},
-        "GetCurrencyContainerInfoForAlert": {"parameters":["currencyID","quantity","name","texture","quality"],"returns":["unknown","unknown","unknown","unknown"]}
+        "GetCurrencyContainerInfo": {"parameters":["currencyID","numItems","name","texture","quality"],"returns":["string|nil","number|nil","number","number|nil"]},
+        "GetCurrencyContainerInfoForAlert": {"parameters":["currencyID","quantity","name","texture","quality"],"returns":["string|nil","number|nil","number","number|nil"]}
       }
     },
     "CurrencyDisplayGroupMixin": {
@@ -88544,11 +88450,11 @@
         "CheckPlayTransferringSpinner": {},
         "ClearTransferData": {},
         "FullRefresh": {},
-        "GetCurrencyID": {"returns":["unknown"]},
-        "GetCurrencyIcon": {"returns":["unknown"]},
+        "GetCurrencyID": {"returns":["number|nil"]},
+        "GetCurrencyIcon": {"returns":["number|nil"]},
         "GetCurrencyInfo": {"returns":["CurrencyInfo|nil"]},
         "GetCurrencyTransferLoss": {"rest":"unknown"},
-        "GetPlayerCurrencyQuantity": {"returns":["unknown"]},
+        "GetPlayerCurrencyQuantity": {"returns":["number|nil"]},
         "GetRequestedCurrencyTransferAmount": {"rest":"unknown"},
         "GetSourceCharacterCurrencyQuantity": {"returns":["unknown"]},
         "GetSourceCharacterData": {"returns":["unknown"]},
@@ -90416,7 +90322,7 @@
         "GetBackgroundInsetsForStyle": {"parameters":["style"],"returns":["number","number","number","number"]},
         "GetBackgroundRegionAlpha": {"returns":["number"]},
         "GetBackgroundRegions": {"returns":["table"]},
-        "GetBarHeight": {"returns":["string"]},
+        "GetBarHeight": {"returns":["number"]},
         "GetClassificationAtlasElement": {"returns":["string|nil"]},
         "GetCreatureStatusBarColor": {"returns":["unknown"]},
         "GetDefaultStatusBarColor": {"returns":["unknown"]},
@@ -91784,7 +91690,7 @@
         "CalculateVisualState": {"returns":["number"]},
         "FullUpdate": {},
         "GetActiveIcon": {"returns":["unknown"]},
-        "GetButtonSize": {"returns":["string","string"]},
+        "GetButtonSize": {"returns":["number","number"]},
         "GetDefinitionID": {"returns":["unknown"]},
         "GetDefinitionInfo": {"returns":["unknown"]},
         "GetDescription": {"returns":["unknown"]},
@@ -92723,7 +92629,7 @@
         "SetUp": {"parameters":["slotID","transmogInfo","field"],"returns":["boolean|nil"]}
       },
       "values": {
-        "isHiddenVisual": "unknown",
+        "isHiddenVisual": "boolean|nil",
         "item": "table|nil",
         "itemDataLoadedCancelFunc": "function|nil",
         "name": "string|nil",
@@ -94221,14 +94127,14 @@
         "magnetismRange": "unknown",
         "sqrCornerMagnetismRange": "number",
         "sqrMagnetismRange": "number",
-        "topLevelParentBottom": "string|nil",
-        "topLevelParentCenterX": "string|nil",
-        "topLevelParentCenterY": "string|nil",
-        "topLevelParentHeight": "string|nil",
-        "topLevelParentLeft": "string|nil",
+        "topLevelParentBottom": "number|nil",
+        "topLevelParentCenterX": "number|nil",
+        "topLevelParentCenterY": "number|nil",
+        "topLevelParentHeight": "number|nil",
+        "topLevelParentLeft": "number|nil",
         "topLevelParentRight": "number",
         "topLevelParentTop": "number",
-        "topLevelParentWidth": "string|nil"
+        "topLevelParentWidth": "number|nil"
       },
       "tables": {
         "magneticFrames": {}
@@ -95101,7 +95007,7 @@
       },
       "values": {
         "encounterID": "unknown",
-        "link": "unknown"
+        "link": "string"
       }
     },
     "EncounterJournalDataProviderMixin": {
@@ -95125,10 +95031,10 @@
         "Init": {"parameters":["elementData"]}
       },
       "values": {
-        "encounterID": "unknown",
+        "encounterID": "number|nil",
         "index": "number|nil",
-        "itemID": "unknown",
-        "link": "unknown"
+        "itemID": "number|nil",
+        "link": "string|nil"
       }
     },
     "EncounterJournalLinkButtonMixin": {
@@ -95188,7 +95094,7 @@
       },
       "values": {
         "link": "unknown",
-        "spellID": "nil"
+        "spellID": "number|nil"
       }
     },
     "EncounterTimelineConstants": {
@@ -95926,7 +95832,7 @@
         "eventTrackSortIndex": "unknown",
         "flipHorizontally": "unknown",
         "frameAlpha": "unknown",
-        "frameHeightBase": "string",
+        "frameHeightBase": "number",
         "frameOffsetX": "unknown",
         "frameOffsetY": "unknown",
         "frameTargetY": "unknown",
@@ -97546,7 +97452,7 @@
         "detailPool": "ObjectPool",
         "goldActionsButtonPool": "ObjectPool",
         "hasMatchDetails": "boolean",
-        "matchEnded": "unknown"
+        "matchEnded": "boolean"
       }
     },
     "EnumUtil": {
@@ -97879,7 +97785,7 @@
         "GetCallbacksByEvent": {"parameters":["callbackType","event"],"returns":["unknown"]},
         "GetCursorHeight": {"returns":["unknown"]},
         "GetCursorOffset": {"returns":["unknown"]},
-        "GetFontHeight": {"returns":["string","string"]},
+        "GetFontHeight": {"returns":["number","string"]},
         "GetInputText": {"returns":["string"]},
         "GetMutableCallbacksByEvent": {"parameters":["callbackType","event"],"returns":["unknown"]},
         "HasRegistrantsForEvent": {"parameters":["event"],"returns":["boolean"]},
@@ -98595,8 +98501,8 @@
         },
         "Size": {
           "values": {
-            "Height": "number|string",
-            "Width": "number|string"
+            "Height": "number",
+            "Width": "number"
           }
         }
       }
@@ -100154,7 +100060,7 @@
         "Update": {}
       },
       "values": {
-        "bnetIDAccount": "unknown",
+        "bnetIDAccount": "number",
         "exclusive": "true",
         "hideOnEscape": "true",
         "selection": "unknown",
@@ -100541,7 +100447,7 @@
         "BuildTooltipBroadcastText": {"parameters":["accountInfo"],"returns":["string|nil"]},
         "CanAddFriendRequestSenderToBattleNetBlockList": {"parameters":["inviteIndex"],"returns":["boolean"]},
         "GameStateUsesFactions": {"returns":["boolean"]},
-        "GetBattleNetFriendGameAccountInfoIfExactlyOneDirectInviteTargetExists": {"parameters":["friendIndex"],"returns":["unknown"]},
+        "GetBattleNetFriendGameAccountInfoIfExactlyOneDirectInviteTargetExists": {"parameters":["friendIndex"],"returns":["BNetGameAccountInfo|nil"]},
         "GetBattleNetFriendInviteInfo": {"parameters":["friendIndex"],"returns":["table"]},
         "GetBattleNetFriendInviteTypeLabel": {"parameters":["inviteType"],"returns":["string"]},
         "GetBattleNetFriendPartyInviteRestriction": {"parameters":["friendIndex"],"returns":["unknown"]},
@@ -100664,7 +100570,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["string|nil","string|nil","string","string"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string","string"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -101786,7 +101692,7 @@
       },
       "values": {
         "atlasFormat": "string",
-        "calendarDay": "unknown",
+        "calendarDay": "number",
         "desaturateIfDisabled": "true",
         "displaceX": "unknown",
         "displaceY": "unknown",
@@ -102979,8 +102885,8 @@
         "anchorInfo": {
           "values": {
             "relativeTo": "ScriptRegion|nil",
-            "x": "string|nil",
-            "y": "string|nil"
+            "x": "number|nil",
+            "y": "number|nil"
           }
         }
       }
@@ -102989,7 +102895,7 @@
       "functions": {
         "AddLayoutChildren": {"parameters":["layoutChildren","..."]},
         "AttachToButton": {"parameters":["button"]},
-        "CalculateFrameSize": {"returns":["string","string"]},
+        "CalculateFrameSize": {"returns":["number","number"]},
         "ClearFixedSize": {},
         "DetatchFromButton": {},
         "GetAdditionalRegions": {},
@@ -103943,7 +103849,7 @@
         "CreateBackground": {"parameters":["GroupName","height"]},
         "CreateEntry": {"parameters":["GroupName","ColumnIndex","RowIndex","IconString","LabelString"],"returns":["Frame"]},
         "DoesGroupUseHeader": {"parameters":["GroupName"],"returns":["boolean"]},
-        "GetColumnWidth": {"parameters":["GroupName"],"returns":["string"]},
+        "GetColumnWidth": {"parameters":["GroupName"],"returns":["number"]},
         "GetGroupWidth": {"parameters":["GroupName"],"returns":["number"]},
         "HideAllGroups": {},
         "OnGamepadShowPersistentInputLegendChanged": {},
@@ -104718,7 +104624,7 @@
       "functions": {
         "AddLayoutChildren": {"parameters":["layoutChildren","..."]},
         "AttachToButton": {"parameters":["button"]},
-        "CalculateFrameSize": {"returns":["string","string"]},
+        "CalculateFrameSize": {"returns":["number","number"]},
         "ClearFixedSize": {},
         "DetatchFromButton": {},
         "GetAdditionalRegions": {},
@@ -105163,7 +105069,7 @@
       "values": {
         "abilityCountersForMechanicTypes": "unknown",
         "isTargettingGarrisonFollower": "boolean",
-        "materialAmount": "unknown"
+        "materialAmount": "number"
       }
     },
     "GarrisonFollowerMissionComplete": {
@@ -105558,7 +105464,7 @@
         "UpdateStartButton": {"parameters":["missionPage"]}
       },
       "values": {
-        "materialAmount": "unknown"
+        "materialAmount": "number"
       }
     },
     "GarrisonShipyardMissionComplete": {
@@ -106485,7 +106391,7 @@
       "values": {
         "controls": "table",
         "isTrayLayoutDirty": "true|nil",
-        "previousWidth": "string"
+        "previousWidth": "number"
       }
     },
     "GridLayoutFrameMixin": {
@@ -107979,7 +107885,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["string|nil","string|nil","string","string"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string","string"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -108039,7 +107945,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["string|nil","string|nil","string","string"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string","string"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -108097,7 +108003,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -108156,7 +108062,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -108602,7 +108508,7 @@
     },
     "HouseEditorInstructionMixin": {
       "functions": {
-        "GetControlWidth": {"returns":["string"]},
+        "GetControlWidth": {"returns":["number"]},
         "OnLoad": {},
         "SetControlWidth": {"parameters":["width"]},
         "SetEnabled": {"parameters":["enabled"]},
@@ -110086,7 +109992,7 @@
         "DoesFocusedCategoryShowSubcategories": {"returns":["boolean"]},
         "DoesSubcategoryPassFilters": {"parameters":["subcategoryID"],"returns":["unknown"]},
         "GetCategorySearchParams": {"returns":["unknown"]},
-        "GetFocusedCategoryString": {"returns":["unknown"]},
+        "GetFocusedCategoryString": {"returns":["string|nil"]},
         "Initialize": {"parameters":["onFocusChangedCallback","initialSearchParams"]},
         "IsAllCategoryFocused": {"returns":["boolean"]},
         "IsFeaturedCategoryFocused": {"returns":["boolean"]},
@@ -110545,8 +110451,8 @@
       },
       "values": {
         "activeTab": "unknown",
-        "baseHeight": "string",
-        "baseWidth": "string"
+        "baseHeight": "number",
+        "baseWidth": "number"
       },
       "tables": {
         "catalogTab": {
@@ -111067,7 +110973,7 @@
       "functions": {
         "AddItemToList": {"parameters":["item"]},
         "AddServiceEvents": {"parameters":["services"]},
-        "CustomElementExtentCalc": {"parameters":["dataIndex","elementData"],"returns":["unknown"]},
+        "CustomElementExtentCalc": {"parameters":["dataIndex","elementData"],"returns":["number"]},
         "FullUpdate": {},
         "GetCartCurrencyInfo": {"returns":["number|nil","string","true"]},
         "GetElementInitInfoFunc": {"returns":["function"]},
@@ -111726,7 +111632,7 @@
         "UpdateOwnerInfomation": {}
       },
       "values": {
-        "ownerName": "unknown"
+        "ownerName": "string"
       }
     },
     "HoverFadeVisibilityControllerMixin": {
@@ -112489,7 +112395,7 @@
         "isViewingActiveNeighborhood": "boolean",
         "loopSoundHandle": "number|nil",
         "playerHouseList": "unknown",
-        "targetValue": "unknown",
+        "targetValue": "number|nil",
         "thresholdMax": "unknown"
       },
       "tables": {
@@ -113136,13 +113042,13 @@
         "CompleteItemInteraction": {},
         "CostsCurrency": {"returns":["boolean|nil"]},
         "CostsGold": {"returns":["boolean"]},
-        "GetButtonTooltip": {"returns":["unknown"]},
+        "GetButtonTooltip": {"returns":["string|nil"]},
         "GetChargeConfirmationText": {"returns":["string|nil"]},
-        "GetConfirmationDescription": {"rest":"unknown","returns":["unknown"]},
-        "GetConfirmationInfo": {"returns":["unknown","unknown"]},
-        "GetCost": {"returns":["unknown"]},
+        "GetConfirmationDescription": {"returns":["string|nil"]},
+        "GetConfirmationInfo": {"returns":["string|nil","string|nil"]},
+        "GetCost": {"returns":["number|nil"]},
         "GetDescriptionColor": {"returns":["unknown"]},
-        "GetInteractionType": {"returns":["unknown"]},
+        "GetInteractionType": {"returns":["Enum.UIItemInteractionType"]},
         "GetItemLocation": {"returns":["unknown"]},
         "GetRechargeMessage": {"returns":["string|nil"]},
         "GetValidItemInteractionItemsCallback": {"parameters":["filterFunction","resultsTable"]},
@@ -113171,29 +113077,29 @@
         "UsesCharges": {"returns":["boolean"]}
       },
       "values": {
-        "buttonTooltip": "unknown",
+        "buttonTooltip": "string|nil",
         "castLineID": "unknown",
-        "chargeCost": "unknown",
-        "chargeCurrencyTypeId": "unknown",
+        "chargeCost": "number|nil",
+        "chargeCurrencyTypeId": "number|nil",
         "clickShowsFlyout": "boolean",
-        "closeSoundKitID": "unknown",
-        "confirmationDescription": "unknown",
-        "confirmationText": "unknown",
+        "closeSoundKitID": "number",
+        "confirmationDescription": "string|nil",
+        "confirmationText": "string",
         "conversionMode": "boolean",
-        "cost": "unknown",
-        "currencyTypeId": "unknown",
-        "descriptionText": "unknown",
+        "cost": "number|nil",
+        "currencyTypeId": "number|nil",
+        "descriptionText": "string|nil",
         "dropInSlotSoundKitId": "unknown",
-        "flags": "unknown",
+        "flags": "Enum.UIItemInteractionFlags",
         "flyoutSettings": "table|nil",
-        "interactionType": "unknown",
+        "interactionType": "Enum.UIItemInteractionType",
         "itemDataLoadedCancelFunc": "nil",
         "itemLocation": "unknown",
-        "openSoundKitID": "unknown",
-        "slotTooltip": "unknown",
-        "textureKit": "unknown",
+        "openSoundKitID": "number",
+        "slotTooltip": "string|nil",
+        "textureKit": "string",
         "tutorialBitFlag": "unknown",
-        "tutorialText": "unknown",
+        "tutorialText": "string",
         "usesCharges": "boolean"
       }
     },
@@ -113600,7 +113506,7 @@
         "GetEmptyEquipSlotTooltip": {"parameters":["equipSlot"],"returns":["unknown"]},
         "GetEmptyEquipSlotTooltipForSlotName": {"parameters":["equipSlotName"],"returns":["unknown"]},
         "GetEquipSlotTexture": {"parameters":["equipSlot"],"returns":["number|nil"]},
-        "GetItemDetails": {"parameters":["itemLink","quantity","isCurrency","lootSource"],"returns":["unknown","unknown","unknown","unknown","unknown"]},
+        "GetItemDetails": {"parameters":["itemLink","quantity","isCurrency","lootSource"],"returns":["string|nil","number|nil","unknown","number|nil","unknown"]},
         "GetItemHyperlink": {"parameters":["itemID"],"returns":["string|nil"]},
         "GetValidatedItemLocation": {"parameters":["equipSlot"],"returns":["unknown"]},
         "IterateBagSlots": {"parameters":["bag","callback"],"returns":["boolean"]},
@@ -114233,7 +114139,7 @@
     },
     "LFGParentFrameRightTabMixin": {
       "functions": {
-        "CalculateTabSizeBasedOnTabArt": {"returns":["unknown","number"]},
+        "CalculateTabSizeBasedOnTabArt": {"returns":["number","number"]},
         "GetFinalIconAnchorOffsets": {"returns":["number","number"]},
         "GetIconAnchorOffsetsForTabArt": {"returns":["number","number"]},
         "GetPressedIconAnchorOffsets": {"returns":["number","number"]},
@@ -115224,7 +115130,7 @@
         "centerIndex": "unknown",
         "displayLevel": "number",
         "legacySystemData": "LegacyRewardTrackData",
-        "maxLevel": "unknown",
+        "maxLevel": "number",
         "progressBarMasked": "boolean",
         "rewardTrackLevelsInfo": "table"
       },
@@ -115278,7 +115184,7 @@
     },
     "LegacySystemFrameTabMixin": {
       "functions": {
-        "CalculateTabSizeBasedOnTabArt": {"returns":["unknown","number"]},
+        "CalculateTabSizeBasedOnTabArt": {"returns":["number","number"]},
         "GetFinalIconAnchorOffsets": {"returns":["number","number"]},
         "GetIconAnchorOffsetsForTabArt": {"returns":["number","number"]},
         "GetPressedIconAnchorOffsets": {"returns":["number","number"]},
@@ -118169,7 +118075,7 @@
       "functions": {
         "FindBestAreaNameAtMouse": {"parameters":["mapID","normalizedCursorX","normalizedCursorY"],"returns":["string|nil"]},
         "GetBountySetMaps": {"parameters":["bountySetID"],"returns":["false|table|nil"]},
-        "GetDisplayableMapForPlayer": {"returns":["unknown"]},
+        "GetDisplayableMapForPlayer": {"returns":["number"]},
         "GetMapCenterOnMap": {"parameters":["mapID","topMapID"],"returns":["number|nil","number|nil"]},
         "GetMapParentInfo": {"parameters":["mapID","mapType","topMost"],"returns":["UiMapDetails|nil"]},
         "IsChildMap": {"parameters":["mapID","ancestorMapID"],"returns":["boolean"]},
@@ -118376,7 +118282,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -118435,7 +118341,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -120928,7 +120834,7 @@
         "Update": {"parameters":["factionID"]}
       },
       "values": {
-        "friendshipFactionID": "unknown"
+        "friendshipFactionID": "number"
       }
     },
     "NPE_QuestManager": {
@@ -122539,7 +122445,7 @@
     "NewFeatureLabelMixin": {
       "functions": {
         "ClearAlert": {},
-        "GetTextWidth": {"returns":["string"]},
+        "GetTextWidth": {"returns":["number"]},
         "NewFeatureLabel_OnShow": {},
         "OnHide": {},
         "OnLoad": {}
@@ -125470,9 +125376,7 @@
         "containers": {},
         "moduleToContainerMap": {},
         "questPOIEnabledModules": {},
-        "templateTypes": {
-          "open": true
-        }
+        "templateTypes": {}
       }
     },
     "ObjectiveTrackerModuleHeaderMixin": {
@@ -126836,12 +126740,12 @@
         "GetButtonType": {"returns":["unknown"]},
         "GetCustomButtonData": {"returns":["unknown"]},
         "GetInProgressDisplay": {"returns":["unknown"]},
-        "GetMapPinInfo": {"parameters":["info"],"returns":["unknown"]},
+        "GetMapPinInfo": {"parameters":["info"],"returns":["UIMapPinInfo|nil"]},
         "GetMapPinInfoButtonField": {"parameters":["fieldName"],"returns":["unknown"]},
         "GetMapPinInfo_Display": {"returns":["unknown"]},
         "GetMapPinInfo_Highlight": {"returns":["unknown"]},
         "GetMapPinInfo_Normal": {"returns":["unknown"]},
-        "GetMapPinInfo_OuterGlow": {"returns":["unknown"]},
+        "GetMapPinInfo_OuterGlow": {"returns":["string"]},
         "GetMapPinInfo_Pressed": {"returns":["unknown"]},
         "GetPinScale": {"returns":["number"]},
         "GetPingWorldMap": {"returns":["unknown"]},
@@ -126893,7 +126797,7 @@
         "areaPOIID": "unknown",
         "areaPOIInfo": "unknown",
         "index": "nil",
-        "mapPinInfo": "unknown",
+        "mapPinInfo": "UIMapPinInfo|nil",
         "pinScale": "number|nil",
         "pingWorldMap": "unknown",
         "questID": "unknown",
@@ -127036,7 +126940,7 @@
     "PVPCellHonorLevelMixin": {
       "functions": {
         "GetIconAtlas": {"parameters":["rowData"],"returns":["nil"]},
-        "GetIconTexture": {"parameters":["rowData"],"returns":["unknown"]},
+        "GetIconTexture": {"parameters":["rowData"],"returns":["number|nil"]},
         "GetTooltipText": {"parameters":["rowData"],"returns":["string|nil"]},
         "OnEnter": {},
         "OnLeave": {},
@@ -127182,7 +127086,7 @@
         "SetUpFrame": {"parameters":["frame"]}
       },
       "values": {
-        "icon": "unknown",
+        "icon": "number",
         "id": "unknown",
         "quantity": "unknown"
       }
@@ -127589,7 +127493,7 @@
     "PVPSpecialEventLabelMixin": {
       "functions": {
         "ClearAlert": {},
-        "GetTextWidth": {"returns":["string"]},
+        "GetTextWidth": {"returns":["number"]},
         "NewFeatureLabel_OnShow": {},
         "OnHide": {},
         "OnLoad": {},
@@ -129303,7 +129207,7 @@
         "GetCategories": {"returns":["table"]},
         "GetCategoryText": {"parameters":["categoryID"],"returns":["string"]},
         "GetCurrencyIconMarkup": {"returns":["string"]},
-        "GetDefaultModelSceneID": {"parameters":["categoryID"],"returns":["unknown"]},
+        "GetDefaultModelSceneID": {"parameters":["categoryID"],"returns":["number|nil"]},
         "GetDefaultSortAscending": {"parameters":["sortField"],"returns":["boolean"]},
         "GetFilterState": {"parameters":["categoryID"],"returns":["unknown"]},
         "GetFrozenPerksVendorItemInfo": {"returns":["PerksVendorItemInfo|nil"]},
@@ -129530,7 +129434,7 @@
       },
       "values": {
         "spinnerOffset": "number",
-        "spinnerWidth": "string"
+        "spinnerWidth": "number"
       }
     },
     "PerksProgramPurchaseCartButtonMixin": {
@@ -129542,7 +129446,7 @@
       },
       "values": {
         "spinnerOffset": "number",
-        "spinnerWidth": "string"
+        "spinnerWidth": "number"
       }
     },
     "PerksProgramPurchasePendingSpinnerMixin": {
@@ -129612,8 +129516,8 @@
         "InitItem": {"parameters":["elementData"]}
       },
       "values": {
-        "initialLeftWidth": "string",
-        "initialRightWidth": "string"
+        "initialLeftWidth": "number",
+        "initialRightWidth": "number"
       }
     },
     "PerksProgramShoppingCartMixin": {
@@ -129639,32 +129543,32 @@
       "tables": {
         "defaultTransmogDisplayData": {
           "values": {
-            "actorID": "unknown",
-            "actorScriptTag": "unknown",
+            "actorID": "number",
+            "actorScriptTag": "string",
             "alternateFormData": "table",
-            "animSpeed": "unknown",
-            "animation": "unknown",
-            "animationKitID": "unknown",
-            "animationVariation": "unknown",
+            "animSpeed": "number",
+            "animation": "number",
+            "animationKitID": "number|nil",
+            "animationVariation": "number",
             "autodress": "boolean",
-            "cameraID": "unknown",
-            "cameraMaxZoomDistance": "unknown",
-            "cameraMinZoomDistance": "unknown",
+            "cameraID": "number",
+            "cameraMaxZoomDistance": "number",
+            "cameraMinZoomDistance": "number",
             "cameraPitch": "number",
             "cameraRoll": "number",
-            "cameraScriptTag": "unknown",
+            "cameraScriptTag": "string",
             "cameraTargetX": "number",
             "cameraTargetY": "number",
             "cameraTargetZ": "number",
             "cameraYaw": "number",
-            "cameraZoomDistance": "unknown",
+            "cameraZoomDistance": "number",
             "creatureDisplayInfoID": "unknown",
             "defaultModelSceneID": "unknown",
             "hideWeapon": "boolean",
             "mainHandItemModifiedAppearanceID": "unknown",
-            "modelActorDisplayID": "unknown",
+            "modelActorDisplayID": "number|nil",
             "noCameraSpin": "boolean",
-            "normalizedScale": "unknown",
+            "normalizedScale": "number|nil",
             "offHandItemModifiedAppearanceID": "unknown",
             "overrideModelSceneID": "unknown",
             "pitch": "number",
@@ -129674,7 +129578,7 @@
             "roll": "number",
             "selectedModelSceneID": "unknown",
             "sheatheWeapon": "boolean",
-            "spellVisualKitID": "unknown",
+            "spellVisualKitID": "number|nil",
             "yaw": "number"
           }
         }
@@ -129777,7 +129681,7 @@
         "classFrame": "Frame",
         "classID": "number|nil",
         "currPowerValue": "number",
-        "defaultBarWidth": "string",
+        "defaultBarWidth": "number",
         "hasBeenSetup": "true",
         "healthbar": "PersonalResourceStatusBar",
         "hideAltPower": "unknown",
@@ -130022,7 +129926,7 @@
     },
     "PetHappinessIndicatorMixin": {
       "functions": {
-        "GetHappinessStats": {"returns":["unknown","number|nil","number|nil"]},
+        "GetHappinessStats": {"returns":["number|nil","number|nil","number|nil"]},
         "OnEnter": {},
         "OnEvent": {"parameters":["event","..."]},
         "OnLeave": {},
@@ -130034,7 +129938,7 @@
         "tooltipData": {
           "values": {
             "damagePercentage": "number|nil",
-            "happiness": "unknown",
+            "happiness": "number|nil",
             "loyaltyRate": "number|nil"
           }
         }
@@ -130665,7 +130569,7 @@
         "AlignOptionHeights": {"parameters":["skipAlignSections"]},
         "AreOptionsAligned": {"returns":["boolean"]},
         "FadeOutAllOptions": {},
-        "GetObjectGUID": {"returns":["unknown"]},
+        "GetObjectGUID": {"returns":["string"]},
         "GetOptionDataForOptionFrame": {"parameters":["optionFrame"],"returns":["unknown"]},
         "GetPlayerChoiceOptionHeightData": {"returns":["table"]},
         "GetTextureKitInfo": {"returns":["table"]},
@@ -130698,7 +130602,7 @@
         "rightPadding": "number",
         "spacing": "number",
         "topPadding": "number",
-        "uiTextureKit": "unknown"
+        "uiTextureKit": "string"
       },
       "tables": {
         "alignedSectionMaxHeights": {},
@@ -131268,7 +131172,7 @@
       "functions": {
         "CanUseClassTalents": {"returns":["boolean"]},
         "GetClassColor": {"returns":["colorRGB|nil"]},
-        "GetClassFile": {"returns":["unknown"]},
+        "GetClassFile": {"returns":["string"]},
         "GetClassID": {"returns":["number|nil"]},
         "GetClassInfo": {"returns":["ClassInfo|nil"]},
         "GetClassName": {"returns":["string|nil"]},
@@ -132637,7 +132541,7 @@
         "GetDefaultOrderDuration": {"returns":["unknown"]},
         "GetDefaultOrderRecipient": {"returns":["number|nil"]},
         "GetDefaultShowUnlearned": {"returns":["true"]},
-        "GetEffectiveSkillLineID": {"returns":["unknown"]},
+        "GetEffectiveSkillLineID": {"returns":["number"]},
         "GetFirstRecipe": {"parameters":["recipeInfo"],"returns":["unknown"]},
         "GetHighestLearnedRecipe": {"parameters":["recipeInfo"],"returns":["unknown"]},
         "GetNewestKnownProfessionInfo": {"returns":["unknown"]},
@@ -133570,12 +133474,12 @@
         "circularGlowTexture": "TalentButtonCircularGlowTemplate",
         "endDelay": "number|nil",
         "entryInfo": "unknown",
-        "flipBookBRx": "unknown",
-        "flipBookBRy": "unknown",
+        "flipBookBRx": "number",
+        "flipBookBRy": "number",
         "flipBookNumCols": "number",
         "flipBookNumRows": "number",
-        "flipBookULx": "unknown",
-        "flipBookULy": "unknown",
+        "flipBookULx": "number",
+        "flipBookULy": "number",
         "frameCol": "number",
         "frameLevelOffset": "number",
         "frameRow": "number",
@@ -134604,7 +134508,7 @@
         "GetDetailedPanelPath": {"returns":["unknown"]},
         "GetProfessionID": {"returns":["unknown"]},
         "GetProfessionInfo": {"returns":["unknown"]},
-        "GetRootNodeID": {"returns":["unknown"]},
+        "GetRootNodeID": {"returns":["number"]},
         "GetSpendCurrencyTypesID": {"returns":["number|nil"]},
         "HasAnyConfigChanges": {"returns":["boolean"]},
         "HasUnlockableTab": {"returns":["boolean"]},
@@ -135021,7 +134925,7 @@
         "CreateProfessionsRecipeTransactionFromCraftingOrder": {"parameters":["order"],"returns":["unknown"]},
         "CreateRecipeReagentListByPredicate": {"parameters":["recipeID","predicate"],"returns":["table"]},
         "CreateRecipeReagentsForAllBasicReagents": {"parameters":["recipeID","predicate"],"returns":["table"]},
-        "GetReagentQuantityInPossession": {"parameters":["reagent","characterInventoryOnly"],"returns":["unknown"]},
+        "GetReagentQuantityInPossession": {"parameters":["reagent","characterInventoryOnly"],"returns":["number|nil"]},
         "GetRecipeSchematic": {"parameters":["..."],"returns":["CraftingRecipeSchematic"]},
         "IsCraftingMinimized": {"returns":["unknown"]},
         "IsReagentSlotBasicRequired": {"parameters":["reagentSlotSchematic"],"returns":["unknown"]},
@@ -135881,8 +135785,8 @@
         "SetUpMajorFactionReputationReward": {"parameters":["reputationRewardInfo"]}
       },
       "values": {
-        "factionID": "nil",
-        "factionName": "unknown",
+        "factionID": "number",
+        "factionName": "string",
         "rewardAmount": "unknown"
       }
     },
@@ -136836,9 +136740,9 @@
         "GetQuestIconOffer": {"parameters":["isLegendary","frequency","isRepeatable","isCampaign","isCovenantCalling","isImportant","isMeta"],"returns":["string","boolean"]},
         "GetQuestIconOfferForQuestID": {"parameters":["questID","isLegendary","frequency","isRepeatable","isImportant","isMeta","questInfoID"],"returns":["string","boolean"]},
         "GetQuestLegendStrings": {"parameters":["questID"],"returns":["table|nil"]},
-        "GetQuestTypeDetails": {"parameters":["questID"],"returns":["unknown","unknown","unknown"]},
-        "GetThreatPOIIcon": {"parameters":["questID"],"returns":["unknown"]},
-        "GetWorldQuestAtlasInfo": {"parameters":["questID","tagInfo","inProgress"],"returns":["unknown","unknown","unknown"]},
+        "GetQuestTypeDetails": {"parameters":["questID"],"returns":["number|nil","string|nil","unknown"]},
+        "GetThreatPOIIcon": {"parameters":["questID"],"returns":["string"]},
+        "GetWorldQuestAtlasInfo": {"parameters":["questID","tagInfo","inProgress"],"returns":["unknown","number","number"]},
         "IsQuestActiveButNotComplete": {"parameters":["questID"],"returns":["boolean"]},
         "IsQuestTagIconHidden": {"returns":["unknown"]},
         "IsQuestTrackableTask": {"parameters":["questID"],"returns":["boolean"]},
@@ -137201,7 +137105,7 @@
         "OnToastShown": {}
       },
       "values": {
-        "lastThreshold": "unknown",
+        "lastThreshold": "number",
         "lastUpdateTime": "number"
       }
     },
@@ -139302,7 +139206,7 @@
       "values": {
         "attachedItemID": "number",
         "continuableContainer": "unknown",
-        "textureKit": "unknown"
+        "textureKit": "string|nil"
       },
       "tables": {
         "buttonPurchaseFXIDs": {}
@@ -139546,8 +139450,8 @@
         "Refresh": {}
       },
       "values": {
-        "disabledTooltip": "unknown",
-        "factionID": "nil"
+        "disabledTooltip": "string",
+        "factionID": "number|nil"
       }
     },
     "ReputationDetailWatchFactionCheckboxMixin": {
@@ -139659,10 +139563,10 @@
         "UpdateCurrentText": {}
       },
       "values": {
-        "factionID": "unknown",
-        "friendshipID": "unknown",
+        "factionID": "number",
+        "friendshipID": "number",
         "max": "number",
-        "name": "unknown",
+        "name": "string",
         "value": "number"
       }
     },
@@ -142576,8 +142480,8 @@
         "SetEffectSpeed": {"parameters":["speed"]}
       },
       "values": {
-        "centerX": "number|string|nil",
-        "centerY": "number|string|nil",
+        "centerX": "number|nil",
+        "centerY": "number|nil",
         "delayedActions": "table|nil",
         "effectControllers": "table",
         "effectSpeed": "unknown",
@@ -148642,7 +148546,7 @@
     },
     "SidePanelTabButtonMixin": {
       "functions": {
-        "CalculateTabSizeBasedOnTabArt": {"returns":["unknown","number"]},
+        "CalculateTabSizeBasedOnTabArt": {"returns":["number","number"]},
         "GetFinalIconAnchorOffsets": {"returns":["number","number"]},
         "GetIconAnchorOffsetsForTabArt": {"returns":["number","number"]},
         "GetPressedIconAnchorOffsets": {"returns":["number","number"]},
@@ -148914,7 +148818,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -149955,7 +149859,7 @@
     },
     "SocialUITabMixin": {
       "functions": {
-        "CalculateTabSizeBasedOnTabArt": {"returns":["unknown","number"]},
+        "CalculateTabSizeBasedOnTabArt": {"returns":["number","number"]},
         "GetFinalIconAnchorOffsets": {"returns":["number","number"]},
         "GetIconAnchorOffsetsForTabArt": {"returns":["number","number"]},
         "GetPressedIconAnchorOffsets": {"returns":["number","number"]},
@@ -150041,7 +149945,7 @@
         "GetCallbackTables": {"returns":["table"]},
         "GetCallbacksByEvent": {"parameters":["callbackType","event"],"returns":["unknown"]},
         "GetMutableCallbacksByEvent": {"parameters":["callbackType","event"],"returns":["unknown"]},
-        "GetPosition": {"returns":["string|nil","string|nil"]},
+        "GetPosition": {"returns":["number|nil","number|nil"]},
         "GetScaledPosition": {"returns":["number","number"]},
         "HasRegistrantsForEvent": {"parameters":["event"],"returns":["boolean"]},
         "IsMoving": {"returns":["boolean"]},
@@ -151059,8 +150963,8 @@
         "ClearSpellData": {},
         "GamepadAdjustTooltipAnchor": {"parameters":["tooltip"]},
         "GetDragTarget": {"returns":["unknown"]},
-        "GetItemType": {"returns":["unknown"]},
-        "GetName": {"returns":["unknown"]},
+        "GetItemType": {"returns":["Enum.SpellBookItemType|false|nil"]},
+        "GetName": {"returns":["string|false|nil"]},
         "GetTexture": {"returns":["string|false|nil"]},
         "HasValidData": {"returns":["false|SpellBookItemInfo|nil"]},
         "Init": {"parameters":["elementData"]},
@@ -151178,8 +151082,8 @@
         "ClearSpellData": {},
         "GamepadAdjustTooltipAnchor": {"parameters":["tooltip"]},
         "GetDragTarget": {"returns":["unknown"]},
-        "GetItemType": {"returns":["unknown"]},
-        "GetName": {"returns":["unknown"]},
+        "GetItemType": {"returns":["Enum.SpellBookItemType|false|nil"]},
+        "GetName": {"returns":["string|false|nil"]},
         "GetOutfitID": {"returns":["unknown"]},
         "GetTexture": {"returns":["string|false|nil"]},
         "HasValidData": {"returns":["boolean"]},
@@ -151369,7 +151273,7 @@
       },
       "values": {
         "categoryEnum": "unknown",
-        "displayIcon": "unknown",
+        "displayIcon": "number",
         "skillLineIndex": "number",
         "spellBank": "Enum.SpellBookSpellBank",
         "spellBookFrame": "unknown",
@@ -151409,7 +151313,7 @@
       "tables": {
         "clearOutfitInfo": {
           "values": {
-            "icon": "unknown",
+            "icon": "number",
             "name": "string",
             "outfitID": "number"
           }
@@ -157967,7 +157871,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -160872,7 +160776,7 @@
         "GetButtonsInOrder": {"parameters":["comparison"],"returns":["table"]},
         "GetComparisonFunction": {"returns":["function"]},
         "GetConfigCommitErrorString": {"returns":["nil"]},
-        "GetConfigID": {"returns":["unknown"]},
+        "GetConfigID": {"returns":["number"]},
         "GetCostStrings": {"parameters":["traitCurrenciesCost"],"returns":["table"]},
         "GetFrameLevelForButton": {"parameters":["_nodeInfo","_visualState"],"returns":["number"]},
         "GetFrameLevelForEdge": {"parameters":["startButton","_endButton"],"returns":["number"]},
@@ -160990,7 +160894,7 @@
         "ShouldAddEdgeRequirementsToTooltip": {"parameters":["requiresAllPrecedingTraits","numOfEdges","areAllPrecedingEdgesActive"],"returns":["boolean"]},
         "ShouldButtonShowEdges": {"parameters":["button"],"rest":"unknown"},
         "ShouldDisplayGate": {"parameters":["firstButton","condInfo"],"returns":["boolean|nil"]},
-        "ShouldHideSingleRankNumbers": {"returns":["unknown"]},
+        "ShouldHideSingleRankNumbers": {"returns":["boolean"]},
         "ShouldInstantiateInvisibleButtons": {"returns":["false"]},
         "ShouldInstantiateNode": {"parameters":["nodeID","nodeInfo"],"returns":["true"]},
         "ShouldNodeBeVisible": {"parameters":["_nodeInfo"],"returns":["true"]},
@@ -161023,7 +160927,7 @@
         "buttonOverlayPool": "unknown",
         "buttonsWithDirtyEdges": "table",
         "commitTimer": "function|nil",
-        "commitedConfigID": "unknown",
+        "commitedConfigID": "number|nil",
         "condInfoCache": "table",
         "configurationInfo": "TraitConfigInfo",
         "definitionInfoCache": "table",
@@ -162239,7 +162143,7 @@
         "BuildFonts": {},
         "GetCVarNames": {"returns":["table"]},
         "GetDefaultScaleWeight": {"returns":["number"]},
-        "GetFontBaseHeight": {"parameters":["fontName"],"returns":["unknown"]},
+        "GetFontBaseHeight": {"parameters":["fontName"],"returns":["number"]},
         "GetFonts": {"returns":["table"]},
         "GetMinimumScale": {"returns":["number"]},
         "GetReadCVarName": {"returns":["string|nil"]},
@@ -163591,7 +163495,7 @@
       "functions": {
         "GetCurrentIcons": {"returns":["table"]},
         "GetCurrentOptionInfo": {"returns":["unknown"]},
-        "GetEffectiveTransmogID": {"returns":["unknown"]},
+        "GetEffectiveTransmogID": {"returns":["number"]},
         "GetIllusionSlotFrame": {"returns":["unknown"]},
         "GetSlot": {"rest":"unknown","returns":["unknown"]},
         "GetSlotInfo": {"returns":["ViewedTransmogOutfitSlotInfo|nil"]},
@@ -164224,7 +164128,7 @@
     "TransmogIllusionSlotMixin": {
       "functions": {
         "GetCurrentOptionInfo": {"returns":["unknown"]},
-        "GetEffectiveTransmogID": {"returns":["unknown"]},
+        "GetEffectiveTransmogID": {"returns":["number"]},
         "GetSlot": {"rest":"unknown","returns":["unknown"]},
         "GetSlotInfo": {"returns":["ViewedTransmogOutfitSlotInfo|nil"]},
         "GetTransmogLocation": {"returns":["unknown"]},
@@ -164252,7 +164156,7 @@
       "functions": {
         "CanCheckDressUpClick": {"returns":["false"]},
         "GetAppearanceInfo": {"returns":["unknown"]},
-        "GetAppearanceLink": {"returns":["unknown"]},
+        "GetAppearanceLink": {"returns":["string|nil"]},
         "GetCollectionFrame": {"returns":["unknown"]},
         "GetIllusionLink": {"returns":["string|nil"]},
         "Init": {"parameters":["elementData"]},
@@ -164294,7 +164198,7 @@
         "GetArmorCategoryID": {"returns":["unknown"]},
         "GetData": {"returns":["table"]},
         "GetLookupKey": {"returns":["number"]},
-        "GetSlot": {"returns":["unknown"]},
+        "GetSlot": {"returns":["Enum.TransmogOutfitSlot|nil"]},
         "GetSlotID": {"returns":["number|boolean|function|table|userdata|nil"]},
         "GetSlotName": {"returns":["string|nil"]},
         "GetType": {"returns":["unknown"]},
@@ -164310,7 +164214,7 @@
       },
       "values": {
         "modification": "Enum.TransmogModification",
-        "slot": "unknown",
+        "slot": "Enum.TransmogOutfitSlot|nil",
         "slotID": "number|boolean|function|table|userdata|nil",
         "type": "unknown"
       }
@@ -164526,7 +164430,7 @@
     "TransmogSlotMixin": {
       "functions": {
         "GetCurrentOptionInfo": {"returns":["unknown"]},
-        "GetEffectiveTransmogID": {"returns":["unknown"]},
+        "GetEffectiveTransmogID": {"returns":["number"]},
         "GetSlot": {"rest":"unknown","returns":["unknown"]},
         "GetSlotInfo": {"returns":["ViewedTransmogOutfitSlotInfo|nil"]},
         "GetTransmogLocation": {"returns":["unknown"]},
@@ -164565,7 +164469,7 @@
         "GetUseTransmogSkin": {"parameters":["slot"],"returns":["boolean"]},
         "GetWardrobeModelSetupData": {"parameters":["slot"],"returns":["table|nil"]},
         "GetWardrobeModelSetupGearData": {"parameters":["slot"],"returns":["number|nil"]},
-        "GetWeaponInfoForEnchant": {"parameters":["transmogLocation"],"returns":["number|nil","unknown","unknown"]},
+        "GetWeaponInfoForEnchant": {"parameters":["transmogLocation"],"returns":["number|nil","number","number"]},
         "IsCategoryLegionArtifact": {"parameters":["categoryID"],"returns":["boolean"]},
         "IsCategoryRangedWeapon": {"parameters":["categoryID"],"returns":["boolean"]},
         "IsCustomSetCollected": {"parameters":["customSetID"],"returns":["boolean"]},
@@ -164645,7 +164549,7 @@
         "Init": {"parameters":["wardrobeCollection"]},
         "InitFilterButton": {},
         "IsAppearanceUsableForActiveCategory": {"parameters":["appearanceInfo"],"returns":["boolean"]},
-        "IsValidWeaponCategoryForSlot": {"parameters":["categoryID"],"returns":["unknown"]},
+        "IsValidWeaponCategoryForSlot": {"parameters":["categoryID"],"returns":["boolean|nil"]},
         "OnEvent": {"parameters":["event","..."]},
         "OnHide": {},
         "OnKeyDown": {"parameters":["key"],"returns":["boolean"]},
@@ -164683,7 +164587,7 @@
         "activeCategoryID": "unknown",
         "inAlternateForm": "boolean",
         "itemCollectionEntries": "table|nil",
-        "jumpToTransmogID": "unknown",
+        "jumpToTransmogID": "number|nil",
         "lastWeaponCategoryID": "unknown",
         "outfitSlotSaved": "unknown",
         "tooltipModel": "unknown",
@@ -165455,8 +165359,8 @@
       "functions": {
         "GetContextData": {"returns":["unknown"]},
         "GetOwningDropdown": {"rest":"unknown"},
-        "GetPreferredEntryHeight": {"returns":["string"]},
-        "GetPreferredEntryWidth": {"returns":["string"]},
+        "GetPreferredEntryHeight": {"returns":["number"]},
+        "GetPreferredEntryWidth": {"returns":["number"]},
         "OnSetOwningButton": {},
         "SetContextData": {"parameters":["contextData"]},
         "SetOwningButton": {"parameters":["button"]}
@@ -166669,7 +166573,7 @@
         "numWidgetsShowing": "number",
         "ticker": "function|nil",
         "timerWidgets": "table",
-        "verticalAnchorYOffset": "unknown",
+        "verticalAnchorYOffset": "number",
         "widgetFrames": "table",
         "widgetPools": "unknown",
         "widgetSetID": "number|nil",
@@ -166706,7 +166610,7 @@
         "UpdateTooltip": "function|nil",
         "disableTooltip": "unknown",
         "fixedHeight": "unknown",
-        "fixedWidth": "number|string|nil",
+        "fixedWidth": "number|nil",
         "hyperLinkString": "unknown",
         "lastFillAtlas": "string|nil",
         "leftPadding": "nil",
@@ -168427,7 +168331,7 @@
         "disableTooltip": "unknown",
         "displayedValue": "unknown",
         "effectController": "nil",
-        "fillTotalWidth": "string",
+        "fillTotalWidth": "number",
         "fillWidth": "number",
         "flashMomentType": "unknown",
         "flashValue": "unknown",
@@ -168804,7 +168708,7 @@
     "UnitPopupAttachableFrameMixin": {
       "functions": {
         "GetContextData": {"returns":["unknown"]},
-        "GetDesiredSize": {"returns":["string","string"]},
+        "GetDesiredSize": {"returns":["number","number"]},
         "OnAttach": {},
         "SetContextData": {"parameters":["contextData"]}
       },
@@ -169608,7 +169512,7 @@
     },
     "UnitPopupCommunitiesSettingButtonMixin": {
       "functions": {
-        "CanShow": {"parameters":["contextData"],"returns":["unknown"]},
+        "CanShow": {"parameters":["contextData"],"returns":["boolean"]},
         "CreateMenuDescription": {"parameters":["rootDescription","contextData"],"returns":["unknown"]},
         "GetColor": {"returns":["number","number","number"]},
         "GetEntries": {"returns":["nil"]},
@@ -169635,7 +169539,7 @@
     },
     "UnitPopupCommunityInviteButtonMixin": {
       "functions": {
-        "CanShow": {"parameters":["contextData"],"returns":["unknown"]},
+        "CanShow": {"parameters":["contextData"],"returns":["boolean"]},
         "CreateMenuDescription": {"parameters":["rootDescription","contextData"],"returns":["unknown"]},
         "GetColor": {"returns":["number","number","number"]},
         "GetEntries": {"returns":["nil"]},
@@ -174085,7 +173989,7 @@
     "UnitPopupVoiceLevelsMixin": {
       "functions": {
         "GetContextData": {"returns":["unknown"]},
-        "GetDesiredSize": {"returns":["string","string"]},
+        "GetDesiredSize": {"returns":["number","number"]},
         "GetVoiceChannel": {"returns":["unknown"]},
         "GetVoiceChannelID": {"returns":["unknown"]},
         "GetVoiceMemberID": {"returns":["unknown"]},
@@ -174755,7 +174659,7 @@
         "Refresh": {}
       },
       "values": {
-        "name": "unknown",
+        "name": "string",
         "vehicleIndex": "unknown"
       }
     },
@@ -174795,7 +174699,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["string|nil","string|nil","string","string"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string","string"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -174856,7 +174760,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -174916,7 +174820,7 @@
         "GetDefaultIconName": {"returns":["string"]},
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -174975,7 +174879,7 @@
         "GetEntryInfo": {"parameters":["entryID"],"rest":"unknown"},
         "GetMinSize": {"returns":["number"]},
         "GetTooltipDescription": {"returns":["string"]},
-        "GetTooltipOffsets": {"returns":["number|nil","string|nil","string|nil","string|nil"]},
+        "GetTooltipOffsets": {"returns":["number|nil","number|nil","string|nil","string|nil"]},
         "HideIcon": {},
         "InitMagnifier": {},
         "IsRestrictedVASProduct": {"parameters":["entryInfo"],"returns":["boolean"]},
@@ -175053,7 +174957,7 @@
         "RemoveAllData": {},
         "RemoveUniquePin": {"parameters":["pin"]},
         "SetBounty": {"parameters":["bountyQuestID","bountyFactionID","bountyFrameType"]},
-        "ShouldShowVignette": {"parameters":["vignetteInfo"],"returns":["unknown"]},
+        "ShouldShowVignette": {"parameters":["vignetteInfo"],"returns":["boolean|nil"]},
         "UpdatePinPositions": {}
       },
       "values": {
@@ -175781,7 +175685,7 @@
       "functions": {
         "GetIsFavorite": {"returns":["boolean|nil"]},
         "GetIsOwned": {"returns":["boolean|nil"]},
-        "GetWarbandSceneID": {"returns":["unknown"]},
+        "GetWarbandSceneID": {"returns":["number|nil"]},
         "Init": {"parameters":["elementData"]},
         "OnEnter": {},
         "OnLeave": {},
@@ -175798,7 +175702,7 @@
       "functions": {
         "GetIsFavorite": {"returns":["boolean|nil"]},
         "GetIsOwned": {"returns":["boolean|nil"]},
-        "GetWarbandSceneID": {"returns":["unknown"]},
+        "GetWarbandSceneID": {"returns":["number|nil"]},
         "Init": {"parameters":["elementData"]},
         "OnClick": {"parameters":["button"]},
         "OnEnter": {},
@@ -176112,7 +176016,7 @@
       "functions": {
         "CanCheckDressUpClick": {"returns":["true"]},
         "GetAppearanceInfo": {"returns":["unknown"]},
-        "GetAppearanceLink": {"returns":["unknown"]},
+        "GetAppearanceLink": {"returns":["string|nil"]},
         "GetCollectionFrame": {"returns":["unknown"]},
         "GetIllusionLink": {"returns":["string|nil"]},
         "GetSourceInfoForTracking": {"returns":["unknown"]},
@@ -176159,7 +176063,7 @@
         "GetFilteredVisualsList": {"returns":["table|nil"]},
         "GetTooltipSourceIndex": {"rest":"unknown"},
         "GetTransmogLocation": {"returns":["unknown"]},
-        "GetWeaponInfoForEnchant": {"returns":["unknown","unknown","unknown"]},
+        "GetWeaponInfoForEnchant": {"returns":["unknown","number|nil","number|nil"]},
         "GoToSourceID": {"parameters":["sourceID","transmogLocation","forceGo","forTransmog","overrideCategoryID"]},
         "IsAppearanceUsableForActiveCategory": {"parameters":["appearanceInfo"],"returns":["boolean"]},
         "IsValidWeaponCategoryForSlot": {"parameters":["categoryID"],"returns":["boolean"]},
@@ -176201,7 +176105,7 @@
         "illusionWeaponAppearanceID": "unknown",
         "jumpToLatestAppearanceID": "number|nil",
         "jumpToLatestCategoryID": "Enum.TransmogCollectionType|nil",
-        "jumpToVisualID": "unknown",
+        "jumpToVisualID": "number|nil",
         "lastWeaponCategory": "unknown",
         "latestAppearanceID": "number|nil",
         "resetPageOnSearchUpdated": "true|nil",
@@ -176321,7 +176225,7 @@
       },
       "values": {
         "transmogSlot": "number|nil",
-        "visualID": "unknown"
+        "visualID": "number"
       }
     },
     "WardrobeSetsDetailsModelMixin": {
@@ -176748,7 +176652,7 @@
         "AcknowledgeTutorial": {"parameters":["key"]},
         "GetConfig": {"returns":["unknown"]},
         "GetMicroMenu": {"returns":["MicroMenu"]},
-        "GetScribeCurrencyQuantity": {"returns":["unknown"]},
+        "GetScribeCurrencyQuantity": {"returns":["number"]},
         "GetScribeMicroButton": {"returns":["ScribeMicroButton"]},
         "GetSpellbookMicroButton": {"returns":["SpellbookMicroButton"]},
         "GetTutorialBitfieldFlag": {"parameters":["key"],"returns":["unknown"]},

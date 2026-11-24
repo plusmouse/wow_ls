@@ -51,6 +51,12 @@ from the code itself, with no annotations needed.
     could be called (`` `stackCount` is number, not a function ``), when the
     field is one the WoW API declares or one a table made in the code is
     given, not when its type is a guess from fields of that name elsewhere
+  - operators on values that raise an error whatever they hold: arithmetic
+    or `..` on a boolean or function (``Can't concatenate a boolean``), `#`
+    of a number, boolean or function, and `<` and the like on two kinds of
+    value (``Can't compare a number with a string``), which Lua 5.1 never
+    converts between, or on booleans or functions. Nil is set aside, so a
+    value that may be nil isn't reported for that
   - XML files that don't parse, at the error
   - calls to methods of a table made in the code when nothing in the addon or
     its dependencies defines a function by that name

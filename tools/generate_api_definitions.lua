@@ -48,13 +48,13 @@ end
 local LUA_TYPES = {
 	number = {
 		"number", "luaIndex", "fileID", "BigUInteger", "BigInteger", "time_t", "Seconds", "Milliseconds",
-		"FrameTime", "size", "normalizedValue", "SingleColorValue", "WOWMONEY", "uiFontHeight", "SoundHandle",
+		"FrameTime", "size", "normalizedValue", "SingleColorValue", "WOWMONEY", "uiFontHeight", "uiUnit", "SoundHandle",
 		"UnitCastBarID", "EncounterTimelineEventID", "VoiceChatID", "ClubMemberOpaqueId",
 	},
 	boolean = { "bool" },
 	string = {
 		"string", "cstring", "stringView", "WOWGUID", "UnitToken", "UnitTokenPvPRestrictedForAddOns",
-		"UnitTokenRestrictedForAddOns", "UnitTokenNamePlate", "uiUnit", "textureKit", "textureAtlas",
+		"UnitTokenRestrictedForAddOns", "UnitTokenNamePlate", "textureKit", "textureAtlas",
 		"kstringLfgListApplicant", "kstringLfgListSearch", "kstringClubMessage", "kstringAuroraName",
 		"KStringDiscordUserName", "ClubId", "ClubStreamId", "ClubInvitationId", "FramePoint", "DrawLayer",
 		"JustifyHorizontal", "JustifyVertical", "FrameStrata", "BlendMode", "Orientation", "FilterMode",

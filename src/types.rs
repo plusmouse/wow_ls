@@ -869,6 +869,40 @@ enum Operation {
     Binary(Operator, Box<Operation>, Box<Operation>),
 }
 
+impl Operation {
+    /// The code it covers
+    fn range(&self) -> TextRange {
+        match self {
+            Operation::Operand(e) => e.syntax().text_range(),
+            Operation::Binary(_, left, right) => left.range().cover(right.range()),
+        }
+    }
+}
+
+/// The kinds of Lua value `set` may be, as Lua names them: `boolean or function`
+fn kind_names(set: TypeSet) -> String {
+    let kinds = [
+        (TypeSet::NUMBER, "number"), (TypeSet::STRING, "string"), (TypeSet::BOOLEAN, "boolean"),
+        (TypeSet::FUNCTION, "function"), (TypeSet::TABLE, "table"), (TypeSet::OTHER, "userdata"),
+    ];
+    kinds.iter()
+        .filter(|(kind, _)| set.intersection(*kind) != TypeSet::NEVER)
+        .map(|(_, name)| *name)
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+/// The one kind of Lua value `set` is, if it's only one: number, string,
+/// boolean, function, table, or userdata
+fn single_kind(set: TypeSet) -> Option<TypeSet> {
+    if set == TypeSet::NEVER {
+        return None
+    }
+    [TypeSet::NUMBER, TypeSet::STRING, TypeSet::BOOLEAN, TypeSet::FUNCTION, TypeSet::TABLE, TypeSet::OTHER]
+        .into_iter()
+        .find(|&kind| kind.contains(set))
+}
+
 /// Precedence climbing: operators bind tighter the higher their precedence.
 /// Associativity doesn't change the result type for any operator, nor what a
 /// condition proves, so everything is treated as left associative
@@ -3880,7 +3914,8 @@ impl<'a> Walker<'a> {
             },
             Expression::UnaryExpression(u) => {
                 if let Some(operand) = u.operand() {
-                    self.expression(&operand);
+                    let types = self.expression(&operand);
+                    self.check_operand(u.kind(), types, u.syntax().text_range());
                 }
                 Type::of(match u.kind() {
                     Operator::Not => TypeSet::BOOLEAN,
@@ -4200,6 +4235,63 @@ impl<'a> Walker<'a> {
         }
         let message = format!("`{text}` is {}, not a function", self.definitions.type_text(types));
         self.diagnostics.push(Diagnostic { file: self.file, range: name.text_range(), message });
+    }
+
+    /// Reports `operand` of unary `op` (or one side of a binary one) when it can
+    /// only be a value `op` raises an error on. Nil is set aside: every other
+    /// value it may be already raises one, and a value that can only be nil
+    /// isn't sure enough to report, as a field not seen set reads as nil
+    fn check_operand(&mut self, op: Operator, operand: Type, range: TextRange) {
+        if self.prior.is_none() {
+            return
+        }
+        // What raises an error, beyond nil. Arithmetic and `..` take numbers
+        // and strings (a string as a number if it is one), and tables and
+        // userdata may have metamethods. `#` takes strings and tables
+        let fails = match op {
+            Operator::Add | Operator::Subtract | Operator::Multiply | Operator::Divide | Operator::Modulo
+                | Operator::Hat | Operator::Concatenate => TypeSet::BOOLEAN | TypeSet::FUNCTION,
+            Operator::ArrayLength => TypeSet::NUMBER | TypeSet::BOOLEAN | TypeSet::FUNCTION,
+            _ => return,
+        };
+        let set = operand.set.without(TypeSet::NIL);
+        if set == TypeSet::NEVER || !fails.contains(set) {
+            return
+        }
+        let what = kind_names(set);
+        let message = match op {
+            Operator::Concatenate => format!("Can't concatenate a {what}"),
+            Operator::ArrayLength => format!("Can't get the length of a {what}"),
+            _ => format!("Can't do arithmetic on a {what}"),
+        };
+        self.diagnostics.push(Diagnostic { file: self.file, range, message });
+    }
+
+    /// Reports binary `op` on `left` and `right` when it raises an error
+    /// whatever they are (nil aside, as for `check_operand`): arithmetic or
+    /// `..` on a side it can't take, or an order comparison of two kinds of
+    /// value, which Lua 5.1 never converts between (even with `__lt`, which
+    /// needs both to be the same kind), or of booleans or functions
+    fn check_operands(&mut self, op: Operator, left: Type, right: Type, range: TextRange) {
+        if self.prior.is_none() {
+            return
+        }
+        if !matches!(op, Operator::LessThan | Operator::GreaterThan | Operator::LessThanOrEquals | Operator::GreaterThanOrEquals) {
+            // One report for the expression, for the first side that can't be used
+            let before = self.diagnostics.len();
+            self.check_operand(op, left, range);
+            if self.diagnostics.len() == before {
+                self.check_operand(op, right, range);
+            }
+            return
+        }
+        let (Some(a), Some(b)) = (single_kind(left.set.without(TypeSet::NIL)), single_kind(right.set.without(TypeSet::NIL))) else { return };
+        let unordered = TypeSet::BOOLEAN | TypeSet::FUNCTION;
+        if a == b && !unordered.contains(a) {
+            return
+        }
+        let message = format!("Can't compare a {} with a {}", kind_names(a), kind_names(b));
+        self.diagnostics.push(Diagnostic { file: self.file, range, message });
     }
 
     /// Whether data type `id` was given fields that can't be named (see `open`)
@@ -5144,9 +5236,11 @@ impl<'a> Walker<'a> {
                 self.short_circuit_depth -= 1;
                 combine(*op, left_type, right_type)
             }
-            Operation::Binary(op, left, right) => {
-                let left = self.operation(left);
-                let right = self.operation(right);
+            Operation::Binary(op, left_operation, right_operation) => {
+                let left = self.operation(left_operation);
+                let right = self.operation(right_operation);
+                let range = left_operation.range().cover(right_operation.range());
+                self.check_operands(*op, left, right, range);
                 combine(*op, left, right)
             }
         }
@@ -5411,6 +5505,36 @@ mod tests {
         assert_eq!(types_of("local a = -#t", "a"), ["number"]);
         assert_eq!(types_of("local a = 2 ^ 3", "a"), ["number"]);
         assert_eq!(types_of("local a = (1 .. 2)", "a"), ["string"]);
+    }
+
+    #[test]
+    fn operators_on_values_they_cant_take() {
+        let warnings = |source: &str| -> Vec<String> { analyse(source).diagnostics.iter().map(|d| d.message.clone()).collect() };
+        assert_eq!(warnings("local b = true local n = b + 1"), ["Can't do arithmetic on a boolean"]);
+        assert_eq!(warnings("local f = function() end local n = 2 * f"), ["Can't do arithmetic on a function"]);
+        assert_eq!(warnings("local b = 1 > 2 local n = -b"), ["Can't do arithmetic on a boolean"]);
+        assert_eq!(warnings("local b = false local s = 'x' .. b"), ["Can't concatenate a boolean"]);
+        assert_eq!(warnings("local n = 5 local l = #n"), ["Can't get the length of a number"]);
+        assert_eq!(warnings("local a, b = 1, 'x' local c = a < b"), ["Can't compare a number with a string"]);
+        assert_eq!(warnings("local t = {} local c = t >= 1"), ["Can't compare a table with a number"]);
+        assert_eq!(warnings("local c = true < false"), ["Can't compare a boolean with a boolean"]);
+        // One report for an expression, though both sides are wrong
+        assert_eq!(warnings("local b = true local n = b + b"), ["Can't do arithmetic on a boolean"]);
+        // Perhaps nil as well: nil raises an error too
+        assert_eq!(warnings("local b = x and true or nil local n = b + 1"), ["Can't do arithmetic on a boolean"]);
+        // Numbers, strings that may be numbers, and tables with metamethods
+        assert!(warnings("local n = 1 + '2' .. 3 local m = -'4'").is_empty());
+        assert!(warnings("local t = setmetatable({}, {}) local n = t + 1 local s = t .. 'x' local u = -t").is_empty());
+        assert!(warnings("local s = 'ab' local t = {} local n = #s + #t").is_empty());
+        assert!(warnings("local c = 1 < 2 or 'a' <= 'b' local t = {} local d = t < t").is_empty());
+        // Not when it may be something that works, or isn't known
+        assert!(warnings("local b = x and true or 1 local n = b + 1 local c = b < 2").is_empty());
+        assert!(warnings("local n = x + 1 local c = y < 'a' local l = #z").is_empty());
+        // Nor nil alone, nor a check that rules out what fails
+        assert!(warnings("local v local n = v + 1 local s = v .. 'x'").is_empty());
+        assert!(warnings("local v = x and 1 or 'a' if type(v) == 'number' then local c = v < 2 end").is_empty());
+        // `==` never raises an error
+        assert!(warnings("local c = 1 == 'a' local d = true ~= {}").is_empty());
     }
 
     #[test]
