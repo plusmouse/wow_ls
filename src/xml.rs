@@ -302,6 +302,40 @@ fn node_of(object: &Object, kind: &dyn Fn(&str) -> Option<(String, bool)>, globa
     node(object, &kind, &mut |path: &str| global(path))
 }
 
+/// Where in `text` (an XML file, called `file` in the sites) each template
+/// and named frame `objects` define is, and each object inside them with a
+/// `parentKey`: `template:T`, `template:T.Key`, `Frame`, `Frame.Key`, each
+/// as `file:line`
+pub fn sites(objects: &[Object], file: &str, text: &str) -> Vec<(String, String)> {
+    let start = start(text);
+    let line = |object: &Object| text[..(start + object.range.start).min(text.len())].matches('\n').count() + 1;
+    fn children(object: &Object, path: &str, line: &dyn Fn(&Object) -> usize, file: &str, sites: &mut Vec<(String, String)>) {
+        for child in &object.children {
+            let Some(key) = &child.parent_key else { continue };
+            let path = format!("{path}.{key}");
+            sites.push((path.clone(), format!("{file}:{}", line(child))));
+            children(child, &path, line, file, sites);
+        }
+    }
+    let mut sites = Vec::new();
+    for object in objects {
+        if object.is_virtual || object.intrinsic {
+            let Some(name) = &object.name else { continue };
+            let path = format!("template:{name}");
+            sites.push((path.clone(), format!("{file}:{}", line(object))));
+            children(object, &path, &line, file, &mut sites);
+            continue
+        }
+        let mut frames = Vec::new();
+        global_frames(object, None, &mut frames);
+        for (name, frame) in &frames {
+            sites.push((name.clone(), format!("{file}:{}", line(frame))));
+            children(frame, name, &line, file, &mut sites);
+        }
+    }
+    sites
+}
+
 /// Each named frame among `object` and those inside it, by its name with
 /// `$parent` replaced by the name of the nearest named object holding it
 pub fn global_frames(object: &Object, parent: Option<&str>, frames: &mut Vec<(String, Object)>) {
@@ -398,6 +432,19 @@ mod tests {
         let error = parse(text).unwrap_err();
         // At `</Ui>`, counting from the start of the file
         assert_eq!(&text[error_offset(text, &error)..], "</Ui>");
+    }
+
+    #[test]
+    fn sites_of_templates_and_frames() {
+        let text = "\n<Ui>\n<Frame name=\"T\" virtual=\"true\">\n  <Frames><Button parentKey=\"Close\"/></Frames>\n</Frame>\n<Frame name=\"Named\">\n  <Frames><Frame name=\"$parentInner\" parentKey=\"Inner\"/></Frames>\n</Frame>\n</Ui>";
+        let document = parse(text).unwrap();
+        let objects = objects(&document, &|tag: &str| ["Frame", "Button"].contains(&tag));
+        let site = |key: &str, line: u32| (key.to_string(), format!("F.xml:{line}"));
+        assert_eq!(sites(&objects, "F.xml", text), [
+            site("template:T", 3), site("template:T.Close", 4),
+            // A named frame, its child by key, and by its own name
+            site("Named", 6), site("Named.Inner", 7), site("NamedInner", 7),
+        ]);
     }
 
     #[test]

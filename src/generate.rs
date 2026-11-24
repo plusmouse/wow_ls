@@ -91,6 +91,9 @@ struct Report {
 }
 
 pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Result<(), String> {
+    // Absolute, as the paths of the files read are
+    let source = &project::normalise(source);
+    let source = source.as_path();
     let addons_directory = source.join("Interface/AddOns");
     let definitions = Arc::new(Definitions::load_directory_except(definitions_directory, out.file_name())?);
     let xsd_path = addons_directory.join("Blizzard_SharedXML/UI.xsd");
@@ -129,9 +132,14 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
     let mut report = Report::default();
     let mut templates: BTreeMap<String, Object> = BTreeMap::new();
     let mut frames: BTreeMap<String, Object> = BTreeMap::new();
+    // Where each thing is, by name, within wow-ui-source, for go to definition
+    let mut sites: BTreeMap<String, String> = BTreeMap::new();
     for (path, text) in &texts {
         let document = xml::parse(text).map_err(|e| format!("{}: {e}", path.display()))?;
-        for object in xml::objects(&document, &|tag: &str| kinds.of(tag).is_some()) {
+        let objects = xml::objects(&document, &|tag: &str| kinds.of(tag).is_some());
+        let file = path.strip_prefix(source).unwrap_or(path).display().to_string();
+        sites.extend(xml::sites(&objects, &file, text));
+        for object in objects {
             let Some(name) = object.name.clone() else { continue };
             if object.is_virtual || object.intrinsic {
                 if templates.insert(name.clone(), object.clone()).is_some() {
@@ -157,7 +165,7 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
     }
     eprintln!("analysed in {:?}", started.elapsed());
 
-    let generator = Generator { kinds: &kinds, layer: &layer, templates: &templates };
+    let generator = Generator { kinds: &kinds, layer: &layer, templates: &templates, source, texts: Default::default() };
     let mut mixin_names: Vec<String> = Vec::new();
     for object in templates.values().chain(frames.values()) {
         collect_mixins(object, &mut mixin_names);
@@ -184,7 +192,10 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
         .collect();
     names.sort();
     for name in names {
-        match generator.member(layer.globals[name], &mut Vec::new()) {
+        if let Some(site) = layer.global_sites.get(name).and_then(|found| found.first()).and_then(|site| generator.place(site)) {
+            sites.entry(name.clone()).or_insert(site);
+        }
+        match generator.member(layer.globals[name], name, &mut sites, &mut Vec::new()) {
             Member::Function(signature) => { functions.insert(name.clone(), signature); }
             Member::Table(table) => { tables.insert(name.clone(), table); }
             Member::Value(ty) => { values.insert(name.clone(), json!(ty)); }
@@ -243,6 +254,24 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
         ("functions", &functions, Style::Line), ("tables", &tables, Style::Tree), ("values", &values, Style::Line),
     ]);
     std::fs::write(out, text).map_err(|e| format!("{}: {e}", out.display()))?;
+    // Beside it: where each thing is, and which checkout that's in
+    let sites_directory = out.parent().unwrap_or(Path::new(".")).join("sites");
+    std::fs::create_dir_all(&sites_directory).map_err(|e| format!("{}: {e}", sites_directory.display()))?;
+    // By file, a line per file, each with the line of each thing in it
+    let count = sites.len();
+    let mut by_file: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
+    for (name, site) in sites {
+        let Some((file, line)) = site.rsplit_once(':') else { continue };
+        let Ok(line) = line.parse::<u32>() else { continue };
+        by_file.entry(file.to_string()).or_default().insert(name, json!(line));
+    }
+    let by_file: Map<String, Value> = by_file.into_iter().map(|(file, names)| (file, Value::Object(names))).collect();
+    let sites_text = layout(&format!("by `wow_ls generate-templates` from wow-ui-source {}: the line each global, member, template and frame is on, by the file within it, for go to definition", version.trim()), &[("files", &by_file, Style::Line)]);
+    let sites_path = sites_directory.join("blizzard.json");
+    std::fs::write(&sites_path, sites_text).map_err(|e| format!("{}: {e}", sites_path.display()))?;
+    let source_path = out.parent().unwrap_or(Path::new(".")).join(crate::definitions::SOURCE_PATH_FILE);
+    std::fs::write(&source_path, source.display().to_string()).map_err(|e| format!("{}: {e}", source_path.display()))?;
+    eprintln!("{count} sites");
 
     eprintln!("{} templates, {} frames, {} intrinsics, {} of {} mixins found", templates.len(), frames.len(), types.len(), mixins.len(), mixin_names.len());
     eprintln!("globals: {} functions, {} tables, {} values", functions.len(), tables.len(), values.len());
@@ -418,6 +447,10 @@ struct Generator<'a> {
     kinds: &'a Kinds<'a>,
     layer: &'a Layer,
     templates: &'a BTreeMap<String, Object>,
+    /// wow-ui-source, which sites are given within
+    source: &'a Path,
+    /// Files' text, read once each, for the lines sites are on
+    texts: std::cell::RefCell<HashMap<String, String>>,
 }
 
 impl Generator<'_> {
@@ -486,7 +519,7 @@ impl Generator<'_> {
     /// signature, a table made in Blizzard's Lua with its members, or a value
     /// of a type. `within` are the tables it's inside, which a table holding
     /// itself is just a `table` in
-    fn member(&self, ty: Type, within: &mut Vec<crate::types::TableId>) -> Member {
+    fn member(&self, ty: Type, path: &str, sites: &mut BTreeMap<String, String>, within: &mut Vec<crate::types::TableId>) -> Member {
         let only = |set: TypeSet| ty.set.without(set) == TypeSet::NEVER && ty.set != TypeSet::NEVER;
         if only(TypeSet::FUNCTION) {
             let info = match ty.function {
@@ -512,7 +545,11 @@ impl Generator<'_> {
         names.sort();
         let (mut functions, mut tables, mut values) = (Map::new(), Map::new(), Map::new());
         for name in names {
-            match self.member(fields[name], within) {
+            let member = format!("{path}.{name}");
+            if let Some(site) = self.field_site(table, name, 0).and_then(|site| self.place(&site)) {
+                sites.insert(member.clone(), site);
+            }
+            match self.member(fields[name], &member, sites, within) {
                 Member::Function(signature) => { functions.insert(name.clone(), signature); }
                 Member::Table(table) => { tables.insert(name.clone(), table); }
                 Member::Value(ty) => { values.insert(name.clone(), json!(ty)); }
@@ -530,6 +567,32 @@ impl Generator<'_> {
             }
         }
         Member::Table(Value::Object(members))
+    }
+
+    /// Where field `name` of a table Blizzard's Lua makes is set: on it, or
+    /// on a mixin of it (the last first)
+    fn field_site(&self, table: crate::types::TableId, name: &str, depth: usize) -> Option<crate::types::Site> {
+        if let Some(site) = self.layer.field_sites.get(&table).and_then(|fields| fields.get(name)).and_then(|found| found.first()) {
+            return Some(*site)
+        }
+        if depth > 16 {
+            return None
+        }
+        self.layer.mixins.get(&table).into_iter().flatten().rev()
+            .find_map(|mixin| self.field_site(mixin.named.identity()?, name, depth + 1))
+    }
+
+    /// A site as `path:line`, with the path within wow-ui-source
+    fn place(&self, site: &crate::types::Site) -> Option<String> {
+        let file = crate::types::layer_file_key(site.file)?;
+        let relative = Path::new(&file).strip_prefix(self.source).ok()?.display().to_string();
+        let mut texts = self.texts.borrow_mut();
+        if !texts.contains_key(&file) {
+            texts.insert(file.clone(), xml::read(Path::new(&file)).unwrap_or_default());
+        }
+        let text = &texts[&file];
+        let offset = usize::from(site.range.start()).min(text.len());
+        Some(format!("{relative}:{}", text[..offset].matches('\n').count() + 1))
     }
 
     fn signature(&self, info: &FunctionInfo) -> Value {

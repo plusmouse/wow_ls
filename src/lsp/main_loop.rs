@@ -52,6 +52,12 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
         .and_then(|o| o.get("definitionsPath"))
         .and_then(|p| p.as_str())
         .map(PathBuf::from);
+    // And at their wow-ui-source checkout, for go to definition into
+    // Blizzard's code: `"wowUiSourcePath": "..."`
+    let ui_source = init_params.initialization_options.as_ref()
+        .and_then(|o| o.get("wowUiSourcePath"))
+        .and_then(|p| p.as_str())
+        .map(PathBuf::from);
     // Where to look for addons (`.toc` files): every workspace folder, or the
     // root for editors without them
     #[allow(deprecated)]
@@ -81,7 +87,7 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
 
     connection.initialize_finish(id, initialize_data)?;
 
-    main_loop(connection, definitions_path, roots)
+    main_loop(connection, definitions_path, ui_source, roots)
 }
 
 /// What's known about the workspace's addons, built when first needed
@@ -306,7 +312,14 @@ impl Analysed {
     }
 }
 
-fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: Vec<PathBuf>) -> Result<(), Box<dyn Error + Sync + Send>> {
+fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_source: Option<PathBuf>, roots: Vec<PathBuf>) -> Result<(), Box<dyn Error + Sync + Send>> {
+    let load_definitions = || {
+        let mut definitions = definitions::load(definitions_path.as_deref());
+        if ui_source.is_some() {
+            definitions.source_root = ui_source.clone();
+        }
+        Arc::new(definitions)
+    };
     // Loaded the first time types are needed, not at startup
     let mut loaded_definitions: Option<Arc<Definitions>> = None;
     let mut language: HashMap<String, String> = HashMap::new();
@@ -340,7 +353,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: V
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 if !owed.is_empty() {
                     let definitions = loaded_definitions
-                        .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
+                        .get_or_insert_with(load_definitions)
                         .clone();
                     while let Some(path) = owed.first().cloned() {
                         owed.remove(0);
@@ -407,7 +420,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: V
                                 }
                             }
                             let definitions = loaded_definitions
-                                .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
+                                .get_or_insert_with(load_definitions)
                                 .clone();
                             let uri = params.text_document_position_params.text_document.uri.to_string();
                             let path = project::uri_to_path(&uri);
@@ -442,7 +455,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: V
                             let result = match text.get(&uri) {
                                 Some(s) => {
                                     let definitions = loaded_definitions
-                                        .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
+                                        .get_or_insert_with(load_definitions)
                                         .clone();
                                     Some(complete(&mut workspace, &uri, s, position, &definitions))
                                 }
@@ -459,7 +472,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: V
                             let result = match text.get(&uri.to_string()) {
                                 Some(s) => {
                                     let definitions = loaded_definitions
-                                        .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
+                                        .get_or_insert_with(load_definitions)
                                         .clone();
                                     go_to_definition(&mut workspace, &uri, s, position, &definitions)
                                 }
@@ -596,6 +609,12 @@ fn go_to_definition(workspace: &mut Workspace, uri: &lsp_types::Uri, s: &str, po
     let root = SyntaxNode::new_root(syntax::Generator::new(s).process_all());
     let path = project::uri_to_path(uri.as_str());
     let (analysed, file) = workspace.analysis(path.as_deref(), &root, definitions);
+    // Defined in Blizzard's code, or an addon's XML: there, at the start of its line
+    if let Some((target, line)) = analysed.analysis().external_definition(file, offset) {
+        let target_uri: lsp_types::Uri = project::path_to_uri(&target).parse().ok()?;
+        let at = Position { line: line.saturating_sub(1), character: 0 };
+        return Some(GotoDefinitionResponse::Scalar(Location { uri: target_uri, range: lsp_types::Range { start: at, end: at } }))
+    }
     let locations: Vec<Location> = analysed.analysis().definition(file, offset).into_iter().filter_map(|site| {
         // The addon's own files, then its dependencies', numbered by path
         let own = match &analysed {

@@ -10,3 +10,4 @@ target/
 /out/
 /dump.lsif
 .envrc
+/definitions/sites/wow-ui-source-path

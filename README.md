@@ -20,10 +20,18 @@ from the code itself, with no annotations needed.
   - every assignment to a global
   - every assignment to a field on the table it's reached through, or on
     the mixin or `__index` table it comes from. `t["x"]` and `{ ["x"] = v }`
-    count as field `x`
+    count as field `x`. A field of a `CopyTable` copy goes to the original's,
+    and a method of a frame made from an XML template to its Lua mixin's
+  - otherwise, where an XML file defines it: a named frame, or a template's
+    `parentKey` child, in the addon's XML or Blizzard's
+  - otherwise, where Blizzard's Lua defines it (`MenuUtil.CreateContextMenu`,
+    a mixin's method), in wow-ui-source
 
   This also works across the addon's files and into its dependencies.
-  Members of WoW's own API have no source to go to.
+  Members of WoW's own API (`C_Container`, a frame's `SetPoint`) have no
+  source to go to. Blizzard's code is looked for in the wow-ui-source checkout
+  the `wowUiSourcePath` initialization option or `WOW_UI_SOURCE` environment
+  variable names, else the one `generate-templates` was run on
 - **Diagnostics**:
   - syntax errors and Lua's compile-time errors
   - calls to methods a WoW object doesn't have

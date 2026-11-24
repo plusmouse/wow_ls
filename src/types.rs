@@ -779,6 +779,8 @@ pub struct FieldReference {
     /// The table or object made in the files that the field is on, when it's
     /// known which: what go to definition looks for its assignments on
     pub table: Option<TableId>,
+    /// What the field is on, for go to definition into Blizzard's code
+    pub base: NamedRef,
     pub write: bool,
     /// A read that's directly called: `f` in `t.f(x)` or `t:f(x)`
     pub callee: bool,
@@ -950,6 +952,8 @@ pub struct Layer {
     pub metatables: HashMap<TableId, Type>,
     pub mixins: HashMap<TableId, Vec<Type>>,
     pub mixed_into: HashMap<TableId, (NamedId, bool)>,
+    /// The table each table `CopyTable` made is a copy of
+    pub copies: HashMap<TableId, TableId>,
     pub parents: HashMap<TableId, Type>,
     pub pool_objects: HashMap<TableId, Type>,
     pub table_names: HashMap<TableId, String>,
@@ -1031,6 +1035,9 @@ impl Layer {
         for (at, &target) in &analysis.mixed_into {
             own.mixed_into.insert(renumber(*at, &file), target);
         }
+        for (copy, source) in &analysis.copies {
+            own.copies.insert(renumber(*copy, &file), renumber(*source, &file));
+        }
         for (at, &ty) in &analysis.parents {
             *own.parents.entry(renumber(*at, &file)).or_default() |= renumber_type(ty, &file);
         }
@@ -1095,6 +1102,9 @@ impl Layer {
         }
         for (at, &target) in &other.mixed_into {
             self.mixed_into.entry(*at).or_insert(target);
+        }
+        for (copy, source) in &other.copies {
+            self.copies.entry(*copy).or_insert(*source);
         }
         for (at, &ty) in &other.parents {
             *self.parents.entry(*at).or_default() |= ty;
@@ -1244,6 +1254,8 @@ pub struct Analysis {
     /// and whether they may have members beyond that type's. What `self` is in
     /// the table's methods
     pub mixed_into: HashMap<TableId, (NamedId, bool)>,
+    /// The table each table `CopyTable` made is a copy of
+    pub copies: HashMap<TableId, TableId>,
     /// The name each table made in the files was first stored under (a
     /// variable or a field path like `ns.ButtonMixin`), to show its mixins by
     pub table_names: HashMap<TableId, String>,
@@ -1734,10 +1746,66 @@ impl Analysis {
         }
         let Some(field) = self.field_reference_at(file, offset) else { return Vec::new() };
         let mut sites = self.field_sites(field.table, field.name());
+        // On an object made from an XML template: where the template's Lua
+        // mixins (the addon's tables) have it
+        if sites.is_empty() {
+            let objects = match field.base {
+                NamedRef::Several(_) => field.base.alternatives(),
+                base => vec![base],
+            };
+            for id in objects.iter().filter_map(|object| object.named_id()) {
+                for mixin in self.definitions.lua_mixins(id) {
+                    if let Some(at) = self.lua_mixins.get(mixin).and_then(|ty| ty.named.identity()) {
+                        add_sites(&mut sites, &self.field_sites(Some(at), field.name()));
+                    }
+                }
+                if !sites.is_empty() {
+                    break
+                }
+            }
+        }
         if let (true, FunctionRef::One(id)) = (sites.is_empty(), field.types.function) {
             sites.push(Site { file: id.file, range: TextRange::empty(id.offset) });
         }
         sites
+    }
+
+    /// Where what's at `offset` is defined outside the files and those they
+    /// depend on: in Blizzard's code, or an addon's XML. Only when they don't
+    /// define it, as a file and line
+    pub fn external_definition(&self, file: FileId, offset: TextSize) -> Option<(std::path::PathBuf, u32)> {
+        if !self.definition(file, offset).is_empty() {
+            return None
+        }
+        if let Some(r) = self.reference_at(file, offset) {
+            let binding = self.binding(r);
+            return (binding.kind == BindingKind::Global).then(|| self.definitions.global_site(&binding.name)).flatten()
+        }
+        let field = self.field_reference_at(file, offset)?;
+        let objects = match field.base {
+            NamedRef::Several(_) => field.base.alternatives(),
+            base => vec![base],
+        };
+        objects.into_iter().find_map(|object| self.external_member(object, field.name(), 0))
+    }
+
+    /// Where member `name` of `object` is defined in Blizzard's code or an
+    /// addon's XML: on its type, or a mixin or the original of a copy, for a
+    /// table made in the files
+    fn external_member(&self, object: NamedRef, name: &str, depth: usize) -> Option<(std::path::PathBuf, u32)> {
+        if depth > 16 {
+            return None
+        }
+        if let Some(site) = object.named_id().and_then(|id| self.definitions.member_site(id, name)) {
+            return Some(site)
+        }
+        let at = object.identity()?;
+        let mixins = self.mixins.get(&at).or_else(|| self.layer.mixins.get(&at));
+        let from_mixins = mixins.into_iter().flatten().rev().find_map(|mixin| self.external_member(mixin.named, name, depth + 1));
+        from_mixins.or_else(|| {
+            let source = self.copies.get(&at).or_else(|| self.layer.copies.get(&at))?;
+            self.external_member(NamedRef::Table(*source), name, depth + 1)
+        })
     }
 
     fn variable_sites(&self, binding: &Binding) -> Vec<Site> {
@@ -1765,6 +1833,14 @@ impl Analysis {
             None => self.layer.any_field_sites.get(name),
         };
         add_sites(&mut sites, layered.map_or(&[], Vec::as_slice));
+        // A field `CopyTable` gave a copy is where the original's is set
+        if sites.is_empty() {
+            if let Some(source) = holder.and_then(|at| self.copies.get(&at).or_else(|| self.layer.copies.get(&at))) {
+                if Some(*source) != table {
+                    return self.field_sites(Some(*source), name)
+                }
+            }
+        }
         sites
     }
 
@@ -1960,6 +2036,8 @@ struct Walker<'a> {
     mixins: HashMap<TableId, Vec<Type>>,
     /// What each table made in the files was mixed into on this walk
     mixed_into: HashMap<TableId, Vec<NamedRef>>,
+    /// The table each copy `CopyTable` made is of
+    copies: HashMap<TableId, TableId>,
     /// Pools made on this walk, and what they hold
     pool_objects: HashMap<TableId, Type>,
     /// Functions passed straight to a pool, which calls them only as it
@@ -2016,6 +2094,8 @@ enum Write {
     MixinsReplaced(TableId, Vec<Type>),
     MixinAdded(TableId, Type),
     MixedInto(TableId, NamedRef),
+    /// A table `CopyTable` made, and the table it's a copy of
+    CopiedFrom(TableId, TableId),
     PoolCallback(FunctionId),
     AssignedTo(FunctionId, BindingId),
     ParameterMixin(TableId, usize),
@@ -2282,6 +2362,7 @@ impl<'a> Walker<'a> {
             pool_objects: self.pool_objects,
             parents: self.parents,
             mixins: self.mixins,
+            copies: self.copies,
             diagnostics: self.diagnostics,
             bindings: self.bindings,
             references: self.references,
@@ -3038,7 +3119,7 @@ impl<'a> Walker<'a> {
     /// entry. `base` is what the field is on
     fn field_reference(&mut self, access: &SyntaxNode, name: &SyntaxToken, base: Type, types: Type, write: bool) {
         let table = base.named.identity();
-        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: crate::syntax::SyntaxNodePtr::new(access), token: name.green().to_owned(), types, table, write, callee: false, call_returns: None });
+        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: crate::syntax::SyntaxNodePtr::new(access), token: name.green().to_owned(), types, table, base: base.named, write, callee: false, call_returns: None });
     }
 
     /// The field read just recorded is the function being called
@@ -3183,6 +3264,9 @@ impl<'a> Walker<'a> {
                 if !recorded.contains(mixin) {
                     recorded.push(*mixin);
                 }
+            }
+            Write::CopiedFrom(copy, source) => {
+                self.copies.insert(*copy, *source);
             }
             Write::MixedInto(mixin, object) => {
                 let recorded = self.mixed_into.entry(*mixin).or_default();
@@ -4431,6 +4515,7 @@ impl<'a> Walker<'a> {
     /// `within` are the tables being copied, which a table holding one of
     /// them shares rather than copying forever
     fn copy_into(&mut self, from: TableId, to: TableId, shallow: bool, within: &mut Vec<TableId>) {
+        self.apply(Write::CopiedFrom(to, from));
         let Some(prior) = self.prior else { return };
         self.note(Read::Fields(from));
         let mut fields: Vec<(String, Type)> = Vec::new();
@@ -6772,7 +6857,7 @@ mod tests {
         let definitions = widgets();
         let document = crate::xml::parse(xml).unwrap();
         let objects = crate::xml::objects(&document, &|tag: &str| definitions.element(tag).is_some());
-        Arc::new(definitions.with_xml(&objects))
+        Arc::new(definitions.with_xml(&objects, crate::xml::sites(&objects, "/addon/Frames.xml", xml)))
     }
 
     const ADDON_XML: &str = r#"<Ui>
@@ -6818,6 +6903,26 @@ mod tests {
         assert!(warnings("CreateFrame('Frame', nil, nil, 'UnknownT'):Nope()").is_empty());
         // A kind of frame wow_ls doesn't know may have more methods
         assert!(warnings("CreateFrame('Frame', nil, nil, 'OddT'):Nope()").is_empty());
+    }
+
+    #[test]
+    fn definitions_in_addon_xml() {
+        let definitions = with_xml(ADDON_XML);
+        let line_of = |text: &str| ADDON_XML[..ADDON_XML.find(text).unwrap()].matches('\n').count() as u32 + 1;
+        let source = "AddonMixin = {}\nfunction AddonMixin:Extra() end\nlocal f = CreateFrame('Button', nil, nil, 'AddonT')\nprint(f.Glow, AddonFrame.Close)\nf:Extra()";
+        let analysis = analyse_with(source, &definitions);
+        let at = |text: &str| TextSize::from((source.find(text).unwrap() + 1) as u32);
+        // A template's child, and a named frame's, in the XML
+        assert_eq!(analysis.external_definition(FileId(0), at("Glow")), Some(("/addon/Frames.xml".into(), line_of("<Texture parentKey=\"Glow\""))));
+        assert_eq!(analysis.external_definition(FileId(0), at("Close")), Some(("/addon/Frames.xml".into(), line_of("<Button name=\"$parentClose\""))));
+        assert_eq!(analysis.external_definition(FileId(0), at("AddonFrame")), Some(("/addon/Frames.xml".into(), line_of("<Frame name=\"AddonFrame\""))));
+        // A method from the template's Lua mixin, in the files
+        let extra = source.rfind("Extra").unwrap() + 1;
+        let sites = analysis.definition(FileId(0), TextSize::from(extra as u32));
+        assert_eq!(sites.iter().map(|s| &source[usize::from(s.range.start())..][..5]).collect::<Vec<_>>(), ["Extra"]);
+        assert!(usize::from(sites[0].range.start()) < source.find("local f").unwrap());
+        // Defined in the files: not outside them
+        assert_eq!(analysis.external_definition(FileId(0), TextSize::from(extra as u32)), None);
     }
 
     #[test]
@@ -6905,6 +7010,10 @@ mod tests {
     /// as an addon), as the file and the text from each site to the end of
     /// its line
     fn definitions_at(sources: &[&str]) -> Vec<(u32, String)> {
+        definitions_with(sources, &library())
+    }
+
+    fn definitions_with(sources: &[&str], definitions: &Arc<Definitions>) -> Vec<(u32, String)> {
         let (file, offset) = sources.iter().enumerate()
             .find_map(|(i, s)| s.find('@').map(|at| (i, at)))
             .expect("a cursor");
@@ -6912,7 +7021,7 @@ mod tests {
         let files: Vec<SourceFile> = sources.iter()
             .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
             .collect();
-        let analysis = Analysis::analyse(&files, &library());
+        let analysis = Analysis::analyse(&files, definitions);
         analysis.definition(FileId(file as u32), TextSize::from(offset as u32)).iter().map(|site| {
             let rest = &sources[site.file.0 as usize][usize::from(site.range.start())..];
             (site.file.0, rest.lines().next().unwrap_or_default().to_string())
@@ -6938,6 +7047,18 @@ mod tests {
         // `self` is declared by the method's name
         assert_eq!(definitions_at(&["local M = {}\nfunction M.Inner:Go()\nprint(@self) end"]), [at(0, "Go()")]);
         assert!(definitions_at(&["local M = {}\nfunction M.Go()\nprint(@self) end"]).is_empty());
+    }
+
+    #[test]
+    fn definitions_of_copied_fields() {
+        // Where the original's field is set, however deep
+        let source = "local t = { n = 1, sub = { s = 'x' } }\nlocal c = CopyTable(t)\nprint(c.@n)";
+        assert_eq!(definitions_with(&[source], &widgets()), [at(0, "n = 1, sub = { s = 'x' } }")]);
+        let source = "local t = { n = 1, sub = { s = 'x' } }\nlocal c = CopyTable(t)\nprint(c.sub.@s)";
+        assert_eq!(definitions_with(&[source], &widgets()), [at(0, "s = 'x' } }")]);
+        // Set on the copy itself: there
+        let source = "local t = { n = 1 }\nlocal c = CopyTable(t)\nc.n = 2\nprint(c.@n)";
+        assert_eq!(definitions_with(&[source], &widgets()), [at(0, "n = 2")]);
     }
 
     #[test]

@@ -47,6 +47,14 @@ filename order; a later file's entry for a name replaces an earlier one.
   (`Frame`) rather than `table`, or numbers with a name, for enums (`"base":
   "number"`). Any file can use a type declared in any other.
 
+`sites/blizzard.json`, also written by `generate-templates`, is where in
+wow-ui-source each Blizzard global, member, template and frame is, for go to
+definition: `{"files": {path: {name: line}}}`, with members named by their
+path (`MenuUtil.CreateContextMenu`) and XML templates as `template:Name`
+(`template:Name.Key` for a `parentKey` child). It's read the first time it's
+needed. `sites/wow-ui-source-path`, which isn't in the repository, holds where
+the checkout it was generated from is.
+
 wow_ls looks for this directory in order: the `definitionsPath` initialization
 option from the editor, the `WOW_LS_DEFINITIONS` environment variable, then a
 `definitions` directory beside the executable or up to three levels above it.

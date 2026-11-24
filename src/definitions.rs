@@ -147,6 +147,22 @@ pub struct Definitions {
     /// of the templates it inherits) that aren't in `mixins`: Lua tables an
     /// addon defines, whose methods it has too, as far as wow_ls knows
     lua_mixins: HashMap<NamedId, Vec<String>>,
+    /// The mixins each type lists or its XML gives it, by name, the last
+    /// winning, for finding where a method it has from one is defined
+    type_mixins: HashMap<NamedId, Vec<String>>,
+    /// How sites name the members of types with no name of their own there:
+    /// an XML object's children (`template:T.Key`) and named frames
+    type_paths: HashMap<NamedId, String>,
+    /// Where things in the addons' own XML are, by the names `sites` uses,
+    /// with the file's full path
+    xml_sites: HashMap<String, String>,
+    /// Where things in Blizzard's code are, by name (`MenuUtil.CreateContextMenu`,
+    /// `template:ButtonFrameTemplate.CloseButton`), as `path:line` within
+    /// wow-ui-source. Read from `sites_file` the first time it's needed
+    sites: std::sync::OnceLock<HashMap<String, String>>,
+    sites_file: Option<PathBuf>,
+    /// The wow-ui-source checkout `sites` are in
+    pub source_root: Option<PathBuf>,
     /// Each object an XML file defines that has a mixin not in `mixins`: the
     /// mixin's name, and the object's type, which `self` is in its methods
     xml_mixins: Vec<(String, NamedId)>,
@@ -310,9 +326,16 @@ impl Definitions {
         self.type_names.get(name).copied()
     }
 
-    /// Loads every `.json` file in `directory`
+    /// Every `.json` file in `directory`, with where Blizzard's code defines
+    /// things from its `sites/blizzard.json`, in the wow-ui-source checkout
+    /// `WOW_UI_SOURCE` names, else the one it was generated from
     pub fn load_directory(directory: &Path) -> Result<Definitions, String> {
-        Definitions::load_directory_except(directory, None)
+        let mut definitions = Definitions::load_directory_except(directory, None)?;
+        let sites = directory.join("sites/blizzard.json");
+        definitions.sites_file = sites.is_file().then_some(sites);
+        definitions.source_root = std::env::var_os("WOW_UI_SOURCE").map(PathBuf::from)
+            .or_else(|| Some(PathBuf::from(std::fs::read_to_string(directory.join(SOURCE_PATH_FILE)).ok()?.trim())));
+        Ok(definitions)
     }
 
     /// Loads every `.json` file in `directory` but the one called `except`
@@ -391,8 +414,11 @@ impl Definitions {
     /// all in one namespace as they are in the game. A template replaces one
     /// of the same name loaded before it; a frame doesn't replace a global
     /// defined otherwise
-    pub fn with_xml(&self, objects: &[crate::xml::Object]) -> Definitions {
+    /// `sites` are where in their files the objects and their parts are (see
+    /// `xml::sites`)
+    pub fn with_xml(&self, objects: &[crate::xml::Object], sites: Vec<(String, String)>) -> Definitions {
         let mut definitions = self.clone();
+        definitions.xml_sites.extend(sites);
         // An intrinsic is an element of its own, making its own type
         for object in objects.iter().filter(|o| o.intrinsic) {
             if let Some(name) = &object.name {
@@ -421,6 +447,64 @@ impl Definitions {
         }
         definitions.add_objects(&templates, &frames);
         definitions
+    }
+
+    /// How sites name type `id`'s members: a namespace table's path, a
+    /// template's `template:` name, or the path given an XML object or frame
+    fn type_path(&self, id: NamedId) -> Option<String> {
+        let named = self.types.get(id as usize)?;
+        if named.namespace {
+            return Some(named.name.clone())
+        }
+        if self.templates.get(&named.name).is_some_and(|&(template, _)| template == id) {
+            return Some(format!("template:{}", named.name))
+        }
+        self.type_paths.get(&id).cloned()
+    }
+
+    /// Where a thing sites name `key` is: a file (in wow-ui-source when
+    /// relative) and line
+    fn site(&self, key: &str) -> Option<(PathBuf, u32)> {
+        let text = match self.xml_sites.get(key) {
+            Some(text) => text,
+            None => self.sites.get_or_init(|| read_sites(self.sites_file.as_deref())).get(key)?,
+        };
+        let (path, line) = text.rsplit_once(':')?;
+        let path = PathBuf::from(path);
+        let path = match path.is_absolute() {
+            true => path,
+            false => self.source_root.as_ref()?.join(path),
+        };
+        Some((path, line.parse().ok()?))
+    }
+
+    /// Where global `name` is defined, if Blizzard's code or an addon's XML
+    /// defines it
+    pub fn global_site(&self, name: &str) -> Option<(PathBuf, u32)> {
+        self.site(name)
+    }
+
+    /// Where member `name` of a value of type `id` is defined, if Blizzard's
+    /// code or an addon's XML defines it: on the type, one of its mixins
+    /// (the last first), or what it inherits
+    pub fn member_site(&self, id: NamedId, name: &str) -> Option<(PathBuf, u32)> {
+        self.member_site_within(id, name, 0)
+    }
+
+    fn member_site_within(&self, id: NamedId, name: &str, depth: usize) -> Option<(PathBuf, u32)> {
+        if depth > 32 {
+            return None
+        }
+        if let Some(site) = self.type_path(id).and_then(|path| self.site(&format!("{path}.{name}"))) {
+            return Some(site)
+        }
+        for mixin in self.type_mixins.get(&id).into_iter().flatten().rev() {
+            if self.mixins.get(mixin).is_some_and(|methods| methods.contains_key(name)) {
+                return self.site(&format!("{mixin}.{name}"))
+            }
+        }
+        let named = self.types.get(id as usize)?;
+        named.inherits.iter().find_map(|&parent| self.member_site_within(parent, name, depth + 1))
     }
 
     /// The type XML element `tag` makes, and whether it may have methods beyond it
@@ -483,7 +567,7 @@ impl Definitions {
             if self.globals.contains_key(name) {
                 continue
             }
-            if let Some((id, _)) = self.object_node(node, None, None, &mut building) {
+            if let Some((id, _)) = self.object_node_at(node, None, None, Some(name), &mut building) {
                 self.globals.insert(name.clone(), Type::named(id, TypeSet::TABLE));
             }
         }
@@ -516,7 +600,7 @@ impl Definitions {
         }
         // One that inherits itself, through others, isn't known
         building.complete.insert(id, false);
-        let (_, complete) = self.object_node(&node, Some(id), None, building)?;
+        let (_, complete) = self.object_node_at(&node, Some(id), None, Some(&format!("template:{name}")), building)?;
         building.complete.insert(id, complete);
         if let Some(element) = node.get("type").and_then(Value::as_str).and_then(|t| self.named_type_id(t)) {
             building.elements.insert(name.to_string(), element);
@@ -531,6 +615,12 @@ impl Definitions {
     /// of object that isn't a known type, or something it inherits or mixes in
     /// isn't known
     fn object_node(&mut self, node: &Value, into: Option<NamedId>, parent: Option<NamedId>, building: &mut Templates) -> Option<(NamedId, bool)> {
+        self.object_node_at(node, into, parent, None, building)
+    }
+
+    /// `object_node` for an object sites name `path` (`template:T.Key`, or a
+    /// frame's name), for finding where its members are
+    fn object_node_at(&mut self, node: &Value, into: Option<NamedId>, parent: Option<NamedId>, path: Option<&str>, building: &mut Templates) -> Option<(NamedId, bool)> {
         let strings = |key: &str| -> Vec<String> {
             node.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
         };
@@ -579,7 +669,8 @@ impl Definitions {
             fields.insert(key.clone(), ty);
         }
         for (key, child) in node.get("children").and_then(Value::as_object).into_iter().flatten() {
-            let ty = match self.object_node(child, None, Some(id), building) {
+            let child_path = path.map(|path| format!("{path}.{key}"));
+            let ty = match self.object_node_at(child, None, Some(id), child_path.as_deref(), building) {
                 Some((id, _)) => Type::named(id, TypeSet::TABLE),
                 None => Type::UNKNOWN,
             };
@@ -614,6 +705,16 @@ impl Definitions {
                 }
             }
             complete &= !self.open_mixins.contains(mixin);
+        }
+        if into.is_none() {
+            if let Some(path) = path {
+                self.type_paths.insert(id, path.to_string());
+            }
+        }
+        if mixins.is_empty() {
+            self.type_mixins.remove(&id);
+        } else {
+            self.type_mixins.insert(id, mixins.clone());
         }
         let named = &mut self.types[id as usize];
         named.fields = fields;
@@ -773,6 +874,10 @@ impl Definitions {
                 }
             }
             let open = mixins.iter().any(|mixin| self.open_mixins.contains(mixin));
+            if !mixins.is_empty() {
+                // The first listed wins here, so it's looked in last
+                self.type_mixins.insert(id, mixins.iter().rev().cloned().collect());
+            }
             let named = &mut self.types[id as usize];
             named.inherits = parents;
             named.has_methods = !open;
@@ -925,6 +1030,28 @@ fn parse_builtin_type(name: &str) -> Option<TypeSet> {
 /// settings), then `$WOW_LS_DEFINITIONS`, then a `definitions` directory beside
 /// the executable or up to three directories above it (which finds the repo's
 /// copy from `target/debug`)
+/// The file in the definitions directory naming the wow-ui-source checkout
+/// `sites` are in, as `generate-templates` was given it. Not in the
+/// repository, as it's where it is on one machine
+pub const SOURCE_PATH_FILE: &str = "sites/wow-ui-source-path";
+
+/// What a sites file holds, `{"files": {path: {name: line}}}`, as `path:line`
+/// by name
+fn read_sites(file: Option<&Path>) -> HashMap<String, String> {
+    let Some(file) = file else { return HashMap::default() };
+    let parsed: Option<Value> = std::fs::read_to_string(file).ok().and_then(|text| serde_json::from_str(&text).ok());
+    let files = parsed.as_ref().and_then(|root| root.get("files")).and_then(Value::as_object);
+    let mut sites = HashMap::default();
+    for (path, names) in files.into_iter().flatten() {
+        for (name, line) in names.as_object().into_iter().flatten() {
+            if let Some(line) = line.as_u64() {
+                sites.insert(name.clone(), format!("{path}:{line}"));
+            }
+        }
+    }
+    sites
+}
+
 pub fn locate(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = explicit {
         return Some(path.to_path_buf());
@@ -1149,6 +1276,36 @@ mod tests {
     }
 
     /// The shipped definitions must load, or the LSP silently loses them
+    #[test]
+    fn sites_of_blizzard_code() {
+        let directory = std::env::temp_dir().join(format!("wow_ls_sites_{}", std::process::id()));
+        std::fs::create_dir_all(directory.join("sites")).unwrap();
+        std::fs::write(directory.join("lua.json"), r#"{
+            "types": {"Frame": {"base": "table", "method_tables": ["FrameAPI"]}},
+            "method_tables": {"FrameAPI": {"functions": {"Show": {}}}},
+            "mixins": {"TitleMixin": {"functions": {"SetTitle": {}}}},
+            "elements": {"Frame": "Frame"},
+            "templates": {"PanelT": {"type": "Frame", "mixins": ["TitleMixin"]}, "SubT": {"type": "Frame", "inherits": ["PanelT"]}},
+            "tables": {"MenuUtil": {"functions": {"CreateContextMenu": {}}}}
+        }"#).unwrap();
+        std::fs::write(directory.join("sites/blizzard.json"), r#"{"files": {
+            "A/Menu.lua": {"MenuUtil": 3, "MenuUtil.CreateContextMenu": 9},
+            "A/Title.lua": {"TitleMixin.SetTitle": 5}
+        }}"#).unwrap();
+        std::fs::write(directory.join(SOURCE_PATH_FILE), "/ui\n").unwrap();
+        let definitions = Definitions::load_directory(&directory).unwrap();
+        // Read the first time one's needed
+        assert_eq!(definitions.global_site("MenuUtil"), Some(("/ui/A/Menu.lua".into(), 3)));
+        let menu = definitions.global("MenuUtil").unwrap().named.named_id().unwrap();
+        assert_eq!(definitions.member_site(menu, "CreateContextMenu"), Some(("/ui/A/Menu.lua".into(), 9)));
+        // A template's method from its mixin, however far up it's inherited
+        let (sub, _) = definitions.template("SubT").unwrap();
+        assert_eq!(definitions.member_site(sub, "SetTitle"), Some(("/ui/A/Title.lua".into(), 5)));
+        // Not in Blizzard's code
+        assert_eq!(definitions.member_site(sub, "Show"), None);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
     #[test]
     fn repository_definitions_load() {
         let definitions = Definitions::load_directory(Path::new("definitions")).unwrap();

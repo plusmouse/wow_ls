@@ -233,6 +233,7 @@ pub fn xml_files(addons: &[Addon], known: &[Addon]) -> Vec<PathBuf> {
 pub fn with_xml(base: &Arc<Definitions>, files: &[PathBuf], open: &HashMap<PathBuf, String>, valid: &mut HashMap<PathBuf, String>) -> (Arc<Definitions>, Vec<XmlError>) {
     let is_object = |tag: &str| base.element(tag).is_some();
     let mut objects = Vec::new();
+    let mut sites = Vec::new();
     let mut errors = Vec::new();
     for path in files {
         let text = match open.get(path) {
@@ -242,23 +243,29 @@ pub fn with_xml(base: &Arc<Definitions>, files: &[PathBuf], open: &HashMap<PathB
                 Err(_) => continue,
             },
         };
-        match crate::xml::parse(&text) {
-            Ok(document) => {
-                objects.extend(crate::xml::objects(&document, &is_object));
-                valid.insert(path.clone(), text);
-            }
-            Err(error) => {
-                errors.push(XmlError { path: path.clone(), offset: crate::xml::error_offset(&text, &error), message: error.to_string() });
-                if let Some(Ok(document)) = valid.get(path).map(|text| crate::xml::parse(text)) {
-                    objects.extend(crate::xml::objects(&document, &is_object));
-                }
-            }
+        let file = path.display().to_string();
+        let mut read = |text: &str| {
+            let Ok(document) = crate::xml::parse(text) else { return false };
+            let found = crate::xml::objects(&document, &is_object);
+            sites.extend(crate::xml::sites(&found, &file, text));
+            objects.extend(found);
+            true
+        };
+        if read(&text) {
+            valid.insert(path.clone(), text);
+            continue
+        }
+        if let Err(error) = crate::xml::parse(&text) {
+            errors.push(XmlError { path: path.clone(), offset: crate::xml::error_offset(&text, &error), message: error.to_string() });
+        }
+        if let Some(text) = valid.get(path).cloned() {
+            read(&text);
         }
     }
     if objects.is_empty() {
         return (base.clone(), errors)
     }
-    (Arc::new(base.with_xml(&objects)), errors)
+    (Arc::new(base.with_xml(&objects, sites)), errors)
 }
 
 /// A Lua or XML file to load, and for an XML file what it loads, in order,
