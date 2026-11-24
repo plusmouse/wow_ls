@@ -81,6 +81,9 @@ format and how wow_ls finds them.
   - the parents of WoW objects
 
 ## In the editor
+- Opening or editing a file shows diagnostics for every file of its addon,
+  open or not, but not for the addons it depends on. A file closed without
+  saving goes back to what's on disk
 - Each addon's analysis is cached until a file it involves changes. An edit to
   a dependency also refreshes the open files of addons depending on it
 - A burst of keystrokes is analysed once, for the last of them

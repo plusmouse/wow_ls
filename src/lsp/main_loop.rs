@@ -108,11 +108,12 @@ impl Workspace {
         self.addons.as_deref().unwrap_or_default()
     }
 
-    /// Publishes diagnostics for every open document the change to `path` could
-    /// affect: all of its addon's, or just it if it's not in one
-    fn publish_diagnostics(&mut self, connection: &Connection, path: &Path, definitions: &Arc<Definitions>) {
+    /// Publishes diagnostics for every file of `path`'s addon, open or not, or
+    /// just `path` if it's not in one. Not for the addons it depends on,
+    /// which have their own. Returns the files published for
+    fn publish_diagnostics(&mut self, connection: &Connection, path: &Path, definitions: &Arc<Definitions>) -> Vec<PathBuf> {
         let path = project::normalise(path);
-        let Some(text) = self.open.get(&path).cloned() else { return };
+        let Some(text) = self.open.get(&path).cloned().or_else(|| std::fs::read_to_string(&path).ok()) else { return Vec::new() };
         let root = SyntaxNode::new_root(syntax::Generator::new(&text).process_all());
         let (analysis, file) = self.analysis(Some(&path), &root, definitions);
         // Files of the addon, or the one file analysed on its own. Not those of
@@ -124,14 +125,50 @@ impl Workspace {
             Analysed::File(_) => vec![(file, path.clone())],
         };
         let analysis = analysis.analysis();
+        let mut published = Vec::new();
         for (file, path) in files {
-            let (Some(uri), Some(text)) = (self.uris.get(&path), self.open.get(&path)) else { continue };
+            // Files that aren't open are as they are on disk
+            let text = match self.open.get(&path) {
+                Some(text) => text.clone(),
+                None => match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(_) => continue,
+                },
+            };
+            let uri = match self.uris.get(&path) {
+                Some(uri) => uri.clone(),
+                None => match project::path_to_uri(&path).parse() {
+                    Ok(uri) => uri,
+                    Err(_) => continue,
+                },
+            };
             let warnings: Vec<_> = analysis.diagnostics.iter()
                 .filter(|d| d.file == file)
                 .map(|d| (d.range, d.message.clone()))
                 .collect();
-            diagnostics::publish(connection, uri.clone(), text, &warnings);
+            diagnostics::publish(connection, uri, &text, &warnings);
+            published.push(path);
         }
+        published
+    }
+
+    /// A document was closed: it's as it is on disk again. Returns the files
+    /// whose diagnostics could change: it first, then the open documents
+    /// `changed` gives
+    fn closed(&mut self, path: &Path) -> Vec<PathBuf> {
+        let path = project::normalise(path);
+        let Some(text) = self.open.remove(&path) else { return Vec::new() };
+        self.uris.remove(&path);
+        let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+        if text == on_disk {
+            return Vec::new()
+        }
+        // Analysed again from disk: its addon's open files and its dependents'
+        self.open.insert(path.clone(), text);
+        let mut others = self.changed(path.clone(), on_disk);
+        self.open.remove(&path);
+        others.insert(0, path);
+        others
     }
 
     /// A document's text changed (or was opened). Returns the other open
@@ -239,7 +276,9 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: V
                         .clone();
                     while let Some(path) = owed.first().cloned() {
                         owed.remove(0);
-                        workspace.publish_diagnostics(&connection, &path, &definitions);
+                        let published = workspace.publish_diagnostics(&connection, &path, &definitions);
+                        // Each addon's published once, whichever of its files asked
+                        owed.retain(|owed| !published.contains(owed));
                         // Something arrived meanwhile: handle it before the rest
                         if let Ok(msg) = inbox.try_recv() {
                             next = Some(msg);
@@ -397,6 +436,19 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: V
                                             owed.insert(0, path.clone());
                                         }
                                         None => diagnostics::publish(&connection, params.text_document.uri, &params.content_changes[0].text, &[]),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "textDocument/didClose" => {
+                        if let Ok(params) = cast_not::<notification::DidCloseTextDocument>(not) {
+                            text.remove(&params.text_document.uri.to_string());
+                            language.remove(&params.text_document.uri.to_string());
+                            if let Some(path) = project::uri_to_path(params.text_document.uri.as_str()) {
+                                for other in workspace.closed(&path) {
+                                    if !owed.contains(&other) {
+                                        owed.push(other);
                                     }
                                 }
                             }
