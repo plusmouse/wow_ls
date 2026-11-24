@@ -3826,6 +3826,7 @@ impl<'a> Walker<'a> {
                         let base = self.expression(&base);
                         let types = self.field_read(base, field.text());
                         self.field_reference(identifier.syntax(), &field, base, types, false);
+                        self.check_field(base, &field, field.text());
                         types
                     }
                     None => match index_access(identifier.syntax()) {
@@ -3837,6 +3838,7 @@ impl<'a> Walker<'a> {
                                     let types = self.field_read(base, &name);
                                     if let Some(token) = token {
                                         self.field_reference(identifier.syntax(), &token, base, types, false);
+                                        self.check_field(base, &token, &name);
                                     }
                                     types
                                 }
@@ -4120,6 +4122,30 @@ impl<'a> Walker<'a> {
             }
         };
         self.diagnostics.push(Diagnostic { file: self.file, range: method.text_range(), message });
+    }
+
+    /// Reports reading field `name` (at `token`) of a data table whose fields
+    /// the definitions give all of (`values`), when it has none of that name
+    /// and no code in the files gives one of that name to a table like it.
+    /// The addon may add its own fields, as the table is its to change
+    fn check_field(&mut self, base: Type, token: &SyntaxToken, name: &str) {
+        // Only the previous walk knows every field the files assign
+        let Some(prior) = self.prior else { return };
+        if base.set.without(TypeSet::TABLE | TypeSet::NIL) != TypeSet::NEVER {
+            return
+        }
+        let NamedRef::One(id) = base.named else { return };
+        if !self.definitions.has_fixed_fields(id) || self.definitions.field(base, name).is_some() {
+            return
+        }
+        // Writes to it, as to any table whose identity isn't known, are by name
+        self.note(Read::AnyTableField(name_key(name)));
+        if prior.any_table_fields.contains_key(name) || self.layer.any_table_fields.contains_key(name) {
+            return
+        }
+        let Some(named) = self.definitions.named_type(id) else { return };
+        let message = format!("{} has no field `{name}`", named.name);
+        self.diagnostics.push(Diagnostic { file: self.file, range: token.text_range(), message });
     }
 
     /// Whether every Lua mixin type `id` has (see `Definitions::lua_mixins`)
@@ -6582,6 +6608,25 @@ mod tests {
         assert_eq!(widget_types_of("local f = CreateFrame('Frame') local c = f:GetChild()", "c"), ["Frame?"]);
         // Methods are fields too
         assert_eq!(widget_types_of("local f = CreateFrame('Frame') local m = f.Show", "m"), ["function()"]);
+    }
+
+    #[test]
+    fn missing_data_fields() {
+        let definitions = Arc::new(Definitions::from_json(r#"{
+            "types": {"Info": {"base": "table", "values": {"count": "number", "link": "string|nil"}}, "Loose": {"base": "table"}},
+            "functions": {"GetInfo": {"returns": ["Info|nil"]}, "GetLoose": {"returns": ["Loose"]}}
+        }"#).unwrap());
+        let warnings = |source: &str| -> Vec<String> {
+            analyse_with(source, &definitions).diagnostics.iter().map(|d| d.message.clone()).collect()
+        };
+        assert!(warnings("local i = GetInfo() print(i.count, i.link, i['count'])").is_empty());
+        assert_eq!(warnings("local i = GetInfo() print(i.cuont)"), ["Info has no field `cuont`"]);
+        assert_eq!(warnings("local i = GetInfo() print(i['cuont'])"), ["Info has no field `cuont`"]);
+        // The addon may give it fields of its own, even after reading them
+        assert!(warnings("local i = GetInfo() print(i.extra) i.extra = 1").is_empty());
+        assert!(warnings("local function tag(t) t.extra = true end local i = GetInfo() tag(i) print(i.extra)").is_empty());
+        // A type without `values` may have any field
+        assert!(warnings("local l = GetLoose() print(l.anything)").is_empty());
     }
 
     #[test]

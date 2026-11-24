@@ -24,7 +24,7 @@
 -- below; any name they don't cover becomes `unknown` and is reported on stderr,
 -- so new documentation shows what needs mapping.
 --
--- Generated: functions, the `Enum` table (each enumeration's members typed as
+-- Generated: functions, each structure's fields, the `Enum` table (each enumeration's members typed as
 -- that enumeration, `Enum.X`), the `Constants` table, and each documented
 -- method table (`method_tables`, from the ScriptObject documentation, like
 -- SimpleFrameAPI). Which tables make up which object type isn't documented, so
@@ -180,6 +180,8 @@ for _, name in ipairs(MIXIN_TABLES) do add_named(name, name, "table") end
 for _, name in ipairs(UNDECLARED_STRUCTURES) do add_named(name, name, "table") end
 
 local declared = {}
+-- Structure name -> its documentation, for its fields
+local structures = {}
 -- Name -> the documentation table, for the `Enum` and `Constants` tables
 local enumerations, constants = {}, {}
 for _, document in ipairs(documents) do
@@ -187,6 +189,8 @@ for _, document in ipairs(documents) do
 		declared[declaration.Name] = declaration.Type
 		if declaration.Type == "Structure" then
 			add_named(declaration.Name, declaration.Name, "table")
+			if structures[declaration.Name] then error(declaration.Name .. " is declared twice") end
+			structures[declaration.Name] = declaration
 		elseif declaration.Type == "Enumeration" then
 			enumerations[declaration.Name] = declaration
 			-- A number type, for its members and for arguments and returns
@@ -341,9 +345,24 @@ local function function_lines(scope, indent)
 	return table.concat(lines, ",\n")
 end
 
+-- Each structure's fields, converted before writing so their unmapped names are reported
+local structure_values = {}
+for _, name in ipairs(sorted_keys(structures)) do
+	local values = {}
+	for _, field in ipairs(structures[name].Fields or {}) do
+		values[#values + 1] = ("%s: %s"):format(json_string(field.Name), json_string(field_type(field)))
+	end
+	structure_values[name] = values
+end
+
 local type_entries = {}
 for _, name in ipairs(sorted_keys(named_types)) do
-	type_entries[#type_entries + 1] = ("    %s: {\"base\": %s}"):format(json_string(name), json_string(named_types[name]))
+	local entry = ("    %s: {\"base\": %s"):format(json_string(name), json_string(named_types[name]))
+	local values = structure_values[name]
+	if values and #values > 0 then
+		entry = entry .. (", \"values\": {%s}"):format(table.concat(values, ", "))
+	end
+	type_entries[#type_entries + 1] = entry .. "}"
 end
 local type_lines = table.concat(type_entries, ",\n")
 

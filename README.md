@@ -40,6 +40,10 @@ from the code itself, with no annotations needed.
     doesn't know may have added the method, or a mixin it uses may have
     methods it can't see (functions stored under computed keys, or a Lua
     mixin with no table in the addon or its dependencies)
+  - reads of fields a table the WoW API returns doesn't come with
+    (``ContainerItemInfo has no field `stackCont` ``). Not reported when the
+    addon or its dependencies give a field of that name to a table whose
+    identity the analysis doesn't know, as the table is the addon's to change
   - XML files that don't parse, at the error
   - calls to methods of a table made in the code when nothing in the addon or
     its dependencies defines a function by that name

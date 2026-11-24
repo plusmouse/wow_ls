@@ -403,6 +403,13 @@ mod tests {
     }
 
     #[test]
+    fn data_table_fields_from_definitions() {
+        let c = complete_at("local info = C_Container.GetContainerItemInfo(0, 1)\ninfo.|");
+        let names = names_of(&c);
+        assert!(names.contains(&"stackCount") && names.contains(&"hyperlink"), "{names:?}");
+    }
+
+    #[test]
     fn call_result_members() {
         let c = complete_at("CreateFrame(\"Frame\"):|");
         assert!(names_of(&c).contains(&"SetPoint"));

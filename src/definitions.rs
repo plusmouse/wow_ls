@@ -55,6 +55,11 @@
 //!   `Frame`, shown by that name instead of `table`, or numbers with a name (an
 //!   enum). Any file can use a named type declared in any other, and several
 //!   files can declare the same type (with the same `base`).
+//! * A named type can list `values`, its fields and their types, like a data
+//!   table a function returns:
+//!   `"ContainerItemInfo": { "base": "table", "values": { "stackCount": "number" } }`.
+//!   Those are all the fields it comes with, so reading another is reported,
+//!   unless code gives it one: the table is the addon's to change.
 //! * A named type's methods come from `method_tables` it lists (each a set of
 //!   `functions`, declared in a `method_tables` section), and every method of
 //!   the types it `inherits`:
@@ -140,6 +145,8 @@ pub struct Definitions {
     /// Tables with `"open": true`, which may have functions beyond those
     /// listed, under computed keys
     open_tables: HashSet<NamedId>,
+    /// Types that list `values`: data tables whose fields are all known
+    fixed_fields: HashSet<NamedId>,
     /// Templates' types, and the type of element each is for, by name
     templates: HashMap<String, (NamedId, NamedId)>,
     /// The type each XML element makes, and whether it may have methods
@@ -200,6 +207,11 @@ impl Definitions {
     /// including inherited members
     pub fn field(&self, ty: Type, name: &str) -> Option<Type> {
         self.member(ty.named.named_id()?, name, 0)
+    }
+
+    /// Whether type `id` lists `values`, so every field it comes with is known
+    pub fn has_fixed_fields(&self, id: NamedId) -> bool {
+        self.fixed_fields.contains(&id)
     }
 
     /// The `string` library's type. Every string has it as its metatable's
@@ -378,6 +390,7 @@ impl Definitions {
         definitions.reserve_objects(files);
         for (file, root) in files {
             definitions.add_method_tables(root).map_err(|e| format!("{file}: {e}"))?;
+            definitions.add_type_values(root).map_err(|e| format!("{file}: {e}"))?;
             definitions.add_members(root, None, "").map_err(|e| format!("{file}: {e}"))?;
         }
         definitions.compose()?;
@@ -974,6 +987,23 @@ impl Definitions {
         Ok(())
     }
 
+    /// The fields named types list as `values`, once every type is declared,
+    /// so a field can be of a type declared after it
+    fn add_type_values(&mut self, root: &Value) -> Result<(), String> {
+        let Some(types) = object(root, "types")? else { return Ok(()) };
+        for (name, definition) in types {
+            let Some(values) = object(definition, "values")? else { continue };
+            let id = self.type_names[name];
+            self.fixed_fields.insert(id);
+            for (field, ty) in values {
+                let ty = ty.as_str().ok_or_else(|| format!("{name}.{field}: a value's type should be a string"))?;
+                let ty = self.parse_type(ty).map_err(|e| format!("{name}.{field}: {e}"))?;
+                self.types[id as usize].fields.insert(field.clone(), ty);
+            }
+        }
+        Ok(())
+    }
+
     /// The `method_tables` and `mixins` sections, which have the same form
     fn add_method_tables(&mut self, root: &Value) -> Result<(), String> {
         for key in ["method_tables", "mixins"] {
@@ -1290,6 +1320,12 @@ mod tests {
         assert_eq!(f.returns.values, [Type::named(frame, TypeSet::TABLE) | Type::NIL]);
 
         assert!(Definitions::from_json(r#"{"types": {"Frame": {"base": "string"}}}"#).is_err());
+        // Fields can name types declared after them
+        let d = Definitions::from_json(r#"{"types": {"Info": {"base": "table", "values": {"n": "number", "frame": "Frame|nil"}}, "Frame": {"base": "table"}}}"#).unwrap();
+        let info = Type::named(d.named_type_id("Info").unwrap(), TypeSet::TABLE);
+        assert_eq!(d.field(info, "n"), Some(Type::of(TypeSet::NUMBER)));
+        assert_eq!(d.type_text(d.field(info, "frame").unwrap()), "Frame|nil");
+        assert!(Definitions::from_json(r#"{"types": {"Info": {"base": "table", "values": {"n": "nubmer"}}}}"#).is_err());
         assert!(Definitions::from_json(r#"{"types": {"E": {"base": "number"}}}"#).is_ok());
         assert!(Definitions::from_json(r#"{"types": {"table": {"base": "table"}}}"#).is_err());
         assert!(Definitions::from_json(r#"{"functions": {"f": {"returns": ["Missing"]}}}"#).is_err());
