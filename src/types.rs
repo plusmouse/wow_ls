@@ -599,6 +599,9 @@ pub struct FieldReference {
     access: crate::syntax::SyntaxNodePtr,
     /// The field's type, or for a write the value assigned
     pub types: Type,
+    /// The table or object made in the files that the field is on, when it's
+    /// known which: what go to definition looks for its assignments on
+    pub table: Option<TableId>,
     pub write: bool,
     /// A read that's directly called: `f` in `t.f(x)` or `t:f(x)`
     pub callee: bool,
@@ -611,22 +614,28 @@ impl FieldReference {
     /// The field name, from its file's root
     fn name(&self, roots: &[SyntaxNode]) -> Option<String> {
         let root = roots.get(self.file.0 as usize)?;
-        root.covering_element(self.range).into_token().map(|t| t.text().to_string())
+        let token = root.covering_element(self.range).into_token()?;
+        // `"b"` in `a["b"]`
+        Some(string_field_name(token.text()).unwrap_or(token.text()).to_string())
     }
 
     /// How the field was reached, without whitespace or comments, like
-    /// `addonTable.hiddenTable`
+    /// `addonTable.hiddenTable` or `addonTable["hiddenTable"]`
     fn path(&self, roots: &[SyntaxNode]) -> String {
         let Some(access) = roots.get(self.file.0 as usize).and_then(|root| self.access.try_to_node(root)) else {
             return String::new()
         };
         let end = self.range.end();
-        access.descendants_with_tokens()
+        let tokens: Vec<SyntaxToken> = access.descendants_with_tokens()
             .filter_map(|t| t.into_token())
-            .filter(|t| t.text_range().end() <= end)
             .filter(|t| !matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment))
-            .map(|t| t.text().to_string())
-            .collect()
+            .collect();
+        let mut path: String = tokens.iter().filter(|t| t.text_range().end() <= end).map(|t| t.text()).collect();
+        // A key in brackets is closed by the next one
+        if tokens.iter().any(|t| t.text_range().start() >= end && t.kind() == SyntaxKind::RightSquareBracket) && path.contains('[') {
+            path.push(']');
+        }
+        path
     }
 }
 
@@ -715,8 +724,9 @@ fn type_name_set(name: &str) -> Option<TypeSet> {
 
 /// A key a table is indexed with
 enum Key {
-    /// A string literal that could be a field name: `t["a"]` is `t.a`
-    Name(String),
+    /// A string literal that could be a field name: `t["a"]` is `t.a`. With
+    /// the literal's token, to record the field's use at
+    Name(String, Option<SyntaxToken>),
     Other(Type),
 }
 
@@ -727,6 +737,25 @@ pub struct Diagnostic {
     pub file: FileId,
     pub range: TextRange,
     pub message: String,
+}
+
+/// Where a name is given a value, for go to definition: the name's range in
+/// one of the files analysed, or a dependency's (numbered by `layer_file`).
+/// Empty at the start of a function when only the function is known
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Site {
+    pub file: FileId,
+    pub range: TextRange,
+}
+
+/// Adds `sites` to `to`, leaving out any already there: an addon reached
+/// through two dependencies is added twice
+fn add_sites(to: &mut Vec<Site>, sites: &[Site]) {
+    for site in sites {
+        if !to.contains(site) {
+            to.push(*site);
+        }
+    }
 }
 
 /// What the addons an addon depends on make visible to it: their globals,
@@ -748,6 +777,12 @@ pub struct Layer {
     pub parents: HashMap<TableId, Type>,
     pub pool_objects: HashMap<TableId, Type>,
     pub table_names: HashMap<TableId, String>,
+    /// Where each global is assigned
+    pub global_sites: HashMap<String, Vec<Site>>,
+    /// Where each field of each table is assigned
+    pub field_sites: HashMap<TableId, HashMap<String, Vec<Site>>>,
+    /// Where fields of tables whose identity wasn't known are assigned, by name
+    pub any_field_sites: HashMap<String, Vec<Site>>,
 }
 
 /// Where the files of addons in a `Layer` are numbered from: far above any
@@ -757,10 +792,21 @@ const LAYER_FILES: u32 = 1 << 30;
 /// A dependency's file (or namespace, by a key of its own), numbered the
 /// same in every analysis this run makes
 pub fn layer_file(key: &str) -> FileId {
-    static NUMBERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> = std::sync::OnceLock::new();
-    let mut numbers = NUMBERS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    let mut numbers = layer_file_numbers().lock().unwrap_or_else(|e| e.into_inner());
     let next = numbers.len() as u32;
     FileId(LAYER_FILES + *numbers.entry(key.to_string()).or_insert(next))
+}
+
+/// The key a dependency's file was numbered by (its path), if it's one
+pub fn layer_file_key(file: FileId) -> Option<String> {
+    let number = file.0.checked_sub(LAYER_FILES)?;
+    let numbers = layer_file_numbers().lock().unwrap_or_else(|e| e.into_inner());
+    numbers.iter().find(|&(_, &n)| n == number).map(|(key, _)| key.clone())
+}
+
+fn layer_file_numbers() -> &'static std::sync::Mutex<std::collections::HashMap<String, u32>> {
+    static NUMBERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> = std::sync::OnceLock::new();
+    NUMBERS.get_or_init(Default::default)
 }
 
 impl Layer {
@@ -818,6 +864,21 @@ impl Layer {
         for (at, name) in &analysis.table_names {
             own.table_names.insert(renumber(*at, &file), name.clone());
         }
+        let site = |file_id: FileId, range: TextRange| Site { file: file(file_id), range };
+        for r in analysis.references.iter().filter(|r| r.write) {
+            let binding = analysis.binding(r);
+            if binding.kind == BindingKind::Global {
+                own.global_sites.entry(binding.name.clone()).or_default().push(site(r.file, r.range));
+            }
+        }
+        for f in analysis.field_references.iter().filter(|f| f.write) {
+            let Some(name) = f.name(&analysis.roots) else { continue };
+            let sites = match f.table {
+                Some(at) => own.field_sites.entry(renumber(at, &file)).or_default().entry(name).or_default(),
+                None => own.any_field_sites.entry(name).or_default(),
+            };
+            sites.push(site(f.file, f.range));
+        }
         layer.add(&own);
         layer
     }
@@ -867,6 +928,18 @@ impl Layer {
         }
         for (at, name) in &other.table_names {
             self.table_names.entry(*at).or_insert_with(|| name.clone());
+        }
+        for (name, sites) in &other.global_sites {
+            add_sites(self.global_sites.entry(name.clone()).or_default(), sites);
+        }
+        for (at, fields) in &other.field_sites {
+            let mine = self.field_sites.entry(*at).or_default();
+            for (name, sites) in fields {
+                add_sites(mine.entry(name.clone()).or_default(), sites);
+            }
+        }
+        for (name, sites) in &other.any_field_sites {
+            add_sites(self.any_field_sites.entry(name.clone()).or_default(), sites);
         }
     }
 
@@ -1419,6 +1492,73 @@ impl Analysis {
         }
         let field = self.field_reference_at(file, offset)?;
         Some((format!("field {}: {}", self.field_path(field), self.describe_callee(field.types, field.call_returns.as_ref())), field.range))
+    }
+
+    /// Where the variable or field named at `offset` is given its value: a
+    /// local's or parameter's declaration, every assignment to a global, or
+    /// every assignment to the field on the table it's reached through (or the
+    /// mixin or `__index` table it comes from). Failing that, the start of the
+    /// function the field holds, if it's one known function
+    pub fn definition(&self, file: FileId, offset: TextSize) -> Vec<Site> {
+        if let Some(r) = self.reference_at(file, offset) {
+            return self.variable_sites(self.binding(r))
+        }
+        let Some(field) = self.field_reference_at(file, offset) else { return Vec::new() };
+        let Some(name) = field.name(&self.roots) else { return Vec::new() };
+        let mut sites = self.field_sites(field.table, &name);
+        if let (true, FunctionRef::One(id)) = (sites.is_empty(), field.types.function) {
+            sites.push(Site { file: id.file, range: TextRange::empty(id.offset) });
+        }
+        sites
+    }
+
+    fn variable_sites(&self, binding: &Binding) -> Vec<Site> {
+        if binding.kind != BindingKind::Global {
+            return binding.declaration.map(|range| Site { file: binding.file, range }).into_iter().collect()
+        }
+        let mut sites: Vec<Site> = self.references.iter()
+            .filter(|r| r.write && self.binding(r).kind == BindingKind::Global && self.binding(r).name == binding.name)
+            .map(|r| Site { file: r.file, range: r.range })
+            .collect();
+        add_sites(&mut sites, self.layer.global_sites.get(&binding.name).map_or(&[], Vec::as_slice));
+        sites
+    }
+
+    /// Where field `name` of `table` is assigned. As for reading it, the
+    /// writes to tables of unknown identity are the fallback
+    fn field_sites(&self, table: Option<TableId>, name: &str) -> Vec<Site> {
+        let holder = table.and_then(|table| self.field_holder(table, name, 0));
+        let mut sites: Vec<Site> = self.field_references.iter()
+            .filter(|f| f.write && f.table == holder && f.name(&self.roots).as_deref() == Some(name))
+            .map(|f| Site { file: f.file, range: f.range })
+            .collect();
+        let layered = match holder {
+            Some(at) => self.layer.field_sites.get(&at).and_then(|fields| fields.get(name)),
+            None => self.layer.any_field_sites.get(name),
+        };
+        add_sites(&mut sites, layered.map_or(&[], Vec::as_slice));
+        sites
+    }
+
+    /// The table that field `name` of `table` comes from: its own, else the
+    /// one a mixin (the last first) or its metatable's `__index` gives it
+    fn field_holder(&self, table: TableId, name: &str, depth: usize) -> Option<TableId> {
+        let field = |at: TableId, name: &str| self.fields.get(&at).and_then(|f| f.get(name)).copied()
+            .or_else(|| self.layer.fields.get(&at).and_then(|f| f.get(name)).copied());
+        if field(table, name).is_some() {
+            return Some(table)
+        }
+        if depth > 16 {
+            return None
+        }
+        let mixins: Vec<Type> = self.mixins.get(&table).into_iter().chain(self.layer.mixins.get(&table)).flatten().copied().collect();
+        if let Some(found) = mixins.iter().rev().find_map(|mixin| self.field_holder(mixin.named.identity()?, name, depth + 1)) {
+            return Some(found)
+        }
+        let metatable = self.metatables.get(&table).or_else(|| self.layer.metatables.get(&table))?.named.identity()?;
+        let index_holder = self.field_holder(metatable, "__index", depth + 1)?;
+        let fallback = field(index_holder, "__index")?.named.identity()?;
+        self.field_holder(fallback, name, depth + 1)
     }
 
     pub fn field_reference_at(&self, file: FileId, offset: TextSize) -> Option<&FieldReference> {
@@ -2300,14 +2440,19 @@ impl<'a> Walker<'a> {
                             Some((base, field)) => {
                                 let base = self.expression(&base);
                                 self.field_write(base, field.text(), types);
-                                self.field_reference(target.syntax(), &field, types, true);
+                                self.field_reference(target.syntax(), &field, base, types, true);
                             }
                             None => match index_access(target.syntax()) {
                                 // `t[k] = v`
                                 Some((base, key)) => {
                                     let base = self.expression(&base);
                                     match self.index_key(&key) {
-                                        Key::Name(name) => self.field_write(base, &name, types),
+                                        Key::Name(name, token) => {
+                                            self.field_write(base, &name, types);
+                                            if let Some(token) = token {
+                                                self.field_reference(target.syntax(), &token, base, types, true);
+                                            }
+                                        }
                                         Key::Other(key) => self.entry_write(base, key, types),
                                     }
                                 }
@@ -2472,7 +2617,7 @@ impl<'a> Walker<'a> {
                             if let Some((owner, field)) = &owner {
                                 let function = Type::function(self.function_id(def));
                                 self.field_write(*owner, field.text(), function);
-                                self.field_reference(identifier.syntax(), field, function, true);
+                                self.field_reference(identifier.syntax(), field, *owner, function, true);
                             }
                             // `self` is the table the method is defined on
                             let self_type = identifier.is_call_to_self().then(|| {
@@ -2570,16 +2715,19 @@ impl<'a> Walker<'a> {
         let (last, middle) = rest.split_last()?;
         let mut owner = self.read(first);
         for name in middle {
-            owner = self.field_read(owner, name.text());
-            self.field_reference(identifier.syntax(), name, owner, false);
+            let base = owner;
+            owner = self.field_read(base, name.text());
+            self.field_reference(identifier.syntax(), name, base, owner, false);
         }
         Some((owner, last.clone()))
     }
 
     /// `access` is the code reaching the field (`a.b` for `b`), or for a table
-    /// constructor's key, the field entry
-    fn field_reference(&mut self, access: &SyntaxNode, name: &SyntaxToken, types: Type, write: bool) {
-        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: crate::syntax::SyntaxNodePtr::new(access), types, write, callee: false, call_returns: None });
+    /// constructor's key, the field
+    /// entry. `base` is what the field is on
+    fn field_reference(&mut self, access: &SyntaxNode, name: &SyntaxToken, base: Type, types: Type, write: bool) {
+        let table = base.named.identity();
+        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: crate::syntax::SyntaxNodePtr::new(access), types, table, write, callee: false, call_returns: None });
     }
 
     /// The field read just recorded is the function being called
@@ -2914,8 +3062,13 @@ impl<'a> Walker<'a> {
         self.fresh.push(None);
         if let Some(self_type) = self_type {
             let depth = self.scopes.len() - 1;
-            // Implicit, so there's no token to declare it at
-            let id = self.new_binding("self", BindingKind::Parameter, None, self_type, self.function, depth);
+            // Implicit, so it's declared by the method's name: `b` in `function a:b()`
+            let declaration = def.identifier().and_then(|identifier| identifier.syntax().children_with_tokens()
+                .filter_map(|t| t.into_token())
+                .filter(|t| t.kind() == SyntaxKind::Name)
+                .last())
+                .map(|name| name.text_range());
+            let id = self.new_binding("self", BindingKind::Parameter, declaration, self_type, self.function, depth);
             self.bindings[id].assigned = true;
             self.bindings[id].visible = Some(def.syntax().text_range());
             self.scopes[depth].names.insert("self".to_string(), id);
@@ -3117,7 +3270,7 @@ impl<'a> Walker<'a> {
                     Some((base, field)) => {
                         let base = self.expression(&base);
                         let types = self.field_read(base, field.text());
-                        self.field_reference(identifier.syntax(), &field, types, false);
+                        self.field_reference(identifier.syntax(), &field, base, types, false);
                         types
                     }
                     None => match index_access(identifier.syntax()) {
@@ -3125,7 +3278,13 @@ impl<'a> Walker<'a> {
                         Some((base, key)) => {
                             let base = self.expression(&base);
                             match self.index_key(&key) {
-                                Key::Name(name) => self.field_read(base, &name),
+                                Key::Name(name, token) => {
+                                    let types = self.field_read(base, &name);
+                                    if let Some(token) = token {
+                                        self.field_reference(identifier.syntax(), &token, base, types, false);
+                                    }
+                                    types
+                                }
                                 Key::Other(key) => self.index_read(base, key),
                             }
                         }
@@ -3181,7 +3340,7 @@ impl<'a> Walker<'a> {
         let callee = match (callee, call.method_name()) {
             (Some(base), Some(method)) => {
                 let types = self.field_read(base, method.text());
-                self.field_reference(call.syntax(), &method, types, false);
+                self.field_reference(call.syntax(), &method, base, types, false);
                 self.last_field_is_callee();
                 callee_read = Some(CalleeRead::Field(self.field_references.len() - 1));
                 self.check_method(base, &method);
@@ -3907,9 +4066,14 @@ impl<'a> Walker<'a> {
                             (false, ..) => self.entry_write(table, Type::of(TypeSet::NUMBER), value),
                             (true, Some(name), _) => {
                                 self.field_write(table, name.text(), value);
-                                self.field_reference(&name.parent().unwrap_or_else(|| field.clone()), name, value, true);
+                                self.field_reference(&name.parent().unwrap_or_else(|| field.clone()), name, table, value, true);
                             }
-                            (true, None, Some(Key::Name(name))) => self.field_write(table, &name, value),
+                            (true, None, Some(Key::Name(name, token))) => {
+                                self.field_write(table, &name, value);
+                                if let Some(token) = token {
+                                    self.field_reference(&field, &token, table, value, true);
+                                }
+                            }
                             (true, None, Some(Key::Other(key))) => self.entry_write(table, key, value),
                             (true, None, None) => {}
                         }
@@ -3925,7 +4089,8 @@ impl<'a> Walker<'a> {
     fn index_key(&mut self, key: &Expression) -> Key {
         if let Expression::Literal(literal) = key {
             if let Some(name) = literal.get_string().as_deref().and_then(string_field_name) {
-                return Key::Name(name.to_string())
+                let token = literal.syntax().descendants_with_tokens().filter_map(|e| e.into_token()).find(|t| t.kind() == SyntaxKind::String);
+                return Key::Name(name.to_string(), token)
             }
         }
         Key::Other(self.expression(key))
@@ -5486,6 +5651,9 @@ mod tests {
             ["field addonTable.hiddenTable: table", "field addonTable.hiddenTable: table"]);
         let analysis = analyse_with("local t = {} local hidden = CreateFrame('Frame') t.hidden = hidden local x = t.hidden", &objects());
         assert_eq!(field_hovers(&analysis, "t.hidden"), ["field t.hidden: Frame", "field t.hidden: Frame"]);
+        // Through a string key too
+        let analysis = analyse("local t = {} t['v'] = 1 local x = t['v']");
+        assert_eq!(field_hovers(&analysis, "t['v']"), ["field t['v']: number", "field t['v']: number"]);
         // A write shows what that write assigned; reads show every assignment
         let analysis = analyse("local t = {} t.v = 1 t.v = 's' local x = t.v");
         assert_eq!(field_hovers(&analysis, "t.v"), ["field t.v: number", "field t.v: string", "field t.v: number|string"]);
@@ -5843,5 +6011,72 @@ mod tests {
         assert_eq!(file.binding(r).name, "x");
         assert!(!r.write);
         assert!(file.reference_at(FileId(0), TextSize::from(3)).is_none());
+    }
+
+    /// Go to definition from the `@` in one of `sources` (analysed together
+    /// as an addon), as the file and the text from each site to the end of
+    /// its line
+    fn definitions_at(sources: &[&str]) -> Vec<(u32, String)> {
+        let (file, offset) = sources.iter().enumerate()
+            .find_map(|(i, s)| s.find('@').map(|at| (i, at)))
+            .expect("a cursor");
+        let sources: Vec<String> = sources.iter().map(|s| s.replace('@', "")).collect();
+        let files: Vec<SourceFile> = sources.iter()
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
+            .collect();
+        let analysis = Analysis::analyse(&files, &library());
+        analysis.definition(FileId(file as u32), TextSize::from(offset as u32)).iter().map(|site| {
+            let rest = &sources[site.file.0 as usize][usize::from(site.range.start())..];
+            (site.file.0, rest.lines().next().unwrap_or_default().to_string())
+        }).collect()
+    }
+
+    fn at(file: u32, text: &str) -> (u32, String) {
+        (file, text.to_string())
+    }
+
+    #[test]
+    fn definitions_of_variables() {
+        // A local's or parameter's declaration, not its later assignments
+        assert_eq!(definitions_at(&["local x = 1\nx = 2\nprint(@x)"]), [at(0, "x = 1")]);
+        assert_eq!(definitions_at(&["local function f(a, b)\nreturn @b end"]), [at(0, "b)")]);
+        assert_eq!(definitions_at(&["local function f()\nend\n@f()"]), [at(0, "f()")]);
+        // The innermost of shadowed ones
+        assert_eq!(definitions_at(&["local x = 1\ndo local x = 2\nprint(@x) end"]), [at(0, "x = 2")]);
+        // Every assignment to a global, in any file
+        assert_eq!(definitions_at(&["Count = 0", "function Count()\nend\nprint(@Count)"]), [at(0, "Count = 0"), at(1, "Count()")]);
+        // Nothing for one the files never assign
+        assert!(definitions_at(&["print(@Unknown)"]).is_empty());
+        // `self` is declared by the method's name
+        assert_eq!(definitions_at(&["local M = {}\nfunction M.Inner:Go()\nprint(@self) end"]), [at(0, "Go()")]);
+        assert!(definitions_at(&["local M = {}\nfunction M.Go()\nprint(@self) end"]).is_empty());
+    }
+
+    #[test]
+    fn definitions_of_fields() {
+        // Every assignment to the field, on the table it's read from
+        assert_eq!(definitions_at(&["local t = { v = 1 }\nt.v = 2\nlocal y = t.@v"]), [at(0, "v = 1 }"), at(0, "v = 2")]);
+        // Not another table's field of the same name
+        assert_eq!(definitions_at(&["local a, b = {}, {}\na.v = 1\nb.v = 2\nlocal y = b.@v"]), [at(0, "v = 2")]);
+        // Methods, across files through the addon's namespace
+        assert_eq!(definitions_at(&["local _, ns = ...\nfunction ns:Init()\nend", "local _, ns = ...\nns:@Init()"]), [at(0, "Init()")]);
+        // Dotted names along the way
+        assert_eq!(definitions_at(&["local A = { B = {} }\nfunction A.B.Go()\nend\nA.@B.Go()"]), [at(0, "B = {} }")]);
+        // From a mixin, or from `__index`
+        assert_eq!(definitions_at(&["local M = {}\nfunction M:Init()\nend\nlocal t = Mixin({}, M)\nt:@Init()"]), [at(0, "Init()")]);
+        assert_eq!(definitions_at(&["local M = {}\nfunction M:Init()\nend\nlocal f = Mixin(CreateFrame('Frame'), M)\nf:@Init()"]), [at(0, "Init()")]);
+        assert_eq!(definitions_at(&["local B = {}\nfunction B:Go()\nend\nlocal t = setmetatable({}, { __index = B })\nt:@Go()"]), [at(0, "Go()")]);
+        // `self` in a method is the table it's defined on
+        assert_eq!(definitions_at(&["local M = {}\nfunction M:A()\nend\nfunction M:B() self:@A() end"]), [at(0, "A()")]);
+        // Fields of tables whose identity isn't known (like globals no file
+        // assigns), by name, as reading them falls back on those
+        assert_eq!(definitions_at(&["SomeFrame.label = 1\nlocal y = OtherFrame.@label"]), [at(0, "label = 1")]);
+        // Each frame made in the files is its own table
+        assert!(definitions_at(&["local f = CreateFrame('Frame')\nf.label = 1\nlocal g = CreateFrame('Frame')\nlocal y = g.@label"]).is_empty());
+        // String keys are the field of that name, both ways round
+        assert_eq!(definitions_at(&["local t = {}\nt['v'] = 1\nlocal y = t.@v"]), [at(0, "'v'] = 1")]);
+        assert_eq!(definitions_at(&["local t = { ['v'] = 1 }\nt.v = 2\nlocal y = t[@'v']"]), [at(0, "'v'] = 1 }"), at(0, "v = 2")]);
+        // Nothing for a WoW object's own methods, which the files don't define
+        assert!(definitions_at(&["local f = CreateFrame('Frame')\nf:@SetPoint('TOP')"]).is_empty());
     }
 }

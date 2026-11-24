@@ -23,6 +23,7 @@ use std::error::Error;
 use lsp_types::{
     ClientCapabilities, Hover, HoverContents, HoverProviderCapability, InitializeParams, MarkedString, Position, Range, ServerCapabilities, notification, request,
     MarkupKind, MarkupContent, CompletionOptions, CompletionItem, CompletionItemKind, CompletionList, CompletionResponse,
+    GotoDefinitionResponse, Location, OneOf,
 };
 use lsp_types::{TextDocumentSyncCapability, TextDocumentSyncKind};
 
@@ -30,7 +31,7 @@ use lsp_server::{Connection, ExtractError, Message, Notification, Request, Reque
 use rowan::TokenAtOffset;
 
 use crate::lsp::{diagnostics, position};
-use crate::types::{Analysis, FileId};
+use crate::types::{self, Analysis, FileId};
 use crate::definitions::{self, Definitions};
 use crate::project::{self, Addon};
 use crate::completion::{self, CandidateKind};
@@ -66,6 +67,7 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
             trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
             ..CompletionOptions::default()
         }),
+        definition_provider: Some(OneOf::Left(true)),
         ..ServerCapabilities::default()
     };
 
@@ -343,6 +345,23 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: V
                             connection.sender.send(Message::Response(resp))?;
                         }
                     }
+                    "textDocument/definition" => {
+                        if let Ok((id, params)) = cast_req::<request::GotoDefinition>(req) {
+                            let position = params.text_document_position_params.position;
+                            let uri = params.text_document_position_params.text_document.uri;
+                            let result = match text.get(&uri.to_string()) {
+                                Some(s) => {
+                                    let definitions = loaded_definitions
+                                        .get_or_insert_with(|| Arc::new(definitions::load(definitions_path.as_deref())))
+                                        .clone();
+                                    go_to_definition(&mut workspace, &uri, s, position, &definitions)
+                                }
+                                None => None,
+                            };
+                            let resp = Response { id, result: Some(serde_json::to_value(&result).unwrap()), error: None };
+                            connection.sender.send(Message::Response(resp))?;
+                        }
+                    }
                     _ => {
                     }
                 };
@@ -448,6 +467,42 @@ fn complete(workspace: &mut Workspace, uri: &str, s: &str, position: Position, d
         }
     }).collect();
     CompletionResponse::List(CompletionList { is_incomplete: completions.incomplete, items })
+}
+
+/// Where the name at `position` in the open document `uri` (whose text is
+/// `s`) is given its value, if anywhere in the addon or its dependencies
+fn go_to_definition(workspace: &mut Workspace, uri: &lsp_types::Uri, s: &str, position: Position, definitions: &Arc<Definitions>) -> Option<GotoDefinitionResponse> {
+    let offset = position::offset_of(s, position);
+    let root = SyntaxNode::new_root(syntax::Generator::new(s).process_all());
+    let path = project::uri_to_path(uri.as_str());
+    let (analysed, file) = workspace.analysis(path.as_deref(), &root, definitions);
+    let locations: Vec<Location> = analysed.analysis().definition(file, offset).into_iter().filter_map(|site| {
+        // The addon's own files, then its dependencies', numbered by path
+        let own = match &analysed {
+            Analysed::Addon(analysed) => analysed.paths.get(site.file.0 as usize).cloned(),
+            Analysed::File(_) => None,
+        };
+        let target = match own.or_else(|| types::layer_file_key(site.file).map(PathBuf::from)) {
+            Some(target) => target,
+            // A file analysed on its own is the document itself
+            None if site.file == file => return Some(Location { uri: uri.clone(), range: position::range_of(s, site.range) }),
+            None => return None,
+        };
+        let text = match workspace.open.get(&target) {
+            Some(text) => text.clone(),
+            None => std::fs::read_to_string(&target).ok()?,
+        };
+        let target_uri = match workspace.uris.get(&target) {
+            Some(uri) => uri.clone(),
+            None => project::path_to_uri(&target).parse().ok()?,
+        };
+        Some(Location { uri: target_uri, range: position::range_of(&text, site.range) })
+    }).collect();
+    match locations.len() {
+        0 => None,
+        1 => locations.into_iter().next().map(GotoDefinitionResponse::Scalar),
+        _ => Some(GotoDefinitionResponse::Array(locations)),
+    }
 }
 
 fn cast_req<R>(req: Request) -> Result<(RequestId, R::Params), ExtractError<Request>>

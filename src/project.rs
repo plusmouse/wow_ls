@@ -302,6 +302,24 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(path))
 }
 
+/// The `file://` URI of `path`, the inverse of `uri_to_path`
+pub fn path_to_uri(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    // Windows: `\\?\C:\...` from `canonicalize`, or `C:\...`
+    let path = path.strip_prefix(r"\\?\").unwrap_or(&path).replace('\\', "/");
+    let mut uri = String::from("file://");
+    if !path.starts_with('/') {
+        uri.push('/');
+    }
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => uri.push(byte as char),
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +367,11 @@ mod tests {
         assert_eq!(uri_to_path("file:///C:/Games/a.lua"), Some(PathBuf::from("C:/Games/a.lua")));
         assert_eq!(uri_to_path("file:///c%3A/Games/a.lua"), Some(PathBuf::from("c:/Games/a.lua")));
         assert_eq!(uri_to_path("untitled:1"), None);
+        assert_eq!(path_to_uri(Path::new("/home/me/My Addon/a.lua")), "file:///home/me/My%20Addon/a.lua");
+        assert_eq!(path_to_uri(Path::new(r"\\?\C:\Games\a.lua")), "file:///C:/Games/a.lua");
+        for path in ["/home/me/My Addon/é#1.lua", "C:/Games/a.lua"] {
+            assert_eq!(uri_to_path(&path_to_uri(Path::new(path))), Some(PathBuf::from(path)));
+        }
     }
 
     /// The type of what's assigned to `name` in `analysed`'s own files
@@ -400,6 +423,28 @@ mod tests {
         let (alone, _) = user.analyse(Arc::default(), &HashMap::new(), &definitions);
         let from_lib = alone.references.iter().find(|r| r.write && alone.binding(r).name == "fromLib").unwrap();
         assert_eq!(alone.describe(from_lib.types), "unknown");
+    }
+
+    #[test]
+    fn definitions_in_dependencies() {
+        let user = Addon::load(Path::new("tests/dependencies/User/User.toc")).unwrap();
+        let definitions = Arc::new(Definitions::default());
+        let analysed = analyse_addon(&user, &[], &HashMap::new(), &definitions, &mut HashMap::new());
+        let source = std::fs::read_to_string(&analysed.paths[0]).unwrap();
+        let lib_path = normalise(Path::new("tests/dependencies/Lib/Lib.lua"));
+        let lib = std::fs::read_to_string(&lib_path).unwrap();
+        // Where in Lib's file what's at the first `name` in User's is defined
+        let definition = |name: &str| -> Vec<String> {
+            let offset = rowan::TextSize::from(source.find(name).unwrap() as u32);
+            analysed.analysis.definition(crate::types::FileId(0), offset).iter().map(|site| {
+                assert_eq!(crate::types::layer_file_key(site.file).map(PathBuf::from), Some(lib_path.clone()));
+                lib[usize::from(site.range.start())..].lines().next().unwrap().to_string()
+            }).collect()
+        };
+        assert_eq!(definition("LibGlobal"), ["LibGlobal = {}"]);
+        assert_eq!(definition("Get"), ["Get()"]);
+        // Each addon's namespace is its own, so Lib's field isn't User's
+        assert!(definition("secret").is_empty());
     }
 
     #[test]

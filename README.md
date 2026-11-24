@@ -15,6 +15,15 @@ from the code itself, with no annotations needed.
 - **Completion**: locals in scope, globals once something is typed, keywords,
   and members after `.` or `:`. Members come from the definitions, from the
   fields the files assign, and through mixins and `__index`
+- **Go to definition**, for variables and fields (methods included):
+  - a local's or parameter's declaration, and for `self`, the method's name
+  - every assignment to a global
+  - every assignment to a field on the table it's reached through, or on
+    the mixin or `__index` table it comes from. `t["x"]` and `{ ["x"] = v }`
+    count as field `x`
+
+  This also works across the addon's files and into its dependencies.
+  Members of WoW's own API have no source to go to.
 - **Diagnostics**:
   - syntax errors and Lua's compile-time errors
   - calls to methods a WoW object doesn't have
