@@ -3819,7 +3819,7 @@ impl<'a> Walker<'a> {
                 .unwrap_or_else(|| documented.clone()),
         };
         if let (Some(receiver), Some(method)) = (receiver, call.method_name()) {
-            returns = self.object_method(call, receiver, method.text(), template.and_then(|i| arguments.get(i)), &argument_types, returns);
+            returns = self.object_method(call, receiver, method.text(), arguments.first(), template.and_then(|i| arguments.get(i)), &argument_types, returns);
         }
         self.require_arguments(&arguments, &required);
         if returns != documented {
@@ -3835,7 +3835,7 @@ impl<'a> Walker<'a> {
 
     /// Methods that make or change WoW objects' parents. `returns` is what the
     /// method's documentation says it returns
-    fn object_method(&mut self, call: &FunctionCall, receiver: Type, name: &str, template: Option<&Expression>, arguments: &Values, mut returns: Values) -> Values {
+    fn object_method(&mut self, call: &FunctionCall, receiver: Type, name: &str, kind: Option<&Expression>, template: Option<&Expression>, arguments: &Values, mut returns: Values) -> Values {
         let parent = receiver.named.identity();
         if let Some(object) = parent.and_then(|at| self.pool_object(at)) {
             match name {
@@ -3889,6 +3889,11 @@ impl<'a> Walker<'a> {
                 if !self.definitions.named_type(child).is_some_and(|t| t.has_methods) {
                     return returns
                 }
+                // `CreateAnimation("Alpha")` makes the kind of animation it names
+                let child = match name {
+                    "CreateAnimation" => self.kind_named(kind, child),
+                    _ => child,
+                };
                 let at = self.location(call.syntax().text_range().start());
                 let (named, extended) = self.templated(child, template);
                 first.named = NamedRef::Instance { named, at, extended };
@@ -4099,13 +4104,19 @@ impl<'a> Walker<'a> {
     /// The kind of `Frame` a literal frame type names, else `Frame`
     fn frame_type(&self, argument: Option<&Expression>) -> Option<NamedId> {
         let frame = self.definitions.named_type_id("Frame")?;
-        Some(match argument {
+        Some(self.kind_named(argument, frame))
+    }
+
+    /// The kind of `base` a literal argument names (`"Button"`, `"Flipbook"`),
+    /// ignoring case, else `base`
+    fn kind_named(&self, argument: Option<&Expression>, base: NamedId) -> NamedId {
+        match argument {
             Some(Expression::Literal(literal)) => literal.get_string()
                 .and_then(|text| self.definitions.named_type_id_ignoring_case(text.trim().trim_matches(['"', '\''])))
-                .filter(|&id| self.definitions.is_a(id, frame))
-                .unwrap_or(frame),
-            _ => frame,
-        })
+                .filter(|&id| self.definitions.is_a(id, base))
+                .unwrap_or(base),
+            _ => base,
+        }
     }
 
     /// What a pool made in the files holds, from this walk if it's been made
@@ -6252,6 +6263,9 @@ mod tests {
                 "Texture": {"base": "table", "inherits": ["Region"], "method_tables": []},
                 "FontString": {"base": "table", "inherits": ["Region"], "method_tables": ["FontStringAPI"]},
                 "ObjectPool": {"base": "table", "method_tables": ["ObjectPoolAPI"]},
+                "AnimationGroup": {"base": "table", "method_tables": ["AnimationGroupAPI"]},
+                "Animation": {"base": "table", "method_tables": ["AnimationAPI"]},
+                "Alpha": {"base": "table", "inherits": ["Animation"], "method_tables": ["AlphaAPI"]},
                 "ItemKey": {"base": "table"}
             },
             "method_tables": {
@@ -6259,8 +6273,12 @@ mod tests {
                 "FrameAPI": {"functions": {
                     "CreateTexture": {"returns": ["Texture"]},
                     "CreateFontString": {"parameters": ["name: string|nil", "templateName: string|nil"], "returns": ["Texture"]},
-                    "GetChild": {"returns": ["Frame|nil"]}
+                    "GetChild": {"returns": ["Frame|nil"]},
+                    "CreateAnimationGroup": {"returns": ["AnimationGroup"]}
                 }},
+                "AnimationGroupAPI": {"functions": {"CreateAnimation": {"parameters": ["animationType: string|nil", "name: string|nil", "templateName: string|nil"], "returns": ["Animation"]}}},
+                "AnimationAPI": {"functions": {"Play": {}}},
+                "AlphaAPI": {"functions": {"SetFromAlpha": {}}},
                 "ButtonAPI": {"functions": {"Click": {}, "GetText": {"returns": ["string"]}}},
                 "FontStringAPI": {"functions": {"SetText": {}}},
                 "ObjectPoolAPI": {"functions": {"Acquire": {"returns": ["unknown", "boolean"]}, "Release": {"parameters": ["object"]},
@@ -6410,6 +6428,17 @@ mod tests {
         let source = format!("local f = CreateFrame('Button') {many} local g = f g:Nope()");
         assert_eq!(widget_types_of(&source, "g")[0], "Button");
         assert!(warnings(&source).is_empty());
+    }
+
+    #[test]
+    fn animations_of_the_kind_named() {
+        let group = "local g = CreateFrame('Frame'):CreateAnimationGroup() ";
+        assert_eq!(widget_types_of(&format!("{group} local a = g:CreateAnimation('alpha')"), "a"), ["Alpha"]);
+        assert!(warnings(&format!("{group} local a = g:CreateAnimation('Alpha') a:SetFromAlpha() a:Play()")).is_empty());
+        // Not a kind of animation, not a literal, or none: an Animation
+        assert_eq!(widget_types_of(&format!("{group} local a = g:CreateAnimation('Button')"), "a"), ["Animation"]);
+        assert_eq!(widget_types_of(&format!("{group} local a = g:CreateAnimation(kind)"), "a"), ["Animation"]);
+        assert_eq!(warnings(&format!("{group} g:CreateAnimation():SetFromAlpha()")), ["Animation has no method `SetFromAlpha`"]);
     }
 
     #[test]

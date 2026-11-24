@@ -114,6 +114,8 @@ format and how wow_ls finds them.
     known is reported (``This may be a Button, which has no method `Init` ``),
     and a field only some have isn't known. A field set or `SetParent`, or a
     `Mixin`, on it applies to each, and `GetParent` gives each one's parent
+  - `CreateAnimation("Alpha")` makes the kind of animation it names, as
+    `CreateFrame("Button")` does the kind of frame
   - the parents of WoW objects, and of `self` in a mixin: what its template
     is made in by `CreateFrame`, or where XML puts its objects (inside another,
     or `parent="..."`). As its frames may also be made where the analysis
@@ -162,8 +164,6 @@ definitions again after an XML edit adds about 30ms.
   missing (`ScriptObject has no method Show`)
 - `self` in a mixin is the one type the objects it's mixed into all are, not
   each of them
-- `CreateAnimation("Flipbook")` gives an `Animation`, not the `FlipBook` its
-  first argument names
 - A `type="global"` `KeyValue` naming an addon's own global (a localised
   string) is `unknown`
 - Making a frame from several templates at once, or from a template for
