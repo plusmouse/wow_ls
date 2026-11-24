@@ -725,12 +725,217 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+/// What the addons an addon depends on make visible to it: their globals,
+/// functions and tables, from their own analyses. A dependent reads them but
+/// can't change them, so only an addon itself types its API, however many
+/// addons use it. Their files are numbered in a range of their own, by path
+/// (see `layer_file`), so one file is one file in every addon depending on it
+#[derive(Debug, Default, Clone)]
+pub struct Layer {
+    pub globals: HashMap<String, Type>,
+    pub functions: HashMap<FunctionId, FunctionInfo>,
+    pub fields: HashMap<TableId, HashMap<String, Type>>,
+    pub any_table_fields: HashMap<String, Type>,
+    pub function_fields: HashSet<String>,
+    pub entries: HashMap<TableId, Entries>,
+    pub metatables: HashMap<TableId, Type>,
+    pub mixins: HashMap<TableId, Vec<Type>>,
+    pub mixed_into: HashMap<TableId, (NamedId, bool)>,
+    pub parents: HashMap<TableId, Type>,
+    pub pool_objects: HashMap<TableId, Type>,
+    pub table_names: HashMap<TableId, String>,
+}
+
+/// Where the files of addons in a `Layer` are numbered from: far above any
+/// addon's own files, and below the pseudo files of namespaces
+const LAYER_FILES: u32 = 1 << 30;
+
+/// A dependency's file (or namespace, by a key of its own), numbered the
+/// same in every analysis this run makes
+pub fn layer_file(key: &str) -> FileId {
+    static NUMBERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> = std::sync::OnceLock::new();
+    let mut numbers = NUMBERS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    let next = numbers.len() as u32;
+    FileId(LAYER_FILES + *numbers.entry(key.to_string()).or_insert(next))
+}
+
+impl Layer {
+    /// What `analysis` (of an addon's files, `paths`, in that order) makes
+    /// visible to addons loaded after it, with what it saw of its own
+    /// dependencies. `namespace` names its `...` namespace table
+    pub fn of(analysis: &Analysis, paths: &[std::path::PathBuf], namespace: &str) -> Layer {
+        let files: Vec<FileId> = paths.iter().map(|p| layer_file(&p.to_string_lossy())).collect();
+        let own_namespace = addon_namespace(0).file;
+        let namespace = layer_file(&format!("namespace of {namespace}"));
+        let file = |file: FileId| match files.get(file.0 as usize) {
+            Some(&renumbered) => renumbered,
+            None if file == own_namespace => namespace,
+            // Already a dependency's, or a pseudo file of no file
+            None => file,
+        };
+        let mut layer = (*analysis.layer).clone();
+        let mut own = Layer::default();
+        for binding in analysis.bindings.iter().filter(|b| b.kind == BindingKind::Global && b.assigned) {
+            *own.globals.entry(binding.name.clone()).or_default() |= renumber_type(binding.types, &file);
+        }
+        for (id, info) in &analysis.functions {
+            own.functions.insert(renumber(*id, &file), renumber_function(info, &file));
+        }
+        for (at, fields) in &analysis.fields {
+            let mine = own.fields.entry(renumber(*at, &file)).or_default();
+            for (name, &ty) in fields {
+                *mine.entry(name.clone()).or_default() |= renumber_type(ty, &file);
+            }
+        }
+        for (name, &ty) in &analysis.any_table_fields {
+            *own.any_table_fields.entry(name.clone()).or_default() |= renumber_type(ty, &file);
+        }
+        own.function_fields = analysis.function_fields.clone();
+        for (at, entries) in &analysis.entries {
+            let mine = own.entries.entry(renumber(*at, &file)).or_default();
+            mine.keys |= renumber_type(entries.keys, &file);
+            mine.values |= renumber_type(entries.values, &file);
+        }
+        for (at, &ty) in &analysis.metatables {
+            *own.metatables.entry(renumber(*at, &file)).or_default() |= renumber_type(ty, &file);
+        }
+        for (at, mixins) in &analysis.mixins {
+            own.mixins.insert(renumber(*at, &file), mixins.iter().map(|&m| renumber_type(m, &file)).collect());
+        }
+        for (at, &target) in &analysis.mixed_into {
+            own.mixed_into.insert(renumber(*at, &file), target);
+        }
+        for (at, &ty) in &analysis.parents {
+            *own.parents.entry(renumber(*at, &file)).or_default() |= renumber_type(ty, &file);
+        }
+        for (at, &ty) in &analysis.pool_objects {
+            *own.pool_objects.entry(renumber(*at, &file)).or_default() |= renumber_type(ty, &file);
+        }
+        for (at, name) in &analysis.table_names {
+            own.table_names.insert(renumber(*at, &file), name.clone());
+        }
+        layer.add(&own);
+        layer
+    }
+
+    /// Adds what `other` makes visible: both addons are loaded
+    pub fn add(&mut self, other: &Layer) {
+        for (name, &ty) in &other.globals {
+            *self.globals.entry(name.clone()).or_default() |= ty;
+        }
+        for (id, info) in &other.functions {
+            self.functions.entry(*id).or_insert_with(|| info.clone());
+        }
+        for (at, fields) in &other.fields {
+            let mine = self.fields.entry(*at).or_default();
+            for (name, &ty) in fields {
+                *mine.entry(name.clone()).or_default() |= ty;
+            }
+        }
+        for (name, &ty) in &other.any_table_fields {
+            *self.any_table_fields.entry(name.clone()).or_default() |= ty;
+        }
+        self.function_fields.extend(other.function_fields.iter().cloned());
+        for (at, entries) in &other.entries {
+            let mine = self.entries.entry(*at).or_default();
+            mine.keys |= entries.keys;
+            mine.values |= entries.values;
+        }
+        for (at, &ty) in &other.metatables {
+            *self.metatables.entry(*at).or_default() |= ty;
+        }
+        for (at, mixins) in &other.mixins {
+            let mine = self.mixins.entry(*at).or_default();
+            for mixin in mixins {
+                if !mine.contains(mixin) {
+                    mine.push(*mixin);
+                }
+            }
+        }
+        for (at, &target) in &other.mixed_into {
+            self.mixed_into.entry(*at).or_insert(target);
+        }
+        for (at, &ty) in &other.parents {
+            *self.parents.entry(*at).or_default() |= ty;
+        }
+        for (at, &ty) in &other.pool_objects {
+            *self.pool_objects.entry(*at).or_default() |= ty;
+        }
+        for (at, name) in &other.table_names {
+            self.table_names.entry(*at).or_insert_with(|| name.clone());
+        }
+    }
+
+    /// A field of a dependency's table, through its mixins and `__index`
+    fn field(&self, table: TableId, name: &str, depth: usize) -> Option<Type> {
+        if let Some(&own) = self.fields.get(&table).and_then(|fields| fields.get(name)) {
+            return Some(own)
+        }
+        if depth > 16 {
+            return None
+        }
+        let from_mixins = self.mixins.get(&table).into_iter().flatten().rev()
+            .find_map(|mixin| self.field(mixin.named.identity()?, name, depth + 1));
+        from_mixins.or_else(|| {
+            let metatable = self.metatables.get(&table)?.named.identity()?;
+            let index = self.field(metatable, "__index", depth + 1)?;
+            match index.named.identity() {
+                Some(fallback) => self.field(fallback, name, depth + 1),
+                None => match index.function {
+                    FunctionRef::One(id) => self.functions.get(&id).map(|f| f.returns.first()),
+                    _ => None,
+                },
+            }
+        })
+    }
+}
+
+/// `location` with its file renumbered by `file`
+fn renumber(location: Location, file: &impl Fn(FileId) -> FileId) -> Location {
+    Location { file: file(location.file), ..location }
+}
+
+fn renumber_named(named: NamedRef, file: &impl Fn(FileId) -> FileId) -> NamedRef {
+    match named {
+        NamedRef::Table(at) => NamedRef::Table(renumber(at, file)),
+        NamedRef::Instance { named, at, extended } => NamedRef::Instance { named, at: renumber(at, file), extended },
+        other => other,
+    }
+}
+
+fn renumber_type(ty: Type, file: &impl Fn(FileId) -> FileId) -> Type {
+    let function = match ty.function {
+        FunctionRef::One(id) => FunctionRef::One(renumber(id, file)),
+        other => other,
+    };
+    Type { function, named: renumber_named(ty.named, file), numeric: renumber_named(ty.numeric, file), set: ty.set }
+}
+
+fn renumber_values(values: &Values, file: &impl Fn(FileId) -> FileId) -> Values {
+    Values { values: values.values.iter().map(|&v| renumber_type(v, file)).collect(), rest: renumber_type(values.rest, file) }
+}
+
+fn renumber_function(info: &FunctionInfo, file: &impl Fn(FileId) -> FileId) -> FunctionInfo {
+    let parameter = |p: &Parameter| Parameter { name: p.name.clone(), types: renumber_type(p.types, file), mandated: p.mandated.map(|m| renumber_type(m, file)) };
+    FunctionInfo {
+        parameters: info.parameters.iter().map(parameter).collect(),
+        method: info.method,
+        varargs: info.varargs.as_ref().map(parameter),
+        returns: renumber_values(&info.returns, file),
+        fresh_returns: info.fresh_returns.iter().map(|fresh| fresh.as_ref().map(|fresh| FreshObject {
+            made: renumber(fresh.made, file),
+            ..fresh.clone()
+        })).collect(),
+    }
+}
+
 /// A file to analyse
 pub struct SourceFile {
     pub root: SyntaxNode,
-    /// Whether the file is part of an addon, so `...` at its top is the addon's
-    /// name and namespace
-    pub in_addon: bool,
+    /// The addon the file is part of, by its place in load order, so `...` at
+    /// its top is that addon's name and namespace. Addons analysed together
+    /// (one and those it depends on) each have their own namespace
+    pub addon: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -757,6 +962,8 @@ pub struct Analysis {
     pub walks: usize,
     /// Each file's tree, for what field references point to
     roots: Vec<SyntaxNode>,
+    /// What the addons this one depends on make visible to it
+    pub layer: Arc<Layer>,
     /// References that read an upvalue, given the binding's final type by
     /// `complete`
     deferred: Vec<usize>,
@@ -795,21 +1002,26 @@ pub struct Analysis {
 impl Analysis {
     /// One file on its own
     pub fn analyse_file(root: &SyntaxNode, definitions: &Arc<Definitions>) -> Analysis {
-        Analysis::analyse(&[SourceFile { root: root.clone(), in_addon: false }], definitions)
+        Analysis::analyse(&[SourceFile { root: root.clone(), addon: None }], definitions)
     }
 
     /// Files in the order they load, as one program. The `FileId`s in the
     /// result are positions in `files`
     pub fn analyse(files: &[SourceFile], definitions: &Arc<Definitions>) -> Analysis {
+        Analysis::analyse_over(files, definitions, Arc::default())
+    }
+
+    /// `analyse`, for files loaded after the addons `layer` comes from
+    pub fn analyse_over(files: &[SourceFile], definitions: &Arc<Definitions>, layer: Arc<Layer>) -> Analysis {
         // Replaying is only ever faster; turning it off is for checking it
         let replay = std::env::var_os("WOW_LS_NO_REPLAY").is_none();
-        Analysis::analyse_replaying(files, definitions, replay)
+        Analysis::analyse_replaying(files, definitions, layer, replay)
     }
 
     /// `analyse`, replaying function bodies whose inputs haven't changed
     /// since the walk before, or walking every one every time
-    fn analyse_replaying(files: &[SourceFile], definitions: &Arc<Definitions>, replay: bool) -> Analysis {
-        let mut result = Walker::new(None, definitions, Default::default(), replay).walk(files);
+    fn analyse_replaying(files: &[SourceFile], definitions: &Arc<Definitions>, layer: Arc<Layer>, replay: bool) -> Analysis {
+        let mut result = Walker::new(None, definitions, &layer, Default::default(), replay).walk(files);
         // Nothing to compare the first walk with, but no body it recorded can
         // be replayed anyway, as it walked without a previous walk
         let mut changed = HashSet::default();
@@ -818,7 +1030,7 @@ impl Analysis {
         // one before
         let mut combining = false;
         for walks in 2.. {
-            let mut next = Walker::new(Some(&result), definitions, changed, replay).walk(files);
+            let mut next = Walker::new(Some(&result), definitions, &layer, changed, replay).walk(files);
             next.walks = walks;
             next.replayed += result.replayed;
             next.walked += result.walked;
@@ -1074,7 +1286,7 @@ impl Analysis {
     fn describe_with(&self, ty: Type, signatures: bool) -> String {
         let names = ty.set.names();
         let signature = match ty.function {
-            FunctionRef::One(id) if signatures => self.functions.get(&id).map(|f| self.signature(f)),
+            FunctionRef::One(id) if signatures => self.function_info(FunctionRef::One(id)).map(|f| self.signature(f)),
             FunctionRef::Builtin(id) if signatures => self.definitions.function(id).map(|f| self.signature(f)),
             _ => None,
         };
@@ -1096,8 +1308,8 @@ impl Analysis {
                 (Some(s), _, "function") if wrap && s.contains(" -> ") => format!("({s})"),
                 (Some(s), _, "function") => s.clone(),
                 (_, Some(named), "table" | "userdata") if named.base.names() == [name] && signatures
-                    && ty.named.identity().is_some_and(|at| self.pool_objects.contains_key(&at)) => {
-                    let object = ty.named.identity().and_then(|at| self.pool_objects.get(&at)).copied().unwrap_or(Type::UNKNOWN);
+                    && ty.named.identity().is_some_and(|at| self.pool_object(at).is_some()) => {
+                    let object = ty.named.identity().and_then(|at| self.pool_object(at)).unwrap_or(Type::UNKNOWN);
                     format!("{}<{}>", named.name, self.describe_shallow(object))
                 }
                 (_, Some(named), "table" | "userdata") if named.base.names() == [name] => {
@@ -1125,7 +1337,7 @@ impl Analysis {
     /// they were mixed in. In a mixin's own methods, `self` is the mixin
     fn object_mixins(&self, at: TableId) -> Vec<String> {
         let mut names = Vec::new();
-        match self.table_names.get(&at) {
+        match self.table_name(at) {
             Some(name) => names.push(name.clone()),
             None => self.collect_mixins(at, &mut names, 0),
         }
@@ -1140,13 +1352,23 @@ impl Analysis {
         if depth > 16 {
             return
         }
-        for mixin in self.mixins.get(&at).into_iter().flatten() {
+        for mixin in self.mixins.get(&at).or_else(|| self.layer.mixins.get(&at)).into_iter().flatten() {
             let Some(mixin) = mixin.named.identity() else { continue };
-            match self.table_names.get(&mixin) {
+            match self.table_name(mixin) {
                 Some(name) => if !names.contains(name) { names.push(name.clone()) },
                 None => self.collect_mixins(mixin, names, depth + 1),
             }
         }
+    }
+
+    /// The name a table was first stored under, here or in a dependency
+    fn table_name(&self, at: TableId) -> Option<&String> {
+        self.table_names.get(&at).or_else(|| self.layer.table_names.get(&at))
+    }
+
+    /// What a pool made here or in a dependency holds
+    fn pool_object(&self, at: TableId) -> Option<Type> {
+        self.pool_objects.get(&at).or_else(|| self.layer.pool_objects.get(&at)).copied()
     }
 
     fn signature(&self, function: &FunctionInfo) -> String {
@@ -1156,11 +1378,7 @@ impl Analysis {
     /// A callee's type, with what the call returns when that's known better
     /// than the function's own returns
     pub fn describe_callee(&self, ty: Type, call_returns: Option<&Values>) -> String {
-        let function = match ty.function {
-            FunctionRef::One(id) => self.functions.get(&id),
-            FunctionRef::Builtin(id) => self.definitions.function(id),
-            _ => None,
-        };
+        let function = self.function_info(ty.function);
         match (function, call_returns) {
             // Only when it's sure to be the function, so the signature is all of it
             (Some(function), Some(returns)) if ty.set == TypeSet::FUNCTION => self.signature_returning(function, returns),
@@ -1215,7 +1433,11 @@ impl Analysis {
     /// give them: its entries and its named fields. None if nothing's known
     pub fn contents(&self, at: TableId) -> Option<Entries> {
         let mut contents = self.entries.get(&at).copied().unwrap_or_default();
-        for &value in self.fields.get(&at).into_iter().flat_map(|fields| fields.values()) {
+        if let Some(layered) = self.layer.entries.get(&at) {
+            contents.keys |= layered.keys;
+            contents.values |= layered.values;
+        }
+        for &value in self.fields.get(&at).into_iter().chain(self.layer.fields.get(&at)).flat_map(|fields| fields.values()) {
             contents.keys |= Type::of(TypeSet::STRING);
             contents.values |= value.without(TypeSet::NIL);
         }
@@ -1226,7 +1448,7 @@ impl Analysis {
     /// `string[]` when its keys are all numbers, otherwise `table<K, V>`
     fn describe_contents(&self, ty: Type) -> Option<String> {
         let NamedRef::Table(at) = ty.named else { return None };
-        if !self.entries.contains_key(&at) {
+        if !self.entries.contains_key(&at) && !self.layer.entries.contains_key(&at) {
             return None
         }
         let contents = self.contents(at)?;
@@ -1252,7 +1474,7 @@ impl Analysis {
     /// The function a value is, if it's exactly one known function
     pub fn function_info(&self, function: FunctionRef) -> Option<&FunctionInfo> {
         match function {
-            FunctionRef::One(id) => self.functions.get(&id),
+            FunctionRef::One(id) => self.functions.get(&id).or_else(|| self.layer.functions.get(&id)),
             FunctionRef::Builtin(id) => self.definitions.function(id),
             _ => None,
         }
@@ -1277,6 +1499,8 @@ struct Walker<'a> {
     prior: Option<&'a Analysis>,
     /// Each file's tree
     roots: Vec<SyntaxNode>,
+    /// What the addons depended on make visible
+    layer: Arc<Layer>,
     /// What changed between the previous walk and the one before it, so
     /// bodies that read none of it can be replayed
     changed: HashSet<Read>,
@@ -1292,8 +1516,9 @@ struct Walker<'a> {
     walked: usize,
     /// The file being walked
     file: FileId,
-    /// Whether that file is part of an addon
-    in_addon: bool,
+    /// The addon that file is part of, by its place in load order
+    addon: Option<u32>,
+
     definitions: Arc<Definitions>,
     bindings: Vec<Binding>,
     /// Type of each binding at the current point of the walk
@@ -1523,9 +1748,12 @@ struct Snapshot {
 /// Every file's top level, which run one after another
 const MAIN_CHUNK: usize = 0;
 
-/// The table every file of an addon gets as the second value of `...`. Not a
-/// real file position, so it can't clash with a table made in a file
-const ADDON_NAMESPACE: TableId = Location { file: FileId(u32::MAX), offset: TextSize::new(0), slot: 0 };
+/// The table every file of an addon gets as the second value of `...`, by the
+/// addon's place in load order. Not a real file position, so it can't clash
+/// with a table made in a file
+fn addon_namespace(addon: u32) -> TableId {
+    Location { file: FileId(u32::MAX - addon), offset: TextSize::new(0), slot: 0 }
+}
 
 /// Passes after which a loop that still hasn't settled is widened: any variable
 /// whose type is still changing becomes unknown. Without this, a loop already
@@ -1534,8 +1762,14 @@ const ADDON_NAMESPACE: TableId = Location { file: FileId(u32::MAX), offset: Text
 const LOOP_PASSES_BEFORE_WIDENING: usize = 8;
 
 impl<'a> Walker<'a> {
-    fn new(prior: Option<&'a Analysis>, definitions: &Arc<Definitions>, changed: HashSet<Read>, replay: bool) -> Walker<'a> {
-        Walker { prior, changed, replay, definitions: definitions.clone(), ..Walker::default() }
+    fn new(prior: Option<&'a Analysis>, definitions: &Arc<Definitions>, layer: &Arc<Layer>, changed: HashSet<Read>, replay: bool) -> Walker<'a> {
+        Walker { prior, changed, replay, layer: layer.clone(), definitions: definitions.clone(), ..Walker::default() }
+    }
+
+    /// A global's preset type: what a dependency gives it, else the
+    /// definitions'
+    fn preset_global(&self, name: &str) -> Option<Type> {
+        self.layer.globals.get(name).copied().or_else(|| self.definitions.global(name))
     }
 
     /// Notes a read for each function body being walked
@@ -1550,9 +1784,10 @@ impl<'a> Walker<'a> {
     /// the next. Locals end with their file
     fn walk(mut self, files: &[SourceFile]) -> Analysis {
         self.roots = files.iter().map(|file| file.root.clone()).collect();
+
         for (i, file) in files.iter().enumerate() {
             self.file = FileId(i as u32);
-            self.in_addon = file.in_addon;
+            self.addon = file.addon;
             if let Some(block) = Block::cast(file.root.clone()) {
                 self.push_scope(false, file.root.text_range().end());
                 self.statements(&block);
@@ -1575,8 +1810,8 @@ impl<'a> Walker<'a> {
     /// parameters, as the previous walk settled it
     fn vararg_values(&self) -> Option<Values> {
         if self.function == MAIN_CHUNK {
-            return self.in_addon.then(|| Values {
-                values: vec![Type::of(TypeSet::STRING), Type::table(ADDON_NAMESPACE)],
+            return self.addon.map(|addon| Values {
+                values: vec![Type::of(TypeSet::STRING), Type::table(addon_namespace(addon))],
                 rest: Type::NIL,
             })
         }
@@ -1595,7 +1830,9 @@ impl<'a> Walker<'a> {
         self.settle_parameter_types();
         for binding in self.bindings.iter_mut() {
             if binding.kind == BindingKind::Global && !binding.assigned {
-                binding.types = self.definitions.global(&binding.name).unwrap_or(Type::UNKNOWN);
+                binding.types = self.layer.globals.get(&binding.name).copied()
+                    .or_else(|| self.definitions.global(&binding.name))
+                    .unwrap_or(Type::UNKNOWN);
             }
         }
         let function_fields = self.fields.values().flat_map(|fields| fields.iter())
@@ -1635,6 +1872,7 @@ impl<'a> Walker<'a> {
             vararg_values: self.vararg_values,
             walks: 1,
             roots: self.roots,
+            layer: self.layer,
         }
     }
 
@@ -1758,6 +1996,10 @@ impl<'a> Walker<'a> {
             }
             if changed {
                 for &dependent in dependents.get(id).into_iter().flatten() {
+                    // A dependency's function: only that addon settles its parameters
+                    if !self.functions.contains_key(&dependent) {
+                        continue
+                    }
                     if queued.insert(dependent) {
                         queue.push_back(dependent);
                     }
@@ -1954,7 +2196,7 @@ impl<'a> Walker<'a> {
         if !self.is_unassigned_global(id) {
             return None
         }
-        self.definitions.global(&self.bindings[id].name)
+        self.preset_global(&self.bindings[id].name)
     }
 
     fn write(&mut self, token: &SyntaxToken, types: Type) {
@@ -2236,7 +2478,7 @@ impl<'a> Walker<'a> {
                                     NamedRef::None | NamedRef::Unknown => Type::table(self.function_id(def)),
                                     // A mixin: `self` is the WoW object it's mixed into, with
                                     // the mixin's fields too
-                                    NamedRef::Table(at) => match { self.note(Read::MixedInto(at)); self.prior.and_then(|prior| prior.mixed_into.get(&at)) } {
+                                    NamedRef::Table(at) => match { self.note(Read::MixedInto(at)); self.prior.and_then(|prior| prior.mixed_into.get(&at)).or_else(|| self.layer.mixed_into.get(&at)) } {
                                         Some(&(named, extended)) => Type { named: NamedRef::Instance { named, at, extended }, ..Type::of(TypeSet::TABLE) },
                                         None => Type { named: owner.named, ..Type::of(TypeSet::TABLE) },
                                     },
@@ -2365,7 +2607,12 @@ impl<'a> Walker<'a> {
             Some(own) => own,
             None => {
                 self.note(Read::AnyTableField(name_key(name)));
-                prior.any_table_fields.get(name).copied().unwrap_or(Type::UNKNOWN)
+                let own = prior.any_table_fields.get(name).copied();
+                match (own, self.layer.any_table_fields.get(name).copied()) {
+                    (Some(a), Some(b)) => a | b,
+                    (Some(found), None) | (None, Some(found)) => found,
+                    (None, None) => Type::UNKNOWN,
+                }
             }
         }
     }
@@ -2374,8 +2621,13 @@ impl<'a> Walker<'a> {
     /// mixins (the last mixin first, as later ones overwrite earlier ones)
     fn own_field(&self, prior: &Analysis, table: TableId, name: &str, depth: usize) -> Option<Type> {
         self.note(Read::Field(table, name_key(name)));
-        if let Some(own) = prior.fields.get(&table).and_then(|fields| fields.get(name)) {
-            return Some(*own)
+        // A dependency's table: what it gave the table, and what's written to it here
+        let layered = (table.file.0 >= LAYER_FILES).then(|| self.layer.field(table, name, 0)).flatten();
+        let own = prior.fields.get(&table).and_then(|fields| fields.get(name)).copied();
+        match (layered, own) {
+            (Some(a), Some(b)) => return Some(a | b),
+            (Some(found), None) | (None, Some(found)) => return Some(found),
+            (None, None) => {}
         }
         // Deep enough for any real chain of mixins, and stops a loop
         if depth > 16 {
@@ -2400,6 +2652,11 @@ impl<'a> Walker<'a> {
     /// Field `name` (`__index`, `__call`, ...) of table `table`'s metatable
     fn metamethod(&self, prior: &Analysis, table: TableId, name: &str, depth: usize) -> Option<Type> {
         self.note(Read::Metatable(table));
+        if let Some(metatable) = self.layer.metatables.get(&table).and_then(|m| m.named.identity()) {
+            if !prior.metatables.contains_key(&table) {
+                return self.own_field(prior, metatable, name, depth + 1)
+            }
+        }
         let metatable = prior.metatables.get(&table)?.named.identity()?;
         self.own_field(prior, metatable, name, depth + 1)
     }
@@ -2713,7 +2970,9 @@ impl<'a> Walker<'a> {
         match function {
             FunctionRef::One(id) => {
                 self.note(Read::Function(id));
-                self.functions.get(&id).or_else(|| self.prior?.functions.get(&id))
+                self.functions.get(&id)
+                    .or_else(|| self.layer.functions.get(&id))
+                    .or_else(|| self.prior?.functions.get(&id))
             }
             FunctionRef::Builtin(id) => self.definitions.function(id),
             _ => None,
@@ -2783,7 +3042,7 @@ impl<'a> Walker<'a> {
     fn returns_of(&self, id: FunctionId) -> Values {
         self.note(Read::Function(id));
         // Not walked yet on this walk: defined later in the file, or a recursive call
-        if let Some(function) = self.functions.get(&id) {
+        if let Some(function) = self.functions.get(&id).or_else(|| self.layer.functions.get(&id)) {
             return function.returns.clone()
         }
         match self.prior {
@@ -3065,7 +3324,7 @@ impl<'a> Walker<'a> {
         let Some(named) = self.definitions.named_type(id).filter(|named| named.has_methods) else { return };
         let name = method.text();
         self.note(Read::FunctionField(name_key(name)));
-        if self.definitions.field(receiver, name).is_some() || prior.function_fields.contains(name) {
+        if self.definitions.field(receiver, name).is_some() || prior.function_fields.contains(name) || self.layer.function_fields.contains(name) {
             return
         }
         let message = format!("{} has no method `{}`", named.name, name);
@@ -3104,7 +3363,10 @@ impl<'a> Walker<'a> {
     /// yet, else the previous one
     fn pool_object(&self, pool: TableId) -> Option<Type> {
         self.note(Read::PoolObject(pool));
-        self.pool_objects.get(&pool).or_else(|| self.prior?.pool_objects.get(&pool)).copied()
+        self.pool_objects.get(&pool)
+            .or_else(|| self.layer.pool_objects.get(&pool))
+            .or_else(|| self.prior?.pool_objects.get(&pool))
+            .copied()
     }
 
     /// `CreateFramePool`, `CreateTexturePool`, `CreateFontStringPool` and
@@ -3197,9 +3459,10 @@ impl<'a> Walker<'a> {
         // far. Parents only gain types, so the two together are never wrong
         let prior = self.prior.and_then(|prior| prior.parents.get(&at)).copied();
         let current = self.parents.get(&at).copied();
-        match (prior, current) {
-            (None, None) => None,
-            (a, b) => Some(a.unwrap_or_default() | b.unwrap_or_default()),
+        let layered = self.layer.parents.get(&at).copied();
+        match (prior, current, layered) {
+            (None, None, None) => None,
+            (a, b, c) => Some(a.unwrap_or_default() | b.unwrap_or_default() | c.unwrap_or_default()),
         }
     }
 
@@ -3433,7 +3696,7 @@ impl<'a> Walker<'a> {
             self.note(Read::Fields(at));
         }
         // What a table's array holds, any of which may be missing
-        let array = |prior: &Analysis| prior.entries.get(&table?)
+        let array = |prior: &Analysis| self.entries_of(prior, table?)
             .filter(|e| e.keys.set.contains(TypeSet::NUMBER))
             .map(|e| e.values | Type::NIL);
         if is("unpack") {
@@ -3448,15 +3711,20 @@ impl<'a> Walker<'a> {
             return match key {
                 Expression::Literal(l) if l.get_string().as_deref().and_then(string_field_name).is_some() => {
                     let name = l.get_string()?;
-                    let own = self.prior?.fields.get(&table?)?.get(string_field_name(&name)?).copied()?;
-                    one(own)
+                    let name = string_field_name(&name)?;
+                    let here = self.prior?.fields.get(&table?).and_then(|fields| fields.get(name)).copied();
+                    let layered = self.layer.fields.get(&table?).and_then(|fields| fields.get(name)).copied();
+                    one(match (here, layered) {
+                        (Some(a), Some(b)) => a | b,
+                        (a, b) => a.or(b)?,
+                    })
                 }
                 _ => one(self.index_read(arguments.get(0), arguments.get(1))),
             }
         }
         // A key and value from the table, or nil when it's empty
         if is("next") {
-            let contents = self.prior?.contents(table?)?;
+            let contents = self.contents_of(self.prior?, table?)?;
             return Some(Values { values: vec![contents.keys | Type::NIL, contents.values | Type::NIL], rest: Type::NIL })
         }
         if is("setmetatable") {
@@ -3470,7 +3738,11 @@ impl<'a> Walker<'a> {
         if is("getmetatable") {
             let at = arguments.get(0).named.identity()?;
             self.note(Read::Metatable(at));
-            return one(self.prior?.metatables.get(&at).copied()?)
+            let here = self.prior?.metatables.get(&at).copied();
+            return one(match (here, self.layer.metatables.get(&at).copied()) {
+                (Some(a), Some(b)) => a | b,
+                (a, b) => a.or(b)?,
+            })
         }
         None
     }
@@ -3609,10 +3881,11 @@ impl<'a> Walker<'a> {
         let Some(prior) = self.prior else { return Type::default() };
         self.note(Read::Entries(at));
         self.note(Read::Fields(at));
-        let mut found = prior.entries.get(&at).map(|e| e.values);
+        let entries = self.entries_of(prior, at);
+        let mut found = entries.map(|e| e.values);
         // A string key could be any of the named fields
         if key.set.contains(TypeSet::STRING) {
-            for &value in prior.fields.get(&at).into_iter().flat_map(|fields| fields.values()) {
+            for value in self.field_values_of(prior, at) {
                 *found.get_or_insert_default() |= value;
             }
         }
@@ -3620,6 +3893,30 @@ impl<'a> Walker<'a> {
             Some(values) if values.set != TypeSet::NEVER => values | Type::NIL,
             _ => Type::UNKNOWN,
         }
+    }
+
+    /// What a table holds beyond its named fields: here, and from a dependency
+    fn entries_of(&self, prior: &Analysis, at: TableId) -> Option<Entries> {
+        match (prior.entries.get(&at), self.layer.entries.get(&at)) {
+            (Some(a), Some(b)) => Some(Entries { keys: a.keys | b.keys, values: a.values | b.values }),
+            (a, b) => a.or(b).copied(),
+        }
+    }
+
+    /// The types of a table's named fields: here, and from a dependency
+    fn field_values_of(&self, prior: &Analysis, at: TableId) -> Vec<Type> {
+        prior.fields.get(&at).into_iter().chain(self.layer.fields.get(&at)).flat_map(|fields| fields.values().copied()).collect()
+    }
+
+    /// Every key and value a table holds, as `pairs` gives them, here and
+    /// from a dependency
+    fn contents_of(&self, prior: &Analysis, at: TableId) -> Option<Entries> {
+        let mut contents = self.entries_of(prior, at).unwrap_or_default();
+        for value in self.field_values_of(prior, at) {
+            contents.keys |= Type::of(TypeSet::STRING);
+            contents.values |= value.without(TypeSet::NIL);
+        }
+        (contents.values.set != TypeSet::NEVER).then_some(contents)
     }
 
     /// `table.insert` (or `tinsert`) adds its last argument to the table, and
@@ -3645,11 +3942,11 @@ impl<'a> Walker<'a> {
         self.note(Read::Fields(at));
         let contents = if ipairs {
             // Only the entries under number keys are visited
-            prior.entries.get(&at)
+            self.entries_of(prior, at)
                 .filter(|e| e.keys.set.contains(TypeSet::NUMBER))
                 .map(|e| (Type::of(TypeSet::NUMBER), e.values))
         } else {
-            prior.contents(at).map(|e| (e.keys, e.values))
+            self.contents_of(prior, at).map(|e| (e.keys, e.values))
         };
         if let Some((key, value)) = contents {
             let values = Values { values: vec![key, value], rest: Type::NIL };
@@ -3780,6 +4077,8 @@ impl<'a> Walker<'a> {
             && callee.simple_name().is_some_and(|n| n.text() == name)
             && self.is_global(name)
             && self.definitions.global(name).is_some()
+            // A dependency's global of that name isn't the library's
+            && !self.layer.globals.contains_key(name)
             && self.globals.get(name).is_none_or(|&id| self.is_unassigned_global(id))
     }
 
@@ -4748,7 +5047,7 @@ mod tests {
     fn replaying_matches_walking() {
         let parse = |path: &std::path::Path, in_addon: bool| {
             let text = std::fs::read_to_string(path).unwrap();
-            SourceFile { root: SyntaxNode::new_root(Generator::new(&text).process_all()), in_addon }
+            SourceFile { root: SyntaxNode::new_root(Generator::new(&text).process_all()), addon: in_addon.then_some(0) }
         };
         let mut programs: Vec<(String, Vec<SourceFile>)> = Vec::new();
         for entry in std::fs::read_dir("tests").unwrap() {
@@ -4765,8 +5064,8 @@ mod tests {
         assert!(programs.len() > 10);
         let mut replays = 0;
         for (name, files) in &programs {
-            let replaying = Analysis::analyse_replaying(files, &library(), true);
-            let walking = Analysis::analyse_replaying(files, &library(), false);
+            let replaying = Analysis::analyse_replaying(files, &library(), Arc::default(), true);
+            let walking = Analysis::analyse_replaying(files, &library(), Arc::default(), false);
             replays += replaying.replayed;
             assert_eq!(walking.replayed, 0);
             assert_eq!(everything_shown(&replaying), everything_shown(&walking), "{name}");
@@ -4861,7 +5160,7 @@ mod tests {
     /// sharing globals
     fn analyse_files(sources: &[&str], in_addon: bool) -> Analysis {
         let files: Vec<SourceFile> = sources.iter()
-            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), in_addon })
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: in_addon.then_some(0) })
             .collect();
         Analysis::analyse(&files, &Arc::new(Definitions::default()))
     }
@@ -4927,7 +5226,7 @@ mod tests {
         }}"#).unwrap());
         let analyse = |sources: &[&str]| {
             let files: Vec<SourceFile> = sources.iter()
-                .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), in_addon: true })
+                .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
                 .collect();
             Analysis::analyse(&files, &definitions)
         };
@@ -4993,7 +5292,7 @@ mod tests {
 
     fn analyse_mixins(sources: &[&str]) -> Analysis {
         let files: Vec<SourceFile> = sources.iter()
-            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), in_addon: true })
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
             .collect();
         Analysis::analyse(&files, &mixin_definitions())
     }
@@ -5029,7 +5328,7 @@ mod tests {
 
     fn analyse_files_with(sources: &[&str], definitions: &Arc<Definitions>) -> Analysis {
         let files: Vec<SourceFile> = sources.iter()
-            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), in_addon: true })
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
             .collect();
         Analysis::analyse(&files, definitions)
     }
@@ -5046,7 +5345,7 @@ mod tests {
             }
         }"#).unwrap());
         let files: Vec<SourceFile> = sources.iter()
-            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), in_addon: true })
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
             .collect();
         Analysis::analyse(&files, &definitions)
     }

@@ -51,13 +51,13 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
         .and_then(|o| o.get("definitionsPath"))
         .and_then(|p| p.as_str())
         .map(PathBuf::from);
-    // Where to look for addons (`.toc` files)
+    // Where to look for addons (`.toc` files): every workspace folder, or the
+    // root for editors without them
     #[allow(deprecated)]
-    let root = init_params.workspace_folders.as_ref()
-        .and_then(|folders| folders.first())
-        .map(|folder| folder.uri.to_string())
-        .or_else(|| init_params.root_uri.as_ref().map(|uri| uri.to_string()))
-        .and_then(|uri| project::uri_to_path(&uri));
+    let roots: Vec<PathBuf> = match &init_params.workspace_folders {
+        Some(folders) if !folders.is_empty() => folders.iter().filter_map(|f| project::uri_to_path(f.uri.as_str())).collect(),
+        _ => init_params.root_uri.iter().filter_map(|uri| project::uri_to_path(uri.as_str())).collect(),
+    };
     let _client_capabilities: ClientCapabilities = init_params.capabilities;
     let server_capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -79,19 +79,21 @@ pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
 
     connection.initialize_finish(id, initialize_data)?;
 
-    main_loop(connection, definitions_path, root)
+    main_loop(connection, definitions_path, roots)
 }
 
 /// What's known about the workspace's addons, built when first needed
 #[derive(Default)]
 struct Workspace {
-    root: Option<PathBuf>,
+    /// The workspace folders, searched for addons
+    roots: Vec<PathBuf>,
     /// Found the first time they're needed, and again after a `.toc` changes
     addons: Option<Vec<Addon>>,
     /// Text of open documents, which is used instead of what's on disk
     open: HashMap<PathBuf, String>,
-    /// Each addon's analysis, by its `.toc`, until one of its files changes
-    analyses: HashMap<PathBuf, Arc<(Analysis, Vec<PathBuf>)>>,
+    /// Each addon's analysis, of its own files over what those it depends on
+    /// make visible, by its `.toc`, until one of the files it involves changes
+    analyses: HashMap<PathBuf, Arc<project::Analysed>>,
     /// The URI each open document was opened with
     uris: HashMap<PathBuf, lsp_types::Uri>,
 }
@@ -99,7 +101,7 @@ struct Workspace {
 impl Workspace {
     fn addons(&mut self) -> &[Addon] {
         if self.addons.is_none() {
-            self.addons = Some(self.root.as_deref().map(project::discover).unwrap_or_default());
+            self.addons = Some(self.roots.iter().flat_map(|root| project::discover(root)).collect());
         }
         self.addons.as_deref().unwrap_or_default()
     }
@@ -110,14 +112,16 @@ impl Workspace {
         let path = project::normalise(path);
         let Some(text) = self.open.get(&path).cloned() else { return };
         let root = SyntaxNode::new_root(syntax::Generator::new(&text).process_all());
-        let (analysis, _) = self.analysis(Some(&path), &root, definitions);
-        let (analysis, paths) = (&analysis.0, &analysis.1);
-        // Files of the addon, or the one file analysed on its own
-        let files: Vec<(FileId, PathBuf)> = if paths.is_empty() {
-            vec![(FileId(0), path.clone())]
-        } else {
-            paths.iter().enumerate().map(|(i, p)| (FileId(i as u32), p.clone())).collect()
+        let (analysis, file) = self.analysis(Some(&path), &root, definitions);
+        // Files of the addon, or the one file analysed on its own. Not those of
+        // addons it depends on, which have analyses of their own
+        let files: Vec<(FileId, PathBuf)> = match &analysis {
+            Analysed::Addon(analysed) => analysed.paths.iter().enumerate()
+                .map(|(i, p)| (FileId(i as u32), p.clone()))
+                .collect(),
+            Analysed::File(_) => vec![(file, path.clone())],
         };
+        let analysis = analysis.analysis();
         for (file, path) in files {
             let (Some(uri), Some(text)) = (self.uris.get(&path), self.open.get(&path)) else { continue };
             let warnings: Vec<_> = analysis.diagnostics.iter()
@@ -128,47 +132,79 @@ impl Workspace {
         }
     }
 
-    /// A document's text changed (or was opened)
-    fn changed(&mut self, path: PathBuf, text: String) {
+    /// A document's text changed (or was opened). Returns the other open
+    /// documents whose diagnostics could change too: those of addons that
+    /// depend on its addon
+    fn changed(&mut self, path: PathBuf, text: String) -> Vec<PathBuf> {
         if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("toc")) {
             self.addons = None;
             self.analyses.clear();
         }
         let path = project::normalise(&path);
-        let affected: Vec<PathBuf> = self.addons.iter().flatten()
+        // Opening a file as it is on disk changes nothing analysed
+        let before = self.open.get(&path).cloned().or_else(|| std::fs::read_to_string(&path).ok());
+        if before.as_deref() == Some(text.as_str()) {
+            self.open.insert(path, text);
+            return Vec::new()
+        }
+        // Every analysis that involves it: its addon's, and those of addons
+        // depending on it however indirectly. Its addon's even if not analysed yet
+        let affected: Vec<PathBuf> = self.analyses.iter()
+            .filter(|(_, analysed)| analysed.involves.contains(&path))
+            .map(|(toc, _)| toc.clone())
+            .collect();
+        let mut others: Vec<PathBuf> = self.addons.iter().flatten()
             .filter(|addon| addon.contains(&path))
-            .map(|addon| addon.toc.clone())
+            .flat_map(|addon| addon.files.iter().cloned())
             .collect();
         for toc in affected {
-            self.analyses.remove(&toc);
+            if let Some(analysed) = self.analyses.remove(&toc) {
+                others.extend(analysed.paths.iter().cloned());
+            }
         }
+        others.retain(|f| *f != path && self.open.contains_key(f));
+        others.dedup();
         self.open.insert(path, text);
+        others
     }
 
     /// The analysis covering `path`, and its id in that analysis: its whole
     /// addon's if it's in one, otherwise just the file (`root`)
-    fn analysis(&mut self, path: Option<&Path>, root: &SyntaxNode, definitions: &Arc<Definitions>) -> (Arc<(Analysis, Vec<PathBuf>)>, FileId) {
+    fn analysis(&mut self, path: Option<&Path>, root: &SyntaxNode, definitions: &Arc<Definitions>) -> (Analysed, FileId) {
         if let Some(path) = path.map(project::normalise) {
             if let Some(addon) = project::addon_for(self.addons(), &path).cloned() {
-                let open = &self.open;
-                let analysis = self.analyses.entry(addon.toc.clone())
-                    .or_insert_with(|| Arc::new(addon.analyse(open, definitions)))
-                    .clone();
-                if let Some(index) = analysis.1.iter().position(|p| *p == path) {
-                    return (analysis, FileId(index as u32))
+                let known = self.addons.as_deref().unwrap_or_default();
+                let analysed = project::analyse_addon(&addon, known, &self.open, definitions, &mut self.analyses);
+                if let Some(index) = analysed.paths.iter().position(|p| *p == path) {
+                    return (Analysed::Addon(analysed), FileId(index as u32))
                 }
             }
         }
-        (Arc::new((Analysis::analyse_file(root, definitions), Vec::new())), FileId(0))
+        (Analysed::File(Analysis::analyse_file(root, definitions)), FileId(0))
     }
 }
 
-fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Option<PathBuf>) -> Result<(), Box<dyn Error + Sync + Send>> {
+/// An analysis of an addon, or of a file in none
+enum Analysed {
+    Addon(Arc<project::Analysed>),
+    File(Analysis),
+}
+
+impl Analysed {
+    fn analysis(&self) -> &Analysis {
+        match self {
+            Analysed::Addon(analysed) => &analysed.analysis,
+            Analysed::File(analysis) => analysis,
+        }
+    }
+}
+
+fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: Vec<PathBuf>) -> Result<(), Box<dyn Error + Sync + Send>> {
     // Loaded the first time types are needed, not at startup
     let mut loaded_definitions: Option<Arc<Definitions>> = None;
     let mut language: HashMap<String, String> = HashMap::new();
     let mut text: HashMap<String, String> = HashMap::new();
-    let mut workspace = Workspace { root, ..Workspace::default() };
+    let mut workspace = Workspace { roots, ..Workspace::default() };
 
     // Files whose diagnostics are out of date. They're published once no
     // messages are waiting, so a burst of keystrokes is analysed once, for the
@@ -267,7 +303,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                             let uri = params.text_document_position_params.text_document.uri.to_string();
                             let path = project::uri_to_path(&uri);
                             let (analysis, file) = workspace.analysis(path.as_deref(), &all, &definitions);
-                            let analysis = &analysis.0;
+                            let analysis = analysis.analysis();
                             let (output, text_range) = match analysis.hover(file, offset) {
                                 Some(hover) => hover,
                                 None => {
@@ -325,17 +361,21 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                         if let Ok(params) = cast_not::<notification::DidChangeTextDocument>(not) {
                             let path = project::uri_to_path(&params.text_document.uri.to_string());
                             if let (Some(path), Some(change)) = (&path, params.content_changes.first()) {
-                                workspace.changed(path.clone(), change.text.clone());
+                                for other in workspace.changed(path.clone(), change.text.clone()) {
+                                    if !owed.contains(&other) {
+                                        owed.push(other);
+                                    }
+                                }
                             }
                             if let Some(l) = language.get(&params.text_document.uri.to_string()) {
                                 if l == "lua" {
                                     text.remove(&params.text_document.uri.to_string());
                                     text.insert(params.text_document.uri.to_string(), params.content_changes[0].text.clone());
                                     match &path {
+                                        // Before the addons depending on it
                                         Some(path) => {
-                                            if !owed.contains(path) {
-                                                owed.push(path.clone());
-                                            }
+                                            owed.retain(|owed| owed != path);
+                                            owed.insert(0, path.clone());
                                         }
                                         None => diagnostics::publish(&connection, params.text_document.uri, &params.content_changes[0].text, &[]),
                                     }
@@ -350,14 +390,18 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, root: Op
                             let path = project::uri_to_path(&params.text_document.uri.to_string());
                             if let Some(path) = &path {
                                 workspace.uris.insert(project::normalise(path), params.text_document.uri.clone());
-                                workspace.changed(path.clone(), params.text_document.text.clone());
+                                for other in workspace.changed(path.clone(), params.text_document.text.clone()) {
+                                    if !owed.contains(&other) {
+                                        owed.push(other);
+                                    }
+                                }
                             }
                             if params.text_document.language_id == "lua" {
                                 match &path {
+                                    // Before the addons depending on it
                                     Some(path) => {
-                                        if !owed.contains(path) {
-                                            owed.push(path.clone());
-                                        }
+                                        owed.retain(|owed| owed != path);
+                                        owed.insert(0, path.clone());
                                     }
                                     None => diagnostics::publish(&connection, params.text_document.uri, &params.text_document.text, &[]),
                                 }
@@ -380,7 +424,7 @@ fn complete(workspace: &mut Workspace, uri: &str, s: &str, position: Position, d
     let root = SyntaxNode::new_root(syntax::Generator::new(s).process_all());
     let path = project::uri_to_path(uri);
     let (analysis, file) = workspace.analysis(path.as_deref(), &root, definitions);
-    let analysis = &analysis.0;
+    let analysis = analysis.analysis();
     let completions = completion::complete(analysis, file, &root, s, offset);
     let items = completions.candidates.iter().map(|candidate| {
         let (kind, order) = match candidate.kind {

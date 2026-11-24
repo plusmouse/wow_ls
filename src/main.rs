@@ -53,12 +53,20 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         let definitions = std::sync::Arc::new(definitions::load(None));
         let target = std::path::Path::new(&args[2]);
         let before = std::time::Instant::now();
+        // An addon sees what those it depends on (found beside it) make
+        // visible, each analysed on its own first
+        let (analysed, analysed_file, dependency_files);
         let (analysis, paths) = if target.extension().is_some_and(|e| e.eq_ignore_ascii_case("toc")) {
-            project::Addon::load(target)?.analyse(&Default::default(), &definitions)
+            let addon = project::Addon::load(target)?;
+            analysed = project::analyse_addon(&addon, &[], &Default::default(), &definitions, &mut Default::default());
+            dependency_files = analysed.involves.len() - analysed.paths.len();
+            (&analysed.analysis, analysed.paths.clone())
         } else {
             let s = std::fs::read_to_string(target)?;
             let root = syntax::syntax::SyntaxNode::new_root(syntax::syntax::Generator::new(&s).process_all());
-            (types::Analysis::analyse_file(&root, &definitions), vec![target.to_path_buf()])
+            dependency_files = 0;
+            analysed_file = types::Analysis::analyse_file(&root, &definitions);
+            (&analysed_file, vec![target.to_path_buf()])
         };
         let dur = std::time::Instant::now() - before;
         for (i, path) in paths.iter().enumerate() {
@@ -85,7 +93,8 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         }
         let bodies = analysis.replayed + analysis.walked;
         let replayed = if bodies == 0 { 0 } else { analysis.replayed * 100 / bodies };
-        eprintln!("{} files, {} bindings, {} references in {:?} ({} walks, {}% of function bodies replayed)", paths.len(), analysis.bindings.len(), analysis.references.len(), dur, analysis.walks, replayed);
+        let with = if dependency_files > 0 { format!(" (and {dependency_files} of addons it depends on, analysed first)") } else { String::new() };
+        eprintln!("{} files{with}, {} bindings, {} references in {:?} ({} walks, {}% of function bodies replayed)", paths.len(), analysis.bindings.len(), analysis.references.len(), dur, analysis.walks, replayed);
         Ok(())
     } else {
         lsp::start_ls()

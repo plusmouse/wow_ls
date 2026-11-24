@@ -139,6 +139,12 @@ fn names(analysis: &Analysis, file: FileId, offset: TextSize, prefix: &str) -> C
             globals.push(Candidate { name: binding.name.clone(), kind: CandidateKind::Global, types: binding.types });
         }
     }
+    // Those of addons depended on before the preset ones, which they can replace
+    for (name, &types) in &analysis.layer.globals {
+        if matches(name, prefix) && seen.insert(name.clone()) {
+            globals.push(Candidate { name: name.clone(), kind: CandidateKind::Global, types });
+        }
+    }
     for (name, types) in analysis.definitions.globals() {
         if matches(name, prefix) && seen.insert(name.to_string()) {
             globals.push(Candidate { name: name.to_string(), kind: CandidateKind::Global, types });
@@ -237,18 +243,23 @@ fn own_fields(analysis: &Analysis, at: TableId, found: &mut HashMap<String, Type
     if depth > 16 {
         return
     }
-    for (name, &types) in analysis.fields.get(&at).into_iter().flatten() {
+    // What the files give it, then what an addon depended on gives it
+    let layer = &analysis.layer;
+    for (name, &types) in analysis.fields.get(&at).into_iter().chain(layer.fields.get(&at)).flatten() {
         found.entry(name.clone()).or_insert(types);
     }
-    for mixin in analysis.mixins.get(&at).into_iter().flatten().rev() {
+    for mixin in analysis.mixins.get(&at).or_else(|| layer.mixins.get(&at)).into_iter().flatten().rev() {
         if let Some(mixin) = mixin.named.identity() {
             own_fields(analysis, mixin, found, depth + 1);
         }
     }
     // Then what the metatable's `__index` table gives, as a class's methods
-    let index = analysis.metatables.get(&at)
+    let field = |table: TableId, name: &str| analysis.fields.get(&table).and_then(|f| f.get(name))
+        .or_else(|| layer.fields.get(&table)?.get(name))
+        .copied();
+    let index = analysis.metatables.get(&at).or_else(|| layer.metatables.get(&at))
         .and_then(|metatable| metatable.named.identity())
-        .and_then(|metatable| analysis.fields.get(&metatable)?.get("__index"))
+        .and_then(|metatable| field(metatable, "__index"))
         .and_then(|index| index.named.identity());
     if let Some(index) = index {
         own_fields(analysis, index, found, depth + 1);
