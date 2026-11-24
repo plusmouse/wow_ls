@@ -20,11 +20,13 @@ from the code itself, with no annotations needed.
   - calls to methods a WoW object doesn't have
     (`Frame has no method SetPiont`), except on frames made from a template,
     which can add methods
-  - calls to methods of a table made in the code when no function by that
-    name is defined anywhere (`self:ProcessQueue()` with no `ProcessQueue`),
-    unless a WoW object has a method of that name, or the table may get
-    fields the analysis can't see (an unknown mixin or `__index`, or functions
-    stored under computed keys)
+  - calls to methods of a table made in the code when nothing in the addon or
+    its dependencies defines a function by that name
+    (``No function `ProcessQueue` is defined for this table``). Not reported
+    when a WoW object has a method of that name, as the table may be a mixin
+    for one, or when the table may get fields the analysis can't see: from
+    an unknown mixin, metatable or `__index`, or functions stored under
+    computed keys
 
 ## Usage
 
@@ -100,5 +102,8 @@ files) about 420ms per edit, with Syndicator's analysis cached.
   from Blizzard's own Lua mixins that XML templates bring in
   (`ItemButtonMixin`'s `SetItemButtonQuality`) aren't known either, so calls
   to them on `self` in a template's mixin are reported
+- A mixin passed to `Mixin` through a parameter (`Mixin(frame, mixin)` in a
+  helper called with several mixins) isn't tied to the frame, so its `self`
+  is a plain table rather than the frame
 - A call to a dependency's function gets what it returns in general, not
   narrowed by that call's arguments
