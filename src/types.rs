@@ -947,6 +947,7 @@ pub struct Layer {
     pub functions: HashMap<FunctionId, FunctionInfo>,
     pub fields: HashMap<TableId, HashMap<String, Type>>,
     pub any_table_fields: HashMap<String, Type>,
+    pub opened_types: HashSet<NamedId>,
     pub function_fields: HashSet<String>,
     pub entries: HashMap<TableId, Entries>,
     pub metatables: HashMap<TableId, Type>,
@@ -1020,6 +1021,7 @@ impl Layer {
         for (name, &ty) in &analysis.any_table_fields {
             *own.any_table_fields.entry(name.clone()).or_default() |= renumber_type(ty, &file);
         }
+        own.opened_types.extend(analysis.opened_types.iter().copied());
         own.function_fields = analysis.function_fields.clone();
         for (at, entries) in &analysis.entries {
             let mine = own.entries.entry(renumber(*at, &file)).or_default();
@@ -1083,6 +1085,7 @@ impl Layer {
         for (name, &ty) in &other.any_table_fields {
             *self.any_table_fields.entry(name.clone()).or_default() |= ty;
         }
+        self.opened_types.extend(other.opened_types.iter().copied());
         self.function_fields.extend(other.function_fields.iter().cloned());
         for (at, entries) in &other.entries {
             let mine = self.entries.entry(*at).or_default();
@@ -1249,6 +1252,10 @@ pub struct Analysis {
     pub fields: HashMap<TableId, HashMap<String, Type>>,
     /// Values assigned to fields of tables whose identity wasn't known, by name
     pub any_table_fields: HashMap<String, Type>,
+    /// Data types (see `Definitions::has_fixed_fields`) a value of which was
+    /// given fields the analysis can't name: under a computed key, by
+    /// `rawset`, from a mixin or through a metatable
+    pub opened_types: HashSet<NamedId>,
     /// What each table made in the files holds beyond its named fields
     pub entries: HashMap<TableId, Entries>,
     /// Each table's metatable, from `setmetatable`
@@ -1443,6 +1450,9 @@ impl Analysis {
                 changed.insert(Read::AnyTableField(name_key(name)));
             }
         }
+        for &id in self.opened_types.symmetric_difference(&older.opened_types) {
+            changed.insert(Read::Opened(id));
+        }
         for name in self.function_fields.symmetric_difference(&older.function_fields) {
             changed.insert(Read::FunctionField(name_key(name)));
         }
@@ -1520,6 +1530,7 @@ impl Analysis {
         for (name, &ty) in &other.any_table_fields {
             *self.any_table_fields.entry(name.clone()).or_default() |= ty;
         }
+        self.opened_types.extend(other.opened_types.iter().copied());
         self.function_fields.extend(other.function_fields.iter().cloned());
         for (at, entries) in &other.entries {
             let mine = self.entries.entry(*at).or_default();
@@ -1576,6 +1587,7 @@ impl Analysis {
             .flat_map(|(at, fields)| fields.iter().map(move |field| (at, field)))
             .fold(0u64, |sum, entry| sum.wrapping_add(mixed((0u8, entry))));
         let function_fields = self.function_fields.iter().fold(0u64, |sum, name| sum.wrapping_add(mixed((1u8, name))));
+        let opened_types = self.opened_types.iter().fold(0u64, |sum, id| sum.wrapping_add(mixed((11u8, id))));
         let bindings = mixed(self.bindings.iter().map(|b| (&b.name, b.types, b.assigned)).collect::<Vec<_>>());
         mixed([
             fields,
@@ -1590,6 +1602,7 @@ impl Analysis {
             map(8, &self.metatables),
             map(9, &self.vararg_values),
             map(10, &self.functions),
+            opened_types,
         ])
     }
 
@@ -2065,6 +2078,8 @@ struct Walker<'a> {
     /// field can be written after (or in another function from) a read
     fields: HashMap<TableId, HashMap<String, Type>>,
     any_table_fields: HashMap<String, Type>,
+    /// Data types given fields that can't be named, seen on this walk
+    opened_types: HashSet<NamedId>,
     /// Entries seen on this walk. Reads use the previous walk's, like fields
     entries: HashMap<TableId, Entries>,
     /// Metatables seen on this walk. Reads use the previous walk's, like fields
@@ -2135,6 +2150,8 @@ enum MixinTarget {
 enum Write {
     Field(TableId, String, Type),
     AnyTableField(String, Type),
+    /// A data type given fields that can't be named
+    Opened(NamedId),
     StoredInField(FunctionId, String),
     Entry(TableId, Type, Type),
     Metatable(TableId, Type),
@@ -2166,6 +2183,7 @@ enum Read {
     /// All of a table's fields, as `t[k]` and `pairs` see them
     Fields(TableId),
     AnyTableField(u64),
+    Opened(NamedId),
     FunctionField(u64),
     Entries(TableId),
     Metatable(TableId),
@@ -2436,6 +2454,7 @@ impl<'a> Walker<'a> {
             definitions: self.definitions,
             fields: self.fields,
             any_table_fields: self.any_table_fields,
+            opened_types: self.opened_types,
             entries: self.entries,
             metatables: self.metatables,
             vararg_values: self.vararg_values,
@@ -3306,6 +3325,9 @@ impl<'a> Walker<'a> {
         match write {
             Write::Field(at, name, value) => *named(self.fields.entry(*at).or_default(), name) |= *value,
             Write::AnyTableField(name, value) => *named(&mut self.any_table_fields, name) |= *value,
+            Write::Opened(id) => {
+                self.opened_types.insert(*id);
+            }
             Write::StoredInField(function, name) => {
                 let names = self.stored_in_fields.entry(*function).or_default();
                 if !names.contains(name) {
@@ -4124,6 +4146,18 @@ impl<'a> Walker<'a> {
         self.diagnostics.push(Diagnostic { file: self.file, range: method.text_range(), message });
     }
 
+    /// `ty`, if it's a data table (or may be one), was given fields that can't
+    /// be named, so it may have any
+    fn open(&mut self, ty: Type) {
+        for object in ty.named.alternatives() {
+            if let NamedRef::One(id) | NamedRef::Extended(id) = object {
+                if self.definitions.has_fixed_fields(id) {
+                    self.apply(Write::Opened(id));
+                }
+            }
+        }
+    }
+
     /// Reports reading field `name` (at `token`) of a data table whose fields
     /// the definitions give all of (`values`), when it has none of that name
     /// and no code in the files gives one of that name to a table like it.
@@ -4136,6 +4170,10 @@ impl<'a> Walker<'a> {
         }
         let NamedRef::One(id) = base.named else { return };
         if !self.definitions.has_fixed_fields(id) || self.definitions.field(base, name).is_some() {
+            return
+        }
+        self.note(Read::Opened(id));
+        if prior.opened_types.contains(&id) || self.layer.opened_types.contains(&id) {
             return
         }
         // Writes to it, as to any table whose identity isn't known, are by name
@@ -4559,6 +4597,9 @@ impl<'a> Walker<'a> {
         for mixin in mixins {
             self.record_mixed_into(*mixin, object.named);
         }
+        if !mixins.is_empty() {
+            self.open(object);
+        }
         // Only a table or object made in the files can keep track of its
         // mixins: it, or each of several it may be
         let targets: Vec<TableId> = object.named.identity().into_iter().chain(self.several_objects(object)).collect();
@@ -4763,8 +4804,15 @@ impl<'a> Walker<'a> {
             let contents = self.contents_of(self.prior?, table?)?;
             return Some(Values { values: vec![contents.keys | Type::NIL, contents.values | Type::NIL], rest: Type::NIL })
         }
+        // Fields set this way can't be named, or come from where the
+        // analysis doesn't look
+        if is("rawset") {
+            self.open(arguments.get(0));
+            return None
+        }
         if is("setmetatable") {
             let (table, metatable) = (arguments.get(0), arguments.get(1));
+            self.open(table);
             let at = table.named.identity()?;
             // One that isn't known is kept too, so the table isn't taken to have
             // none
@@ -4910,6 +4958,9 @@ impl<'a> Walker<'a> {
     /// `t[key] = value` (or an array item, or `table.insert`) for a table made
     /// in the files. Storing nil removes, so adds nothing
     fn entry_write(&mut self, base: Type, key: Type, value: Type) {
+        if key.set.contains(TypeSet::STRING) {
+            self.open(base);
+        }
         let Some(at) = base.named.identity() else { return };
         let value = value.without(TypeSet::NIL);
         if value.set == TypeSet::NEVER {
@@ -6614,7 +6665,11 @@ mod tests {
     fn missing_data_fields() {
         let definitions = Arc::new(Definitions::from_json(r#"{
             "types": {"Info": {"base": "table", "values": {"count": "number", "link": "string|nil"}}, "Loose": {"base": "table"}},
-            "functions": {"GetInfo": {"returns": ["Info|nil"]}, "GetLoose": {"returns": ["Loose"]}}
+            "functions": {"GetInfo": {"returns": ["Info|nil"]}, "GetLoose": {"returns": ["Loose"]},
+                "Mixin": {"parameters": ["object", "..."], "returns": ["unknown"]},
+                "rawset": {"parameters": ["t: table", "key", "value"], "returns": ["table"]},
+                "setmetatable": {"parameters": ["t: table", "mt"], "returns": ["table"]},
+                "pairs": {"parameters": ["t"], "returns": ["unknown"]}}
         }"#).unwrap());
         let warnings = |source: &str| -> Vec<String> {
             analyse_with(source, &definitions).diagnostics.iter().map(|d| d.message.clone()).collect()
@@ -6627,6 +6682,15 @@ mod tests {
         assert!(warnings("local function tag(t) t.extra = true end local i = GetInfo() tag(i) print(i.extra)").is_empty());
         // A type without `values` may have any field
         assert!(warnings("local l = GetLoose() print(l.anything)").is_empty());
+        // Or fields that can't be named: under a computed key, by `rawset`, a
+        // mixin or a metatable, wherever that is
+        assert!(warnings("local i = GetInfo() local k = 'extra' i[k] = 1 print(i.extra)").is_empty());
+        assert!(warnings("local i = GetInfo() print(i.extra) local function f() for k, v in pairs({}) do i[k] = v end end f()").is_empty());
+        assert!(warnings("local i = GetInfo() rawset(i, 'extra', 1) print(i.extra)").is_empty());
+        assert!(warnings("local i = GetInfo() Mixin(i, {extra = 1}) print(i.extra)").is_empty());
+        assert!(warnings("local i = GetInfo() setmetatable(i, {__index = {extra = 1}}) print(i.extra)").is_empty());
+        // Numbered entries don't give it names
+        assert_eq!(warnings("local i = GetInfo() i[1] = true print(i.extra)"), ["Info has no field `extra`"]);
     }
 
     #[test]

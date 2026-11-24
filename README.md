@@ -43,7 +43,9 @@ from the code itself, with no annotations needed.
   - reads of fields a table the WoW API returns doesn't come with
     (``ContainerItemInfo has no field `stackCont` ``). Not reported when the
     addon or its dependencies give a field of that name to a table whose
-    identity the analysis doesn't know, as the table is the addon's to change
+    identity the analysis doesn't know, as the table is the addon's to change,
+    or give a table of that type fields it can't name (under a computed key,
+    by `rawset`, `Mixin` or `setmetatable`)
   - XML files that don't parse, at the error
   - calls to methods of a table made in the code when nothing in the addon or
     its dependencies defines a function by that name
