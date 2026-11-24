@@ -240,6 +240,12 @@ impl Definitions {
         self.types.get(id as usize)
     }
 
+    /// Whether some WoW object type has a method called `name`, in one of
+    /// its `method_tables`
+    pub fn is_object_method(&self, name: &str) -> bool {
+        self.method_tables.values().any(|methods| methods.contains_key(name))
+    }
+
     pub fn named_type_id(&self, name: &str) -> Option<NamedId> {
         self.type_names.get(name).copied()
     }

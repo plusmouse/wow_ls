@@ -251,6 +251,10 @@ pub struct Location {
 /// pool's objects
 const POOL_OBJECT: u32 = 1 << 31;
 
+/// Added to the slot of a pseudo identity: one a variable holding a table of
+/// unknown origin is given where it's declared
+const PSEUDO: u32 = 1 << 30;
+
 /// Which function a value is, when it can be one
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum FunctionRef {
@@ -2112,7 +2116,7 @@ impl<'a> Walker<'a> {
     fn declare(&mut self, token: &SyntaxToken, kind: BindingKind, mut types: Type) -> BindingId {
         if types.named == NamedRef::Unknown {
             // A table we can't identify: track its fields under this variable
-            types.named = NamedRef::Table(self.location(token.text_range().start()));
+            types.named = NamedRef::Table(Location { slot: PSEUDO, ..self.location(token.text_range().start()) });
         }
         let depth = self.scopes.len() - 1;
         let id = self.new_binding(token.text(), kind, Some(token.text_range()), types, self.function, depth);
@@ -3314,13 +3318,14 @@ impl<'a> Walker<'a> {
     fn check_method(&mut self, receiver: Type, method: &SyntaxToken) {
         // Only the previous walk knows every function the files define
         let Some(prior) = self.prior else { return };
-        let id = match receiver.named {
-            NamedRef::One(id) | NamedRef::Instance { named: id, extended: false, .. } => id,
-            _ => return,
-        };
         if receiver.set.without(OBJECTS | TypeSet::NIL) != TypeSet::NEVER {
             return
         }
+        let id = match receiver.named {
+            NamedRef::One(id) | NamedRef::Instance { named: id, extended: false, .. } => id,
+            NamedRef::Table(table) => return self.check_table_method(prior, table, method),
+            _ => return,
+        };
         let Some(named) = self.definitions.named_type(id).filter(|named| named.has_methods) else { return };
         let name = method.text();
         self.note(Read::FunctionField(name_key(name)));
@@ -3329,6 +3334,67 @@ impl<'a> Walker<'a> {
         }
         let message = format!("{} has no method `{}`", named.name, name);
         self.diagnostics.push(Diagnostic { file: self.file, range: method.text_range(), message });
+    }
+
+    /// Reports `t:method()` for a table made in the files when no table in
+    /// them (or the addons they depend on) is given a function called
+    /// `method`, no WoW object has a method of that name (the table may be a
+    /// mixin for one, in a way the analysis can't follow), the table has no
+    /// field of that name, and nothing else the analysis can't follow could
+    /// give it one
+    fn check_table_method(&mut self, prior: &Analysis, table: TableId, method: &SyntaxToken) {
+        // A variable's stand-in for a table it doesn't know
+        if table.slot & PSEUDO != 0 {
+            return
+        }
+        let name = method.text();
+        self.note(Read::FunctionField(name_key(name)));
+        if prior.function_fields.contains(name) || self.layer.function_fields.contains(name) {
+            return
+        }
+        if self.definitions.is_object_method(name) {
+            return
+        }
+        if self.own_field(prior, table, name, 0).is_some() || self.may_gain_fields(prior, table, 0) {
+            return
+        }
+        let message = format!("No function `{}` is defined for this table", name);
+        self.diagnostics.push(Diagnostic { file: self.file, range: method.text_range(), message });
+    }
+
+    /// Whether a table made in the files could have fields the analysis
+    /// doesn't see: from a mixin or `__index` that isn't a table made in
+    /// them, or functions stored under keys that aren't known names
+    fn may_gain_fields(&self, prior: &Analysis, table: TableId, depth: usize) -> bool {
+        // Deep enough for any real chain, and stops a loop
+        if depth > 16 || table.slot & PSEUDO != 0 {
+            return true
+        }
+        self.note(Read::Entries(table));
+        let entries = [prior.entries.get(&table), self.layer.entries.get(&table)];
+        if entries.into_iter().flatten().any(|e| e.keys.set.contains(TypeSet::STRING) && e.values.set.contains(TypeSet::FUNCTION)) {
+            return true
+        }
+        self.note(Read::Mixins(table));
+        let mixins = [prior.mixins.get(&table), self.layer.mixins.get(&table)];
+        let open_mixin = mixins.into_iter().flatten().flatten().any(|mixin| match mixin.named.identity() {
+            Some(mixin) => self.may_gain_fields(prior, mixin, depth + 1),
+            None => true,
+        });
+        if open_mixin {
+            return true
+        }
+        self.note(Read::Metatable(table));
+        let Some(metatable) = prior.metatables.get(&table).or_else(|| self.layer.metatables.get(&table)) else { return false };
+        let Some(metatable) = metatable.named.identity() else { return true };
+        match self.own_field(prior, metatable, "__index", depth + 1) {
+            None => self.may_gain_fields(prior, metatable, depth + 1),
+            Some(index) => match index.named.identity() {
+                Some(fallback) if index.set.without(OBJECTS | TypeSet::NIL) == TypeSet::NEVER => self.may_gain_fields(prior, fallback, depth + 1),
+                // A function, or something not known
+                _ => true,
+            },
+        }
     }
 
     /// `CreateFrame("Button", ...)` gives a `Button`: the frame type named by a
@@ -3468,13 +3534,13 @@ impl<'a> Walker<'a> {
 
     /// Whether a table or object was made by the function being walked
     fn made_here(&self, at: TableId) -> bool {
-        at.slot == 0 && at.file == self.file && self.function_ranges.last().is_some_and(|(range, _)| range.contains(at.offset))
+        at.slot & !PSEUDO == 0 && at.file == self.file && self.function_ranges.last().is_some_and(|(range, _)| range.contains(at.offset))
     }
 
     /// The innermost function being walked that made a table or object (or a
     /// pool whose object it is), as its number in the walk
     fn maker(&self, at: TableId) -> Option<usize> {
-        if at.file != self.file || at.slot & !POOL_OBJECT != 0 {
+        if at.file != self.file || at.slot & !(POOL_OBJECT | PSEUDO) != 0 {
             return None
         }
         self.function_ranges.iter().rev().find(|(range, _)| range.contains(at.offset)).map(|&(_, function)| function)
@@ -3730,7 +3796,9 @@ impl<'a> Walker<'a> {
         if is("setmetatable") {
             let (table, metatable) = (arguments.get(0), arguments.get(1));
             let at = table.named.identity()?;
-            if metatable.named.identity().is_some() {
+            // One that isn't known is kept too, so the table isn't taken to have
+            // none
+            if metatable.named != NamedRef::None {
                 self.apply(Write::Metatable(at, metatable));
             }
             return one(table)
@@ -5727,12 +5795,44 @@ mod tests {
         // Not one known WoW type
         assert!(warnings("local f = c and CreateFrame('Frame') or 's' f:Nope()").is_empty());
         assert!(warnings("local f = c and CreateFrame('Frame') or {} f:Nope()").is_empty());
-        assert!(warnings("local t = {} t:Nope()").is_empty());
         assert!(warnings("unknown:Nope()").is_empty());
         // A type without known methods, like a data structure
         assert!(warnings("local k = GetItemKey() k:Nope()").is_empty());
         // Recorded once, even in loops
         assert_eq!(warnings("local f = CreateFrame('Frame') while c do f:Nope() end").len(), 1);
+    }
+
+    #[test]
+    fn undefined_table_methods() {
+        let warnings = |source: &str| -> Vec<String> {
+            analyse_with(source, &library()).diagnostics.iter().map(|d| d.message.clone()).collect()
+        };
+        let missing = |name: &str| vec![format!("No function `{name}` is defined for this table")];
+        assert_eq!(warnings("local t = {} t:Tree()"), missing("Tree"));
+        assert_eq!(warnings("local t = {} function t:Grow() self:Tree() end t:Grow()"), missing("Tree"));
+        assert_eq!(warnings("local t = {} while c do t:Tree() end"), missing("Tree"));
+        // A parameter given that table at every call
+        assert_eq!(warnings("local function f(t) t:Tree() end f({})"), missing("Tree"));
+        // Through `__index` to a table that doesn't have it either
+        assert_eq!(warnings("local C = {} C.__index = C function C:Grow() end local o = setmetatable({}, C) o:Grow() o:Tree()"), missing("Tree"));
+        // Defined on this table, later on, or on any other table
+        assert!(warnings("local t = {} t:Tree() function t:Tree() end").is_empty());
+        assert!(warnings("local t = {} t:Tree() local u = {} u.Tree = function() end").is_empty());
+        assert!(warnings("local t = {} t:Tree() function SomeGlobal:Tree() end").is_empty());
+        // A field that isn't a function is another problem
+        assert!(warnings("local t = { Tree = 1 } t:Tree()").is_empty());
+        // A WoW object's method, so it may be a mixin for one
+        assert!(warnings("local M = {} function M:OnLoad() self:SetScript() end").is_empty());
+        // Somewhere the analysis can't see into
+        assert!(warnings("local t = {} Mixin(t, UnknownMixin) t:Tree()").is_empty());
+        assert!(warnings("local t = setmetatable({}, { __index = function() end }) t:Tree()").is_empty());
+        assert!(warnings("local t = setmetatable({}, { __index = Unknown }) t:Tree()").is_empty());
+        assert!(warnings("local t = setmetatable({}, Unknown) t:Tree()").is_empty());
+        assert!(warnings("local t = {} t[name] = function() end t:Tree()").is_empty());
+        // Tables the analysis can't pin down: parameters, and what calls it can't see into give
+        assert!(warnings("function F(t) t:Tree() end").is_empty());
+        assert!(warnings("local t = c and {} or {} t:Tree()").is_empty());
+        assert!(warnings("local _, ns = ... local t = ns.Make() t:Tree()").is_empty());
     }
 
     #[test]

@@ -20,6 +20,11 @@ from the code itself, with no annotations needed.
   - calls to methods a WoW object doesn't have
     (`Frame has no method SetPiont`), except on frames made from a template,
     which can add methods
+  - calls to methods of a table made in the code when no function by that
+    name is defined anywhere (`self:ProcessQueue()` with no `ProcessQueue`),
+    unless a WoW object has a method of that name, or the table may get
+    fields the analysis can't see (an unknown mixin or `__index`, or functions
+    stored under computed keys)
 
 ## Usage
 
@@ -91,6 +96,9 @@ files) about 420ms per edit, with Syndicator's analysis cached.
 - XML files, including the Lua files they load with `<Script file="..."/>`
 - `.toc` paths with `[Family]`-style variables
 - Mixins missing from the definitions, like `CallbackRegistryMixin`, add no
-  methods, so frames using them get false "has no method" warnings
+  methods, so frames using them get false "has no method" warnings. Methods
+  from Blizzard's own Lua mixins that XML templates bring in
+  (`ItemButtonMixin`'s `SetItemButtonQuality`) aren't known either, so calls
+  to them on `self` in a template's mixin are reported
 - A call to a dependency's function gets what it returns in general, not
   narrowed by that call's arguments
