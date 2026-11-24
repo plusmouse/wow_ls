@@ -98,6 +98,16 @@ struct Workspace {
     analyses: HashMap<PathBuf, Arc<project::Analysed>>,
     /// The URI each open document was opened with
     uris: HashMap<PathBuf, lsp_types::Uri>,
+    /// The definitions with every addon's XML templates and frames, made
+    /// when first needed and again after an XML file changes
+    definitions: Option<Arc<Definitions>>,
+    /// The last text of each XML file that parsed, which types come from
+    /// while its latest doesn't
+    xml_valid: HashMap<PathBuf, String>,
+    /// Why XML files don't parse, as of the latest `definitions`
+    xml_errors: Vec<project::XmlError>,
+    /// XML files with errors published, which need clearing once fixed
+    xml_published: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -108,11 +118,57 @@ impl Workspace {
         self.addons.as_deref().unwrap_or_default()
     }
 
+    /// `base` with the templates and frames of every addon's XML, and of
+    /// the addons they depend on
+    fn definitions(&mut self, base: &Arc<Definitions>) -> Arc<Definitions> {
+        if let Some(definitions) = &self.definitions {
+            return definitions.clone()
+        }
+        let addons = self.addons().to_vec();
+        let files = project::xml_files(&addons, &addons);
+        let (definitions, errors) = project::with_xml(base, &files, &self.open, &mut self.xml_valid);
+        self.xml_errors = errors;
+        self.definitions = Some(definitions.clone());
+        definitions
+    }
+
+    /// Publishes each XML file's parse error, and clears those fixed. Only
+    /// files with an error now or before, and `path`, are published
+    fn publish_xml(&mut self, connection: &Connection, path: Option<&Path>) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.xml_errors.iter().map(|e| e.path.clone()).collect();
+        paths.extend(self.xml_published.drain(..));
+        paths.extend(path.map(Path::to_path_buf));
+        paths.sort();
+        paths.dedup();
+        for path in &paths {
+            let Some(text) = self.open.get(path).cloned().or_else(|| crate::xml::read(path).ok()) else { continue };
+            let uri = match self.uris.get(path) {
+                Some(uri) => uri.clone(),
+                None => match project::path_to_uri(path).parse() {
+                    Ok(uri) => uri,
+                    Err(_) => continue,
+                },
+            };
+            let errors: Vec<(usize, String)> = self.xml_errors.iter()
+                .filter(|e| e.path == *path)
+                .map(|e| (e.offset, e.message.clone()))
+                .collect();
+            diagnostics::publish_xml(connection, uri, &text, &errors);
+        }
+        self.xml_published = self.xml_errors.iter().map(|e| e.path.clone()).collect();
+        paths
+    }
+
     /// Publishes diagnostics for every file of `path`'s addon, open or not, or
     /// just `path` if it's not in one. Not for the addons it depends on,
-    /// which have their own. Returns the files published for
+    /// which have their own. Returns the files published for. For an XML
+    /// file, its errors and those of any other XML file
     fn publish_diagnostics(&mut self, connection: &Connection, path: &Path, definitions: &Arc<Definitions>) -> Vec<PathBuf> {
         let path = project::normalise(path);
+        if project::is_xml(&path) {
+            self.definitions(definitions);
+            return self.publish_xml(connection, Some(&path))
+        }
         let Some(text) = self.open.get(&path).cloned().or_else(|| std::fs::read_to_string(&path).ok()) else { return Vec::new() };
         let root = SyntaxNode::new_root(syntax::Generator::new(&text).process_all());
         let (analysis, file) = self.analysis(Some(&path), &root, definitions);
@@ -178,6 +234,7 @@ impl Workspace {
         if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("toc")) {
             self.addons = None;
             self.analyses.clear();
+            self.definitions = None;
         }
         let path = project::normalise(&path);
         // Opening a file as it is on disk changes nothing analysed
@@ -185,6 +242,16 @@ impl Workspace {
         if before.as_deref() == Some(text.as_str()) {
             self.open.insert(path, text);
             return Vec::new()
+        }
+        // Templates and frames are in every addon's namespace, so every open
+        // document is analysed again over its new definitions
+        if project::is_xml(&path) {
+            // Its `Script` and `Include` files may have changed too
+            self.addons = None;
+            self.definitions = None;
+            self.analyses.clear();
+            self.open.insert(path.clone(), text);
+            return self.open.keys().filter(|p| **p != path && !project::is_xml(p)).cloned().collect()
         }
         // Every analysis that involves it: its addon's, and those of addons
         // depending on it however indirectly. Its addon's even if not analysed yet
@@ -210,6 +277,7 @@ impl Workspace {
     /// The analysis covering `path`, and its id in that analysis: its whole
     /// addon's if it's in one, otherwise just the file (`root`)
     fn analysis(&mut self, path: Option<&Path>, root: &SyntaxNode, definitions: &Arc<Definitions>) -> (Analysed, FileId) {
+        let definitions = &self.definitions(definitions);
         if let Some(path) = path.map(project::normalise) {
             if let Some(addon) = project::addon_for(self.addons(), &path).cloned() {
                 let known = self.addons.as_deref().unwrap_or_default();
@@ -426,7 +494,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: V
                                 }
                             }
                             if let Some(l) = language.get(&params.text_document.uri.to_string()) {
-                                if l == "lua" {
+                                if l == "lua" || path.as_deref().is_some_and(project::is_xml) {
                                     text.remove(&params.text_document.uri.to_string());
                                     text.insert(params.text_document.uri.to_string(), params.content_changes[0].text.clone());
                                     match &path {
@@ -467,7 +535,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, roots: V
                                     }
                                 }
                             }
-                            if params.text_document.language_id == "lua" {
+                            if params.text_document.language_id == "lua" || path.as_deref().is_some_and(project::is_xml) {
                                 match &path {
                                     // Before the addons depending on it
                                     Some(path) => {

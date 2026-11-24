@@ -28,8 +28,14 @@
 //! among the workspace's addons, or beside the addon's folder, where
 //! `Interface/AddOns` would have them. Missing optional ones are left out.
 //!
-//! Not handled yet: XML files (and the Lua files they include with
-//! `<Script file="..."/>`), and paths using `[Family]`-style variables.
+//! XML files are followed to the Lua and XML files they load
+//! (`<Script file="..."/>`, `<Include file="..."/>`), in place.
+//!
+//! The game version is taken to be the current one: `[Family]` in a path is
+//! `Mainline` and `[Game]` is `Standard`, and `[AllowLoadGameType ...]` and
+//! `[ExcludeLoadGameType ...]` match `mainline` and `standard`. Lines with
+//! other variables, like `[TextLocale]`, are skipped. Other conditions are
+//! ignored, so their files load.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,8 +50,10 @@ use crate::types::{Analysis, Layer, SourceFile};
 pub struct Addon {
     pub name: String,
     pub toc: PathBuf,
-    /// Lua files in load order
+    /// Lua files in load order, including those XML files load
     pub files: Vec<PathBuf>,
+    /// XML files in load order, including those other XML files include
+    pub xml: Vec<PathBuf>,
     /// The addons it needs or uses if they're there, which load before it, by
     /// name as written
     pub dependencies: Vec<String>,
@@ -55,9 +63,12 @@ impl Addon {
     pub fn load(toc: &Path) -> std::io::Result<Addon> {
         let text = std::fs::read_to_string(toc)?;
         let directory = toc.parent().unwrap_or(Path::new(""));
-        let files = toc_files(&text).into_iter().map(|file| normalise(&directory.join(file))).collect();
+        let (mut files, mut xml) = (Vec::new(), Vec::new());
+        for file in toc_files(&text) {
+            add_file(normalise(&directory.join(file)), &mut files, &mut xml);
+        }
         let name = directory.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        Ok(Addon { name, toc: normalise(toc), files, dependencies: toc_dependencies(&text) })
+        Ok(Addon { name, toc: normalise(toc), files, xml, dependencies: toc_dependencies(&text) })
     }
 
     /// The addons this one names as dependencies that can be found: among
@@ -183,7 +194,125 @@ fn analyse_visiting(addon: &Addon, known: &[Addon], open: &HashMap<PathBuf, Stri
     analysed
 }
 
-/// The Lua files a `.toc` lists, as written (relative to its folder)
+/// An XML file that doesn't parse: where (a byte offset into its text), and why
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XmlError {
+    pub path: PathBuf,
+    pub offset: usize,
+    pub message: String,
+}
+
+/// The XML files of `addons` and of every addon they depend on, however
+/// indirectly, each addon's after those of the addons it depends on
+pub fn xml_files(addons: &[Addon], known: &[Addon]) -> Vec<PathBuf> {
+    fn visit(addon: &Addon, known: &[Addon], visited: &mut Vec<PathBuf>, files: &mut Vec<PathBuf>) {
+        if visited.contains(&addon.toc) {
+            return
+        }
+        visited.push(addon.toc.clone());
+        for dependency in addon.direct_dependencies(known) {
+            visit(&dependency, known, visited, files);
+        }
+        for file in &addon.xml {
+            if !files.contains(file) {
+                files.push(file.clone());
+            }
+        }
+    }
+    let (mut visited, mut files) = (Vec::new(), Vec::new());
+    for addon in addons {
+        visit(addon, known, &mut visited, &mut files);
+    }
+    files
+}
+
+/// `base` with the templates and named frames of XML `files`, in that order
+/// (see `Definitions::with_xml`). An open document's text is read rather
+/// than the file. One that doesn't parse is read as it was the last time it
+/// did, which `valid` keeps for each file, and its error is returned
+pub fn with_xml(base: &Arc<Definitions>, files: &[PathBuf], open: &HashMap<PathBuf, String>, valid: &mut HashMap<PathBuf, String>) -> (Arc<Definitions>, Vec<XmlError>) {
+    let is_object = |tag: &str| base.element(tag).is_some();
+    let mut objects = Vec::new();
+    let mut errors = Vec::new();
+    for path in files {
+        let text = match open.get(path) {
+            Some(text) => text.clone(),
+            None => match crate::xml::read(path) {
+                Ok(text) => text,
+                Err(_) => continue,
+            },
+        };
+        match crate::xml::parse(&text) {
+            Ok(document) => {
+                objects.extend(crate::xml::objects(&document, &is_object));
+                valid.insert(path.clone(), text);
+            }
+            Err(error) => {
+                errors.push(XmlError { path: path.clone(), offset: crate::xml::error_offset(&text, &error), message: error.to_string() });
+                if let Some(Ok(document)) = valid.get(path).map(|text| crate::xml::parse(text)) {
+                    objects.extend(crate::xml::objects(&document, &is_object));
+                }
+            }
+        }
+    }
+    if objects.is_empty() {
+        return (base.clone(), errors)
+    }
+    (Arc::new(base.with_xml(&objects)), errors)
+}
+
+/// A Lua or XML file to load, and for an XML file what it loads, in order,
+/// unless it's already there
+fn add_file(path: PathBuf, files: &mut Vec<PathBuf>, xml: &mut Vec<PathBuf>) {
+    let path = ignoring_case(path);
+    if !is_xml(&path) {
+        if !files.contains(&path) {
+            files.push(path);
+        }
+        return
+    }
+    if xml.contains(&path) {
+        return
+    }
+    xml.push(path.clone());
+    let Ok(text) = crate::xml::read(&path) else { return };
+    let Ok(document) = crate::xml::parse(&text) else { return };
+    let directory = path.parent().unwrap_or(Path::new(""));
+    for load in crate::xml::loads(&document) {
+        let (crate::xml::Load::Lua(file) | crate::xml::Load::Xml(file)) = load;
+        add_file(normalise(&directory.join(file)), files, xml);
+    }
+}
+
+/// The file `path` names when the game reads it, ignoring case as it does,
+/// if it's there under another case and not under this one
+fn ignoring_case(path: PathBuf) -> PathBuf {
+    if path.exists() {
+        return path
+    }
+    let mut found = PathBuf::new();
+    for component in path.components() {
+        let next = found.join(component);
+        if next.exists() || !found.is_dir() {
+            found = next;
+            continue
+        }
+        let wanted = component.as_os_str().to_string_lossy().to_lowercase();
+        let entries = std::fs::read_dir(&found).into_iter().flatten().flatten();
+        match entries.map(|e| e.file_name()).find(|n| n.to_string_lossy().to_lowercase() == wanted) {
+            Some(name) => found.push(name),
+            None => return path,
+        }
+    }
+    normalise(&found)
+}
+
+pub fn is_xml(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml"))
+}
+
+/// The Lua and XML files a `.toc` lists that load in the current game version,
+/// as written (relative to its folder)
 pub fn toc_files(text: &str) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for line in text.lines() {
@@ -191,14 +320,35 @@ pub fn toc_files(text: &str) -> Vec<PathBuf> {
         if line.is_empty() || line.starts_with('#') {
             continue
         }
+        let line = line.replace("[Family]", "Mainline").replace("[Game]", "Standard");
         // Loading conditions after the path, like `File.lua [AllowLoadGameType mainline]`
-        let entry = line.split(" [").next().unwrap_or(line).trim();
-        if entry.contains('[') || !entry.to_ascii_lowercase().ends_with(".lua") {
+        let split = line.char_indices()
+            .find(|&(i, c)| c == '[' && line[..i].ends_with(char::is_whitespace))
+            .map_or(line.len(), |(i, _)| i);
+        let (entry, conditions) = (line[..split].trim(), &line[split..]);
+        if !conditions.split('[').all(loads_here) {
+            continue
+        }
+        let lower = entry.to_ascii_lowercase();
+        if entry.contains('[') || !(lower.ends_with(".lua") || lower.ends_with(".xml")) {
             continue
         }
         files.push(PathBuf::from(entry.replace('\\', "/")));
     }
     files
+}
+
+/// Whether a `.toc` loading condition, like `AllowLoadGameType mainline, classic]`
+/// (after its `[`), lets the file load in the current game version
+fn loads_here(condition: &str) -> bool {
+    let condition = condition.trim().trim_end_matches(']');
+    let (key, values) = condition.split_once(char::is_whitespace).unwrap_or((condition, ""));
+    let current = values.split(',').any(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "mainline" | "standard"));
+    match key.to_ascii_lowercase().as_str() {
+        "allowloadgametype" => current,
+        "excludeloadgametype" => !current,
+        _ => true,
+    }
 }
 
 /// The addons a `.toc` says this one needs or uses: `## Dependencies`,
@@ -210,6 +360,11 @@ pub fn toc_dependencies(text: &str) -> Vec<String> {
         let Some((key, value)) = metadata.split_once(':') else { continue };
         let key = key.trim().to_ascii_lowercase();
         if !(key.starts_with("dep") || key == "requireddeps" || key == "optionaldeps") {
+            continue
+        }
+        // Loading conditions after the names, like `Lib [AllowLoadGameType mainline]`
+        let (value, conditions) = value.split_once('[').map_or((value, ""), |(v, c)| (v, c));
+        if !conditions.split('[').all(loads_here) {
             continue
         }
         for name in value.split(',').map(str::trim).filter(|n| !n.is_empty()) {
@@ -326,15 +481,25 @@ mod tests {
 
     #[test]
     fn reads_toc_files() {
-        let toc = "\u{feff}## Interface: 110000\n## Title: Test\n# a comment\n\nCore.lua\nModules\\Bags.lua\nFrames.xml\n  Spaced.lua  \nLater.lua [AllowLoadGameType mainline]\nLocales\\[TextLocale].lua\nUPPER.LUA\n";
+        let toc = "\u{feff}## Interface: 110000\n## Title: Test\n# a comment\n\nCore.lua\nModules\\Bags.lua\nFrames.xml\n  Spaced.lua  \nLater.lua [AllowLoadGameType mainline]\nLocales\\[TextLocale].lua\nUPPER.LUA\nReadme.txt\n";
         let files: Vec<String> = toc_files(toc).iter().map(|f| f.to_string_lossy().into_owned()).collect();
-        assert_eq!(files, ["Core.lua", "Modules/Bags.lua", "Spaced.lua", "Later.lua", "UPPER.LUA"]);
+        assert_eq!(files, ["Core.lua", "Modules/Bags.lua", "Frames.xml", "Spaced.lua", "Later.lua", "UPPER.LUA"]);
+    }
+
+    #[test]
+    fn loads_files_for_the_current_game_version() {
+        let toc = "[Family]\\A.lua\n[Game]\\B.lua [AllowLoadGameType camelot]\nC.lua\t[AllowLoadGameType standard, camelot]\nD.lua [AllowLoadGameType classic]\nE.lua [ExcludeLoadGameType classic, camelot]\nF.lua [ExcludeLoadGameType mainline]\nG.lua [AllowLoadGameType mists, mainline] [AllowLoad Game]\nH.lua [Bootstrap]\n";
+        let files: Vec<String> = toc_files(toc).iter().map(|f| f.to_string_lossy().into_owned()).collect();
+        assert_eq!(files, ["Mainline/A.lua", "C.lua", "E.lua", "G.lua", "H.lua"]);
     }
 
     #[test]
     fn reads_toc_dependencies() {
         let toc = "## Interface: 110000\n## OptionalDeps: Syndicator, Masque\n## RequiredDeps: LibA\n## Dependencies: LibB, liba\n## DepsExtra: LibC\n## SavedVariables: X\nCore.lua\n";
         assert_eq!(toc_dependencies(toc), ["Syndicator", "Masque", "LibA", "LibB", "LibC"]);
+        // With loading conditions, as Blizzard's have
+        let toc = "## Dep: Blizzard_EditMode [AllowLoadGameType mainline]\n## Dep: Blizzard_Classic [AllowLoadGameType classic]\n## Dep: Blizzard_Colors\n";
+        assert_eq!(toc_dependencies(toc), ["Blizzard_EditMode", "Blizzard_Colors"]);
     }
 
     #[test]
@@ -343,6 +508,7 @@ mod tests {
             name: name.to_string(),
             toc: PathBuf::from(format!("/nowhere/{name}/{name}.toc")),
             files: Vec::new(),
+            xml: Vec::new(),
             dependencies: dependencies.iter().map(|d| d.to_string()).collect(),
         };
         let known = [addon("Core", &[]), addon("Lib", &["Core"]), addon("Main", &["Lib", "core", "Missing", "Main", "Lib"])];
@@ -359,6 +525,14 @@ mod tests {
         assert_eq!(pick_toc(directory, tocs(&["MyAddon_Vanilla.toc", "MyAddon_Mainline.toc"])), Some(directory.join("MyAddon_Mainline.toc")));
         assert_eq!(pick_toc(directory, tocs(&["Other.toc"])), Some(directory.join("Other.toc")));
         assert_eq!(pick_toc(directory, Vec::new()), None);
+    }
+
+    #[test]
+    fn finds_files_ignoring_case() {
+        let found = ignoring_case(PathBuf::from("tests/ADDON/testaddon/core.LUA"));
+        assert_eq!(found, normalise(Path::new("tests/addon/TestAddon/Core.lua")));
+        // Missing either way
+        assert_eq!(ignoring_case(PathBuf::from("tests/addon/Nothing.lua")), PathBuf::from("tests/addon/Nothing.lua"));
     }
 
     #[test]
@@ -426,6 +600,41 @@ mod tests {
     }
 
     #[test]
+    fn xml_types_from_the_last_text_that_parsed() {
+        let base = Arc::new(Definitions::from_json(r#"{
+            "types": {"Frame": {"base": "table", "method_tables": ["FrameAPI"]}},
+            "method_tables": {"FrameAPI": {"functions": {"Show": {}}}},
+            "elements": {"Frame": "Frame"}
+        }"#).unwrap());
+        let path = PathBuf::from("/nowhere/Frames.xml");
+        let files = [path.clone()];
+        let mut open = HashMap::new();
+        let mut valid = HashMap::new();
+        open.insert(path.clone(), r#"<Ui><Frame name="T" virtual="true"/></Ui>"#.to_string());
+        let (definitions, errors) = with_xml(&base, &files, &open, &mut valid);
+        assert!(errors.is_empty() && definitions.template("T").is_some());
+        // Half typed: the error is reported, and the last text that parsed typed
+        let broken = r#"<Ui><Frame name="T" virtual="true"/><Frame name="U" virtual="true"></Ui>"#;
+        open.insert(path.clone(), broken.to_string());
+        let (definitions, errors) = with_xml(&base, &files, &open, &mut valid);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(&broken[errors[0].offset..], "</Ui>");
+        assert!(definitions.template("T").is_some() && definitions.template("U").is_none());
+        // Never parsed: nothing to type from
+        let (definitions, errors) = with_xml(&base, &files, &open, &mut HashMap::new());
+        assert!(errors.len() == 1 && definitions.template("T").is_none());
+    }
+
+    #[test]
+    fn xml_files_of_dependencies_first() {
+        let user = Addon::load(Path::new("tests/dependencies/User/User.toc")).unwrap();
+        assert_eq!(xml_files(std::slice::from_ref(&user), &[]), [
+            normalise(Path::new("tests/dependencies/Lib/Lib.xml")),
+            normalise(Path::new("tests/dependencies/User/User.xml")),
+        ]);
+    }
+
+    #[test]
     fn definitions_in_dependencies() {
         let user = Addon::load(Path::new("tests/dependencies/User/User.toc")).unwrap();
         let definitions = Arc::new(Definitions::default());
@@ -453,6 +662,10 @@ mod tests {
         assert_eq!(addons.len(), 1);
         assert_eq!(addons[0].name, "TestAddon");
         let names: Vec<_> = addons[0].files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect();
-        assert_eq!(names, ["Core.lua", "Util.lua", "Main.lua"]);
+        // With the Lua file its XML file loads, in its place
+        assert_eq!(names, ["Core.lua", "Util.lua", "Frames.lua", "Main.lua"]);
+        let xml: Vec<_> = addons[0].xml.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(xml, ["Frames.xml"]);
     }
 }
+

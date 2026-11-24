@@ -281,7 +281,7 @@ impl FunctionRef {
 }
 
 /// Which named type (`Frame`, `ItemKey`, ...) a table or userdata value is
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub enum NamedRef {
     /// Can't be a table or userdata
     #[default]
@@ -299,8 +299,61 @@ pub enum NamedRef {
     /// A table made in this file: its identity, for tracking its fields. Shown
     /// as a plain table
     Table(TableId),
+    /// Any of several WoW objects (`One`, `Extended` or `Instance`), as a
+    /// variable given different frames holds: an index into `OBJECT_SETS`.
+    /// It has the members all of them have
+    Several(u32),
     /// A plain table, or one of several named types
     Unknown,
+}
+
+/// The most objects `NamedRef::Several` keeps apart. More are joined as the
+/// closest type they all are
+const MOST_OBJECTS: usize = 8;
+
+/// Each list of objects a `NamedRef::Several` stands for, sorted, once each.
+/// Shared by every analysis, so a dependency's types mean the same in its
+/// dependents'
+#[derive(Default)]
+struct ObjectSets {
+    lists: Vec<&'static [NamedRef]>,
+    ids: std::collections::HashMap<&'static [NamedRef], u32>,
+}
+
+static OBJECT_SETS: std::sync::LazyLock<std::sync::Mutex<ObjectSets>> = std::sync::LazyLock::new(Default::default);
+
+fn object_set(id: u32) -> &'static [NamedRef] {
+    let sets = OBJECT_SETS.lock().unwrap_or_else(|e| e.into_inner());
+    sets.lists.get(id as usize).copied().unwrap_or_default()
+}
+
+thread_local! {
+    /// The definitions of the analysis running on this thread, for joining
+    /// named types (see `NamedRef::union`)
+    static ANALYSING: std::cell::RefCell<Option<Arc<Definitions>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Makes `definitions` those `NamedRef::union` joins types by on this
+/// thread, until it's dropped
+struct Analysing(Option<Arc<Definitions>>);
+
+impl Analysing {
+    fn with(definitions: &Arc<Definitions>) -> Analysing {
+        Analysing(ANALYSING.with(|current| current.replace(Some(definitions.clone()))))
+    }
+}
+
+impl Drop for Analysing {
+    fn drop(&mut self) {
+        ANALYSING.with(|current| *current.borrow_mut() = self.0.take());
+    }
+}
+
+/// The closest type named types `a` and `b` both are, by the definitions of
+/// the analysis running. The same whichever is given first
+fn common_object_type(a: NamedId, b: NamedId) -> Option<NamedId> {
+    let (a, b) = (a.min(b), a.max(b));
+    ANALYSING.with(|current| current.borrow().as_ref()?.common_ancestor(a, b))
 }
 
 /// Where a table was made (its `{`), or where the variable given a pseudo
@@ -308,18 +361,112 @@ pub enum NamedRef {
 pub type TableId = Location;
 
 impl NamedRef {
+    /// Joined, keeping different WoW objects apart (see `Several`)
     fn union(self, other: NamedRef) -> NamedRef {
         match (self, other) {
             (NamedRef::None, x) | (x, NamedRef::None) => x,
             (a, b) if a == b => a,
-            (NamedRef::Instance { named: a, at: x, extended: e }, NamedRef::Instance { named: b, at: y, extended: f }) if a == b && x == y => {
-                NamedRef::Instance { named: a, at: x, extended: e || f }
-            }
-            // Different objects of one type are still that type
-            (a, b) => match (a.object_type(), b.object_type()) {
-                (Some((a, e)), Some((b, f))) if a == b => if e || f { NamedRef::Extended(a) } else { NamedRef::One(a) },
+            (a, b) => match (a.objects(), b.objects()) {
+                (Some(mut all), Some(more)) => {
+                    all.extend(more);
+                    NamedRef::several(all)
+                }
                 _ => NamedRef::Unknown,
             },
+        }
+    }
+
+    /// The objects this may be, if it's only WoW objects
+    fn objects(self) -> Option<Vec<NamedRef>> {
+        match self {
+            NamedRef::One(_) | NamedRef::Extended(_) | NamedRef::Instance { .. } => Some(vec![self]),
+            NamedRef::Several(id) => Some(object_set(id).to_vec()),
+            _ => None,
+        }
+    }
+
+    /// Each WoW object this may be: itself, or those of `Several`. None for
+    /// anything else
+    pub fn alternatives(self) -> Vec<NamedRef> {
+        self.objects().unwrap_or_default()
+    }
+
+    /// Any of `objects`: one, or several, each once. The same object, or the
+    /// same type of unknown object, is joined, as is any number past
+    /// `MOST_OBJECTS`, to the closest type they all are
+    fn several(mut objects: Vec<NamedRef>) -> NamedRef {
+        objects.sort();
+        let mut joined: Vec<NamedRef> = Vec::with_capacity(objects.len());
+        for object in objects {
+            let same = match (joined.last().copied(), object) {
+                (Some(last), object) if last == object => Some(last),
+                (Some(NamedRef::Instance { named, at, extended: e }), NamedRef::Instance { named: n, at: a, extended: f }) if named == n && at == a => {
+                    Some(NamedRef::Instance { named, at, extended: e || f })
+                }
+                (Some(NamedRef::One(a) | NamedRef::Extended(a)), NamedRef::Extended(b)) if a == b => Some(NamedRef::Extended(a)),
+                _ => None,
+            };
+            match same {
+                Some(same) => *joined.last_mut().unwrap() = same,
+                None => joined.push(object),
+            }
+        }
+        if joined.len() == 1 {
+            return joined[0]
+        }
+        if joined.len() > MOST_OBJECTS {
+            let mut types = joined.iter().filter_map(|o| o.object_type()).map(|(id, _)| id);
+            let first = types.next();
+            return match types.try_fold(first, |common, id| Some(common_object_type(common?, id))).flatten() {
+                Some(common) => NamedRef::Extended(common),
+                None => NamedRef::Unknown,
+            }
+        }
+        let mut sets = OBJECT_SETS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&id) = sets.ids.get(joined.as_slice()) {
+            return NamedRef::Several(id)
+        }
+        let list: &'static [NamedRef] = Box::leak(joined.into_boxed_slice());
+        let id = sets.lists.len() as u32;
+        sets.lists.push(list);
+        sets.ids.insert(list, id);
+        NamedRef::Several(id)
+    }
+
+    /// Joined as a named number type (an enum): one, or none known
+    fn union_numeric(self, other: NamedRef) -> NamedRef {
+        match (self, other) {
+            (NamedRef::None, x) | (x, NamedRef::None) => x,
+            (a, b) if a == b => a,
+            (a, b) => match (a.object_type(), b.object_type()) {
+                (Some((a, e)), Some((b, f))) if a == b => if e || f { NamedRef::Extended(a) } else { NamedRef::One(a) },
+                // Objects of different types are of the closest type both are
+                // (a frame made from a template and a plain one are frames),
+                // though either may have members beyond it
+                (Some((a, _)), Some((b, _))) => match common_object_type(a, b) {
+                    Some(common) => NamedRef::Extended(common),
+                    None => NamedRef::Unknown,
+                },
+                _ => NamedRef::Unknown,
+            },
+        }
+    }
+
+    /// The same, but possibly with members beyond its type's
+    fn loosened(self) -> NamedRef {
+        match self {
+            NamedRef::One(id) => NamedRef::Extended(id),
+            NamedRef::Instance { named, at, .. } => NamedRef::Instance { named, at, extended: true },
+            NamedRef::Several(_) => NamedRef::several(self.alternatives().into_iter().map(NamedRef::loosened).collect()),
+            other => other,
+        }
+    }
+
+    /// Each object this may be changed by `change`
+    fn map_objects(self, change: impl Fn(NamedRef) -> NamedRef) -> NamedRef {
+        match self {
+            NamedRef::Several(_) => NamedRef::several(self.alternatives().into_iter().map(change).collect()),
+            other => change(other),
         }
     }
 
@@ -403,7 +550,7 @@ impl Type {
             set: self.set | other.set,
             function: self.function.union(other.function),
             named: self.named.union(other.named),
-            numeric: self.numeric.union(other.numeric),
+            numeric: self.numeric.union_numeric(other.numeric),
         }
     }
     /// Functions, tables and userdata are always truthy, so they're kept
@@ -1000,6 +1147,7 @@ fn renumber_named(named: NamedRef, file: &impl Fn(FileId) -> FileId) -> NamedRef
     match named {
         NamedRef::Table(at) => NamedRef::Table(renumber(at, file)),
         NamedRef::Instance { named, at, extended } => NamedRef::Instance { named, at: renumber(at, file), extended },
+        NamedRef::Several(_) => named.map_objects(|object| renumber_named(object, file)),
         other => other,
     }
 }
@@ -1098,6 +1246,10 @@ pub struct Analysis {
     /// `CreateFramePool` and the like): one object standing for all of them,
     /// whose fields and mixins come from the pool's init and reset functions
     pub pool_objects: HashMap<TableId, Type>,
+    /// The value of each global that XML names as a mixin wow_ls doesn't know
+    /// (see `Definitions::xml_mixins`), as the files or those they depend on
+    /// assign it
+    pub lua_mixins: HashMap<String, Type>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -1123,6 +1275,7 @@ impl Analysis {
     /// `analyse`, replaying function bodies whose inputs haven't changed
     /// since the walk before, or walking every one every time
     fn analyse_replaying(files: &[SourceFile], definitions: &Arc<Definitions>, layer: Arc<Layer>, replay: bool) -> Analysis {
+        let _analysing = Analysing::with(definitions);
         let mut result = Walker::new(None, definitions, &layer, Default::default(), replay).walk(files);
         // Nothing to compare the first walk with, but no body it recorded can
         // be replayed anyway, as it walked without a previous walk
@@ -1278,6 +1431,9 @@ impl Analysis {
                 changed.insert(Read::Varargs(id));
             }
         }
+        if self.lua_mixins != older.lua_mixins {
+            changed.insert(Read::LuaMixins);
+        }
         changed
     }
 
@@ -1399,6 +1555,28 @@ impl Analysis {
     }
 
     fn describe_with(&self, ty: Type, signatures: bool) -> String {
+        // Any of several objects: each as it would be on its own, once
+        if let NamedRef::Several(_) = ty.named {
+            let mut objects: Vec<String> = Vec::new();
+            for object in ty.named.alternatives() {
+                let one = self.describe_with(Type { named: object, ..Type::of(ty.set.intersection(OBJECTS)) }, signatures);
+                if !objects.contains(&one) {
+                    objects.push(one);
+                }
+            }
+            let several = objects.len() > 1;
+            let objects = objects.iter()
+                .map(|one| if several && one.contains(' ') { format!("({one})") } else { one.clone() })
+                .collect::<Vec<_>>()
+                .join("|");
+            let rest = ty.without(OBJECTS);
+            return match rest.set {
+                TypeSet::NEVER => objects,
+                TypeSet::NIL if several => format!("({objects})?"),
+                TypeSet::NIL => format!("{objects}?"),
+                _ => format!("{objects}|{}", self.describe_with(rest, signatures)),
+            }
+        }
         let names = ty.set.names();
         let signature = match ty.function {
             FunctionRef::One(id) if signatures => self.function_info(FunctionRef::One(id)).map(|f| self.signature(f)),
@@ -1859,6 +2037,8 @@ enum Read {
     Calls(FunctionId),
     /// Only the types of a function's parameters, as the previous walk settled them
     ParameterTypes(FunctionId),
+    /// What the globals XML names as mixins are
+    LuaMixins,
 }
 
 /// A name's hash, for `Read`
@@ -2047,6 +2227,28 @@ impl<'a> Walker<'a> {
             .filter(|(_, ty)| ty.set.contains(TypeSet::FUNCTION))
             .map(|(name, _)| name.clone())
             .collect();
+        // XML's mixins that are tables here: `self` in their methods is the
+        // object XML mixes each into
+        let mut lua_mixins: HashMap<String, Type> = HashMap::default();
+        for (name, target) in self.definitions.xml_mixins() {
+            if !lua_mixins.contains_key(name) {
+                let own = self.globals.get(name.as_str()).map(|&id| &self.bindings[id]).filter(|b| b.assigned).map(|b| b.types);
+                if let Some(ty) = own.or_else(|| self.layer.globals.get(name.as_str()).copied()) {
+                    lua_mixins.insert(name.clone(), ty);
+                }
+            }
+            if let Some(at) = lua_mixins.get(name).and_then(|ty| ty.named.identity()) {
+                self.mixed_into.entry(at).or_default().push(NamedRef::One(*target));
+            }
+        }
+        // And what XML makes those objects in, for `self:GetParent()`
+        for (name, parent) in self.definitions.xml_parents() {
+            let own = self.globals.get(name.as_str()).map(|&id| &self.bindings[id]).filter(|b| b.assigned).map(|b| b.types);
+            let mixin = own.or_else(|| self.layer.globals.get(name.as_str()).copied());
+            if let Some(at) = mixin.and_then(|ty| ty.named.identity()) {
+                *self.parents.entry(at).or_default() |= Type::named(*parent, TypeSet::TABLE);
+            }
+        }
         let mixed_into = self.mixed_into.keys()
             .filter_map(|&mixin| match self.mixin_target(mixin, 0) {
                 MixinTarget::Object(named, extended) => Some((mixin, (named, extended))),
@@ -2056,6 +2258,7 @@ impl<'a> Walker<'a> {
         Analysis {
             function_fields,
             mixed_into,
+            lua_mixins,
             // Filled in by `complete`, once the last walk is known
             table_names: HashMap::default(),
             deferred: self.deferred,
@@ -2125,10 +2328,16 @@ impl<'a> Walker<'a> {
         let definitions = &self.definitions;
         // A table or object made in the files that meets the requirement is
         // kept, so what it holds and its fields aren't lost to a plain `table`
+        // Any of several objects meets it when each does
         let meets = |passed: Type, mandated: Type| {
-            passed.named.identity().is_some()
-                && mandated.set.contains(passed.set)
-                && mandated.named.named_id().is_none_or(|m| passed.named.named_id().is_some_and(|p| definitions.is_a(p, m)))
+            let objects = match passed.named {
+                NamedRef::Several(_) => passed.named.alternatives(),
+                named => vec![named],
+            };
+            mandated.set.contains(passed.set) && objects.iter().all(|object| {
+                object.identity().is_some()
+                    && mandated.named.named_id().is_none_or(|m| object.named_id().is_some_and(|p| definitions.is_a(p, m)))
+            })
         };
         let mut pending: HashMap<FunctionId, Vec<&PendingCall>> = HashMap::default();
         // The functions each function's parameters are passed on to
@@ -2828,6 +3037,14 @@ impl<'a> Walker<'a> {
 
     /// The type of field `name` of a value of type `base`
     fn field_read(&self, base: Type, name: &str) -> Type {
+        // Any of several objects: what each has, which is only known for a
+        // field all of them have
+        if let NamedRef::Several(_) = base.named {
+            return base.named.alternatives().into_iter()
+                .map(|object| self.field_read(Type { named: object, ..base }, name))
+                .reduce(Type::union)
+                .unwrap_or(Type::UNKNOWN)
+        }
         let base = self.definitions.member_source(base);
         if let Some(declared) = self.definitions.field(base, name) {
             return declared
@@ -2837,6 +3054,7 @@ impl<'a> Walker<'a> {
         let own = match base.named {
             NamedRef::Table(id) | NamedRef::Instance { at: id, .. } => self.own_field(prior, id, name, 0),
             NamedRef::One(_) | NamedRef::Extended(_) => None,
+            NamedRef::Several(_) => unreachable!("read from each object"),
             // Not a table we know, so nothing to go on
             NamedRef::None | NamedRef::Unknown => return Type::UNKNOWN,
         };
@@ -2849,11 +3067,14 @@ impl<'a> Walker<'a> {
             None => {
                 self.note(Read::AnyTableField(name_key(name)));
                 let own = prior.any_table_fields.get(name).copied();
-                match (own, self.layer.any_table_fields.get(name).copied()) {
+                let found = match (own, self.layer.any_table_fields.get(name).copied()) {
                     (Some(a), Some(b)) => a | b,
                     (Some(found), None) | (None, Some(found)) => found,
                     (None, None) => Type::UNKNOWN,
-                }
+                };
+                // Some other table's field, perhaps, so not a type to report
+                // missing methods by
+                Type { named: found.named.loosened(), ..found }
             }
         }
     }
@@ -3012,6 +3233,17 @@ impl<'a> Walker<'a> {
             NamedRef::Table(id) | NamedRef::Instance { at: id, .. } => self.apply(Write::Field(id, name.to_string(), value)),
             // Could be any table, or shared by every object of a WoW type
             NamedRef::One(_) | NamedRef::Extended(_) | NamedRef::Unknown => self.apply(Write::AnyTableField(name.to_string(), value)),
+            // Whichever object it is gets it, so each may have it. Also kept
+            // for tables whose identity isn't known, as the objects' mixins'
+            // `self` (the mixin table) reads what's set on the objects there
+            NamedRef::Several(_) => {
+                for object in base.named.alternatives() {
+                    if let Some(at) = object.identity() {
+                        self.apply(Write::Field(at, name.to_string(), value));
+                    }
+                }
+                self.apply(Write::AnyTableField(name.to_string(), value));
+            }
             NamedRef::None => {}
         }
     }
@@ -3535,11 +3767,9 @@ impl<'a> Walker<'a> {
             }
         };
         let required: Vec<Option<Type>> = (0..arguments.len()).map(|i| function.mandated(i)).collect();
-        // Whether the call passes a template, which can add members
+        // Where the call passes a template, if it takes one
         let template = function.parameters.iter()
-            .position(|p| p.name.to_ascii_lowercase().contains("template"))
-            .and_then(|i| arguments.get(i))
-            .is_some_and(|a| !matches!(a, Expression::Literal(l) if l.is_nil()));
+            .position(|p| p.name.to_ascii_lowercase().contains("template"));
         let documented = function.returns.clone();
         let fresh_returns = function.fresh_returns.clone();
         let callee_method = function.method;
@@ -3576,7 +3806,7 @@ impl<'a> Walker<'a> {
                 .unwrap_or_else(|| documented.clone()),
         };
         if let (Some(receiver), Some(method)) = (receiver, call.method_name()) {
-            returns = self.object_method(call, receiver, method.text(), template, &argument_types, returns);
+            returns = self.object_method(call, receiver, method.text(), template.and_then(|i| arguments.get(i)), &argument_types, returns);
         }
         self.require_arguments(&arguments, &required);
         if returns != documented {
@@ -3592,7 +3822,7 @@ impl<'a> Walker<'a> {
 
     /// Methods that make or change WoW objects' parents. `returns` is what the
     /// method's documentation says it returns
-    fn object_method(&mut self, call: &FunctionCall, receiver: Type, name: &str, template: bool, arguments: &Values, mut returns: Values) -> Values {
+    fn object_method(&mut self, call: &FunctionCall, receiver: Type, name: &str, template: Option<&Expression>, arguments: &Values, mut returns: Values) -> Values {
         let parent = receiver.named.identity();
         if let Some(object) = parent.and_then(|at| self.pool_object(at)) {
             match name {
@@ -3609,11 +3839,33 @@ impl<'a> Walker<'a> {
                 if let Some(at) = parent {
                     self.apply(Write::Parent(at, arguments.first()));
                 }
+                // Whichever of several objects it is
+                for object in self.several_objects(receiver) {
+                    self.apply(Write::Parent(object, arguments.first()));
+                }
             }
             "GetParent" => {
                 // What it was made with or given, if it was made in the files
                 if let Some(parent) = parent.and_then(|at| self.known_parent(at)) {
                     returns = Values { values: vec![parent], rest: Type::NIL };
+                }
+                // Any of several objects made in the files, each with a known parent
+                if let NamedRef::Several(_) = receiver.named {
+                    let parents: Option<Vec<Type>> = receiver.named.alternatives().into_iter()
+                        .map(|object| self.known_parent(object.identity()?))
+                        .collect();
+                    if let Some(parent) = parents.and_then(|parents| parents.into_iter().reduce(Type::union)) {
+                        returns = Values { values: vec![parent], rest: Type::NIL };
+                    }
+                }
+                // `self` in a mixin's method: any object it's mixed into,
+                // some perhaps made where the analysis can't see (from a
+                // template named by a variable), so not a parent to report
+                // missing methods by
+                if parent.is_some_and(|at| self.is_mixin(at)) {
+                    for value in &mut returns.values {
+                        value.named = value.named.loosened();
+                    }
                 }
             }
             // `parent:CreateTexture()` and the like: a new object of the type the
@@ -3625,8 +3877,10 @@ impl<'a> Walker<'a> {
                     return returns
                 }
                 let at = self.location(call.syntax().text_range().start());
-                first.named = NamedRef::Instance { named: child, at, extended: template };
+                let (named, extended) = self.templated(child, template);
+                first.named = NamedRef::Instance { named, at, extended };
                 self.apply(Write::Parent(at, receiver));
+                self.add_lua_mixins(at, named, receiver);
             }
             _ => {}
         }
@@ -3642,19 +3896,85 @@ impl<'a> Walker<'a> {
         if receiver.set.without(OBJECTS | TypeSet::NIL) != TypeSet::NEVER {
             return
         }
-        let id = match receiver.named {
-            NamedRef::One(id) | NamedRef::Instance { named: id, extended: false, .. } => id,
-            NamedRef::Table(table) => return self.check_table_method(prior, table, method),
-            _ => return,
-        };
-        let Some(named) = self.definitions.named_type(id).filter(|named| named.has_methods) else { return };
+        if let NamedRef::Table(table) = receiver.named {
+            return self.check_table_method(prior, table, method)
+        }
+        // Any of several objects needs the method on all of them, so it's
+        // reported for those whose methods are known and don't include it
+        let objects = receiver.named.alternatives();
         let name = method.text();
-        self.note(Read::FunctionField(name_key(name)));
-        if self.definitions.field(receiver, name).is_some() || prior.function_fields.contains(name) || self.layer.function_fields.contains(name) {
+        let mut lacking: Vec<String> = Vec::new();
+        for object in &objects {
+            let id = match *object {
+                NamedRef::One(id) | NamedRef::Instance { named: id, extended: false, .. } => id,
+                // May have it
+                _ => return,
+            };
+            let Some(named) = self.definitions.named_type(id).filter(|named| named.has_methods) else { return };
+            if !self.lua_mixins_known(prior, id) {
+                return
+            }
+            self.note(Read::FunctionField(name_key(name)));
+            if prior.function_fields.contains(name) || self.layer.function_fields.contains(name) {
+                return
+            }
+            if self.definitions.field(Type { named: *object, ..receiver }, name).is_none() && !lacking.contains(&named.name) {
+                lacking.push(named.name.clone());
+            }
+        }
+        if lacking.is_empty() {
             return
         }
-        let message = format!("{} has no method `{}`", named.name, name);
+        let all: Vec<String> = objects.iter()
+            .filter_map(|object| self.definitions.named_type(object.named_id()?).map(|n| n.name.clone()))
+            .fold(Vec::new(), |mut names, name| { if !names.contains(&name) { names.push(name) } names });
+        let message = if lacking.len() == all.len() {
+            match lacking.as_slice() {
+                [one] => format!("{one} has no method `{name}`"),
+                [a, b] => format!("Neither {a} nor {b} has a method `{name}`"),
+                _ => format!("None of {} has a method `{name}`", lacking.join(", ")),
+            }
+        } else {
+            match lacking.as_slice() {
+                [one] => format!("This may be a {one}, which has no method `{name}`"),
+                _ => format!("This may be a {}, which have no method `{name}`", lacking.join(" or ")),
+            }
+        };
         self.diagnostics.push(Diagnostic { file: self.file, range: method.text_range(), message });
+    }
+
+    /// Whether every Lua mixin type `id` has (see `Definitions::lua_mixins`)
+    /// is a table made in the files or those they depend on, whose fields
+    /// the analysis sees
+    fn lua_mixins_known(&self, prior: &Analysis, id: NamedId) -> bool {
+        let names = self.definitions.lua_mixins(id);
+        if names.is_empty() {
+            return true
+        }
+        self.note(Read::LuaMixins);
+        names.iter().all(|name| match prior.lua_mixins.get(name).and_then(|ty| ty.named.identity()) {
+            Some(at) => !self.may_gain_fields(prior, at, 0),
+            None => false,
+        })
+    }
+
+    /// An object of type `named` made at `at`, in `parent`, has its Lua
+    /// mixins' fields, as a frame made from a template with `mixin="..."`
+    /// does. `self:GetParent()` in their methods may be `parent`
+    fn add_lua_mixins(&mut self, at: TableId, named: NamedId, parent: Type) {
+        let names = self.definitions.lua_mixins(named);
+        if names.is_empty() {
+            return
+        }
+        let Some(prior) = self.prior else { return };
+        self.note(Read::LuaMixins);
+        let mixins: Vec<Type> = names.iter().rev().filter_map(|name| prior.lua_mixins.get(name).copied()).collect();
+        for mixin in mixins {
+            self.apply(Write::MixinAdded(at, mixin));
+            if let Some(mixin) = mixin.named.identity() {
+                self.apply(Write::Parent(mixin, parent));
+            }
+        }
     }
 
     /// Reports `t:method()` for a table made in the files when no table in
@@ -3719,19 +4039,41 @@ impl<'a> Walker<'a> {
     }
 
     /// `CreateFrame("Button", ...)` gives a `Button`: the frame type named by a
-    /// literal first argument, if it's a kind of `Frame`. A template (the fourth
-    /// argument) can add Lua methods, so its frames aren't checked for missing ones
+    /// literal first argument, if it's a kind of `Frame`, or the type of the
+    /// template it's made from (the fourth argument; see `templated`)
     fn create_frame(&mut self, call: &FunctionCall, callee: Type, arguments: &[Expression], argument_types: &Values) -> Option<Values> {
         if self.definitions.global("CreateFrame") != Some(callee) {
             return None
         }
-        let named = self.frame_type(arguments.first())?;
-        let template = arguments.get(3).is_some_and(|a| !matches!(a, Expression::Literal(l) if l.is_nil()));
+        let kind = self.frame_type(arguments.first())?;
+        let (named, extended) = self.templated(kind, arguments.get(3));
         let at = self.location(call.syntax().text_range().start());
         // The third argument, or nil without one
         self.apply(Write::Parent(at, argument_types.get(2)));
-        let named = NamedRef::Instance { named, at, extended: template };
+        self.add_lua_mixins(at, named, argument_types.get(2));
+        let named = NamedRef::Instance { named, at, extended };
         Some(Values { values: vec![Type { named, ..Type::of(TypeSet::TABLE) }], rest: Type::NIL })
+    }
+
+    /// The type of an object of type `kind` made from the template `template`
+    /// names, and whether it may have members beyond that type's. With no
+    /// template, it's `kind`. With one known template for that kind of object
+    /// (`CreateFrame("Button", nil, nil, "UIPanelButtonTemplate")`), it's the
+    /// template's type. Otherwise, as with several templates, one for another
+    /// kind, or one wow_ls doesn't know, it's `kind`, and the template can add
+    /// members
+    fn templated(&self, kind: NamedId, template: Option<&Expression>) -> (NamedId, bool) {
+        let text = match template {
+            None => return (kind, false),
+            Some(Expression::Literal(literal)) if literal.is_nil() => return (kind, false),
+            Some(Expression::Literal(literal)) => literal.get_string(),
+            Some(_) => None,
+        };
+        let name = text.as_deref().map(|t| t.trim().trim_matches(['"', '\'']).trim());
+        match name.and_then(|name| self.definitions.template(name)) {
+            Some((named, element)) if element == kind => (named, false),
+            _ => (kind, true),
+        }
     }
 
     /// The kind of `Frame` a literal frame type names, else `Frame`
@@ -3765,20 +4107,20 @@ impl<'a> Walker<'a> {
         let is = |name: &str| self.builtin(name) == Some(callee);
         let at = self.location(call.syntax().text_range().start());
         let object_at = Location { slot: POOL_OBJECT, ..at };
-        let has = |i: usize| expressions.get(i).is_some_and(|a| !matches!(a, Expression::Literal(l) if l.is_nil()));
-        // A template can add members, as with `CreateFrame`
-        let region = |named: Option<NamedId>, template: bool| -> Option<Type> {
-            let named = NamedRef::Instance { named: named?, at: object_at, extended: template };
+        // Made from a template, as with `CreateFrame`
+        let region = |kind: Option<NamedId>, template: usize| -> Option<Type> {
+            let (named, extended) = self.templated(kind?, expressions.get(template));
+            let named = NamedRef::Instance { named, at: object_at, extended };
             Some(Type { named, ..Type::of(TypeSet::TABLE) })
         };
         // The object, its parent, then each callback's argument position and
         // whether it's given the pool before the object
         let (object, parent, callbacks): (Type, Option<Type>, &[(usize, bool)]) = if is("CreateFramePool") {
-            (region(self.frame_type(expressions.first()), has(2))?, Some(arguments.get(1)), &[(3, true), (5, false)])
+            (region(self.frame_type(expressions.first()), 2)?, Some(arguments.get(1)), &[(3, true), (5, false)])
         } else if is("CreateTexturePool") {
-            (region(self.definitions.named_type_id("Texture"), has(3))?, Some(arguments.get(0)), &[(4, true)])
+            (region(self.definitions.named_type_id("Texture"), 3)?, Some(arguments.get(0)), &[(4, true)])
         } else if is("CreateFontStringPool") {
-            (region(self.definitions.named_type_id("FontString"), has(3))?, Some(arguments.get(0)), &[(4, true)])
+            (region(self.definitions.named_type_id("FontString"), 3)?, Some(arguments.get(0)), &[(4, true)])
         } else if is("CreateObjectPool") {
             // Whatever the create function returns, which it's given the pool for
             let pool = self.pool_type(at);
@@ -3851,6 +4193,21 @@ impl<'a> Walker<'a> {
             (None, None, None) => None,
             (a, b, c) => Some(a.unwrap_or_default() | b.unwrap_or_default() | c.unwrap_or_default()),
         }
+    }
+
+    /// Where each of several objects `ty` may be was made, when it's that
+    fn several_objects(&self, ty: Type) -> Vec<TableId> {
+        match ty.named {
+            NamedRef::Several(_) => ty.named.alternatives().into_iter().filter_map(NamedRef::identity).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether the table made at `at` is a mixin mixed into WoW objects, as
+    /// the previous walk found
+    fn is_mixin(&self, at: TableId) -> bool {
+        self.note(Read::MixedInto(at));
+        self.prior.is_some_and(|prior| prior.mixed_into.contains_key(&at)) || self.layer.mixed_into.contains_key(&at)
     }
 
     /// Whether a table or object was made by the function being walked
@@ -3990,8 +4347,10 @@ impl<'a> Walker<'a> {
         for mixin in mixins {
             self.record_mixed_into(*mixin, object.named);
         }
-        // Only a table or object made in the files can keep track of its mixins
-        if let Some(at) = object.named.identity() {
+        // Only a table or object made in the files can keep track of its
+        // mixins: it, or each of several it may be
+        let targets: Vec<TableId> = object.named.identity().into_iter().chain(self.several_objects(object)).collect();
+        for at in targets {
             for mixin in mixins {
                 self.apply(Write::MixinAdded(at, *mixin));
             }
@@ -4016,7 +4375,12 @@ impl<'a> Walker<'a> {
             return MixinTarget::Nothing
         }
         let Some(objects) = self.mixed_into.get(&mixin) else { return MixinTarget::Nothing };
-        objects.iter().fold(MixinTarget::Nothing, |target, &object| {
+        // Each of several objects it may have been mixed into
+        let objects = objects.iter().flat_map(|&object| match object {
+            NamedRef::Several(_) => object.alternatives(),
+            object => vec![object],
+        });
+        objects.fold(MixinTarget::Nothing, |target, object| {
             let next = match object.object_type() {
                 Some((named, extended)) => MixinTarget::Object(named, extended),
                 // A table, which is plain unless it's mixed into something too
@@ -5127,8 +5491,8 @@ mod tests {
 
     #[test]
     fn mixing_named_types() {
-        // Different named types, or a named type and a plain table, are just a table
-        assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or GetTexture()", "f"), ["table"]);
+        // Different named types are either, a named type and a plain table just a table
+        assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or GetTexture()", "f"), ["Texture|Frame"]);
         assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or {}", "f"), ["table"]);
         assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or 1", "f"), ["number|Frame"]);
         assert_eq!(object_types_of("local f = CreateFrame('Frame') if c then f = CreateFrame('Frame') end local g = f", "g"), ["Frame"]);
@@ -5471,8 +5835,8 @@ mod tests {
             }
         }
         let toc = std::path::Path::new("tests/addon/TestAddon/TestAddon.toc");
-        let files = crate::project::toc_files(&std::fs::read_to_string(toc).unwrap()).into_iter()
-            .map(|file| parse(&toc.parent().unwrap().join(file), true))
+        let files = crate::project::Addon::load(toc).unwrap().files.iter()
+            .map(|file| parse(file, true))
             .collect();
         programs.push((toc.display().to_string(), files));
         assert!(programs.len() > 10);
@@ -5882,6 +6246,28 @@ mod tests {
                 "ObjectPoolAPI": {"functions": {"Acquire": {"returns": ["unknown", "boolean"]}, "Release": {"parameters": ["object"]},
                     "EnumerateActive": {"returns": ["function", "table"]}, "GetNextActive": {"returns": ["unknown"]}}}
             },
+            "elements": {"Frame": "Frame", "Button": "Button", "Texture": "Texture", "FontString": "FontString", "Font": "Font",
+                "Odd": {"type": "Frame", "extended": true}},
+            "mixins": {
+                "BaseMixin": {"functions": {"Base": {}, "Value": {"returns": ["string"]}}},
+                "ButtonMixin": {"functions": {"Init": {}, "Value": {"returns": ["number"]}}},
+                "OpenMixin": {"open": true, "functions": {"Known": {}}}
+            },
+            "templates": {
+                "BaseT": {"type": "Button", "mixins": ["BaseMixin"]},
+                "ButtonT": {"type": "Button", "inherits": ["BaseT"], "mixins": ["ButtonMixin"], "values": {"flag": "boolean"},
+                    "children": {"Label": {"type": "FontString", "inherits": ["GameFont"]}, "Icon": {"type": "Texture"}},
+                    "arrays": {"Tabs": [{"type": "Button"}]}},
+                "OpenT": {"type": "Frame", "mixins": ["OpenMixin"]},
+                "MissingT": {"type": "Frame", "mixins": ["Nowhere"]},
+                "TextureT": {"type": "Texture", "values": {"v": "number"}}
+            },
+            "frames": {
+                "GameFont": {"type": "Font"},
+                "Plain": {"type": "Frame", "children": {"Inner": {"type": "Button", "mixins": ["ButtonMixin"]}}},
+                "Opened": {"type": "Frame", "inherits": ["OpenT"]},
+                "UIParent": {"type": "Button"}
+            },
             "values": {"UIParent": "Frame"},
             "functions": {
                 "CreateFrame": {"parameters": ["frameType: string", "name: string|nil", "parent: Frame|nil", "template: string|nil"], "returns": ["Frame"]},
@@ -5971,8 +6357,35 @@ mod tests {
         // Anywhere in the files, as it could run before GetParent does
         let source = "local f = CreateFrame('Frame') local p = f:GetParent() f:SetParent(UIParent)";
         assert_eq!(widget_types_of(source, "p"), ["Frame?"]);
+        // A Button or UIParent: either, with the methods both have
         let source = "local b = CreateFrame('Button', nil, UIParent) b:SetParent(CreateFrame('Button')) local p = b:GetParent()";
-        assert_eq!(widget_types_of(source, "p"), ["table"]);
+        assert_eq!(widget_types_of(source, "p"), ["Frame|Button"]);
+        assert!(warnings(&format!("{source} p:Show()")).is_empty());
+        assert_eq!(warnings(&format!("{source} p:Click()")), ["This may be a Frame, which has no method `Click`"]);
+    }
+
+    #[test]
+    fn several_objects_kept_apart() {
+        let made = "local holder = CreateFrame('Frame') local other = CreateFrame('Button')
+            local a = CreateFrame('Button', nil, holder) local b = CreateFrame('Button', nil, other, 'ButtonT') local x = c and a or b ";
+        // Each with its own parent
+        assert_eq!(widget_types_of(&format!("{made} local p = x:GetParent()"), "p"), ["Button|Frame"]);
+        // A field set on it may be on either; one only one has isn't known
+        assert_eq!(widget_types_of(&format!("{made} x.label = 's' local l = a.label"), "l"), ["string"]);
+        assert_eq!(widget_types_of(&format!("{made} a.only = 1 local o = x.only"), "o")[0], "unknown");
+        assert_eq!(widget_types_of(&format!("{made} a.n = 1 b.n = 2 local n = x.n"), "n"), ["number"]);
+        // Mixed into whichever it is
+        let mixed = format!("{made} local M = {{}} function M:Go() return 1 end Mixin(x, M) local g = a:Go()");
+        assert_eq!(widget_types_of(&mixed, "g"), ["number"]);
+        // A parent set on whichever it is
+        assert_eq!(widget_types_of(&format!("{made} x:SetParent(UIParent) local p = a:GetParent()"), "p"), ["Frame"]);
+        // Plain objects of one type are still kept apart, but shown once
+        assert_eq!(widget_types_of("local f = c and CreateFrame('Frame') or CreateFrame('Frame')", "f"), ["Frame"]);
+        // Past the most kept apart: the type they all are, which may have more
+        let many: String = (0..9).map(|i| format!("if c{i} then f = CreateFrame('Button', nil, nil, 'T{i}') end ")).collect();
+        let source = format!("local f = CreateFrame('Button') {many} local g = f g:Nope()");
+        assert_eq!(widget_types_of(&source, "g")[0], "Button");
+        assert!(warnings(&source).is_empty());
     }
 
     #[test]
@@ -6135,6 +6548,130 @@ mod tests {
     fn templates_on_created_children() {
         assert!(warnings("local t = CreateFrame('Frame'):CreateFontString(nil, 'Template') t:Anything()").is_empty());
         assert_eq!(warnings("local t = CreateFrame('Frame'):CreateFontString(nil, nil) t:Anything()"), ["Texture has no method `Anything`"]);
+    }
+
+    #[test]
+    fn frames_made_from_templates() {
+        let made = "local f = CreateFrame('Button', nil, nil, 'ButtonT') ";
+        assert_eq!(widget_types_of(made, "f"), ["ButtonT"]);
+        // Its own methods, its mixins', those of what it inherits, and its children
+        assert!(warnings(&format!("{made} f:Init() f:Base() f:Click() f.Label:SetText() f.Icon:Show()")).is_empty());
+        assert_eq!(warnings(&format!("{made} f:Nope()")), ["ButtonT has no method `Nope`"]);
+        // Its own mixin's method wins over what it inherits
+        assert_eq!(widget_types_of(&format!("{made} local v = f:Value()"), "v"), ["number"]);
+        assert_eq!(widget_types_of(&format!("{made} local v = f.flag"), "v"), ["boolean"]);
+        assert_eq!(widget_types_of(&format!("{made} local v = f.Tabs"), "v"), ["table"]);
+        // A font string inheriting a font only takes its settings
+        assert_eq!(widget_types_of(&format!("{made} local l = f.Label"), "l"), ["FontString"]);
+        assert_eq!(warnings(&format!("{made} f.Label:Nope()")), ["FontString has no method `Nope`"]);
+        // From a pool, or made by a frame
+        assert_eq!(widget_types_of("local p = CreateFramePool('Button', nil, 'ButtonT') local f = p:Acquire()", "f"), ["ButtonT"]);
+        assert_eq!(widget_types_of("local t = UIParent:CreateFontString(nil, 'TextureT') local v = t.v", "v"), ["number"]);
+        // Either a frame made from it or a plain one: the methods both have
+        let either = "local f = c and CreateFrame('Button', nil, nil, 'ButtonT') or CreateFrame('Button') ";
+        assert_eq!(widget_types_of(either, "f"), ["Button|ButtonT"]);
+        assert!(warnings(&format!("{either} f:Click() f:Show()")).is_empty());
+        assert_eq!(warnings(&format!("{either} f:Init()")), ["This may be a Button, which has no method `Init`"]);
+        assert_eq!(warnings(&format!("{either} f:Nope()")), ["Neither Button nor ButtonT has a method `Nope`"]);
+    }
+
+    #[test]
+    fn templates_that_cant_be_used() {
+        // For another kind of frame, several at once, or not known: the kind
+        // of frame made, which the template can add methods to
+        assert_eq!(widget_types_of("local f = CreateFrame('Frame', nil, nil, 'ButtonT')", "f"), ["Frame"]);
+        assert!(warnings("CreateFrame('Frame', nil, nil, 'ButtonT'):Nope()").is_empty());
+        assert!(warnings("CreateFrame('Button', nil, nil, 'ButtonT, BaseT'):Nope()").is_empty());
+        assert!(warnings("CreateFrame('Button', nil, nil, name):Nope()").is_empty());
+        // With mixins whose methods aren't all known
+        assert!(warnings("CreateFrame('Frame', nil, nil, 'OpenT'):Nope()").is_empty());
+        assert!(warnings("CreateFrame('Frame', nil, nil, 'MissingT'):Nope()").is_empty());
+    }
+
+    #[test]
+    fn named_frames() {
+        assert_eq!(widget_types_of("local f = Plain", "f"), ["Frame"]);
+        assert_eq!(warnings("Plain.Inner:Init() Plain.Inner:Click() Plain.Inner:Nope()"), ["Button has no method `Nope`"]);
+        assert!(warnings("Opened:Nope()").is_empty());
+        // One the definitions give otherwise keeps that type
+        assert!(warnings("UIParent:Click()").len() == 1);
+    }
+
+    /// The widgets' definitions with the templates and frames of XML file `xml`
+    fn with_xml(xml: &str) -> Arc<Definitions> {
+        let definitions = widgets();
+        let document = crate::xml::parse(xml).unwrap();
+        let objects = crate::xml::objects(&document, &|tag: &str| definitions.element(tag).is_some());
+        Arc::new(definitions.with_xml(&objects))
+    }
+
+    const ADDON_XML: &str = r#"<Ui>
+        <Button name="AddonT" virtual="true" inherits="ButtonT" mixin="AddonMixin">
+            <KeyValues><KeyValue key="size" value="2" type="number"/></KeyValues>
+            <Layers><Layer><Texture parentKey="Glow"/></Layer></Layers>
+        </Button>
+        <Frame name="AddonFrame" mixin="FrameMixin">
+            <Frames><Button name="$parentClose" parentKey="Close" inherits="AddonT"/></Frames>
+        </Frame>
+        <Frame name="UnknownT" virtual="true" mixin="NowhereMixin"/>
+        <Frame name="LoneT" virtual="true" mixin="LoneMixin"/>
+        <Frame name="Placed" parent="UIParent"><Frames><Button parentKey="Inner" mixin="InnerMixin"/></Frames></Frame>
+        <Odd name="OddT" virtual="true"/>
+    </Ui>"#;
+
+    #[test]
+    fn addon_templates() {
+        let definitions = with_xml(ADDON_XML);
+        let warnings = |source: &str| -> Vec<String> { analyse_with(source, &definitions).diagnostics.iter().map(|d| d.message.clone()).collect() };
+        let types_of = |source: &str, name: &str| describe_uses(&analyse_with(source, &definitions), name);
+        let mixin = "AddonMixin = {count = 1} function AddonMixin:Extra() end ";
+        // Made from one: its XML, what it inherits, and its Lua mixin's fields
+        let made = format!("{mixin} local f = CreateFrame('Button', nil, nil, 'AddonT') local n, s = f.count, f.size ");
+        assert_eq!(types_of(&made, "f")[0], "AddonT & AddonMixin");
+        assert_eq!(types_of(&made, "n")[0], "number");
+        assert_eq!(types_of(&made, "s")[0], "number");
+        assert!(warnings(&format!("{made} f:Extra() f:Init() f:Click() f.Glow:Show()")).is_empty());
+        assert_eq!(warnings(&format!("{made} f:Nope()")), ["AddonT has no method `Nope`"]);
+        // In the mixin's methods, `self` is what XML mixes it into
+        let own = format!("{mixin} function AddonMixin:OnLoad() local s = self self:Init() self:Extra() self.Glow:Show() end");
+        assert_eq!(types_of(&own, "s")[0], "AddonT & AddonMixin");
+        assert!(warnings(&own).is_empty());
+        assert_eq!(warnings(&format!("{mixin} function AddonMixin:OnLoad() self:Nope() end")), ["AddonT has no method `Nope`"]);
+        // A named frame, and its children by key and name
+        let frame = format!("{mixin} FrameMixin = {{}} function FrameMixin:OnLoad() self.Close:Extra() end local a, c = AddonFrame, AddonFrameClose");
+        assert_eq!(types_of(&frame, "a")[0], "Frame");
+        // Of its own type, as it's an object of its own, shown as its kind
+        assert_eq!(types_of(&frame, "c")[0], "Button");
+        assert!(warnings(&format!("{frame} AddonFrame.Close:Extra() c:Click()")).is_empty());
+        // Without its mixin's table, its methods aren't known
+        assert!(warnings("local f = CreateFrame('Button', nil, nil, 'AddonT') f:Nope()").is_empty());
+        assert!(warnings("CreateFrame('Frame', nil, nil, 'UnknownT'):Nope()").is_empty());
+        // A kind of frame wow_ls doesn't know may have more methods
+        assert!(warnings("CreateFrame('Frame', nil, nil, 'OddT'):Nope()").is_empty());
+    }
+
+    #[test]
+    fn parents_of_addon_mixins() {
+        let definitions = with_xml(ADDON_XML);
+        let warnings = |source: &str| -> Vec<String> { analyse_with(source, &definitions).diagnostics.iter().map(|d| d.message.clone()).collect() };
+        let types_of = |source: &str, name: &str| describe_uses(&analyse_with(source, &definitions), name);
+        // What its frames are made in: by `CreateFrame` with its template, and
+        // inside other objects in XML
+        let lone = "LoneMixin = {} function LoneMixin:OnLoad() local p = self:GetParent() end ";
+        assert_eq!(types_of(&format!("{lone} CreateFrame('Frame', nil, CreateFrame('Button'), 'LoneT')"), "p")[0], "Button");
+        // That Button, and `AddonFrame`, whose `Close` inherits the template
+        let made = "AddonMixin = {} function AddonMixin:OnLoad() local p = self:GetParent() end ";
+        assert_eq!(types_of(&format!("{made} CreateFrame('Button', nil, CreateFrame('Button'), 'AddonT')"), "p")[0], "Frame|Button");
+        let inner = "InnerMixin = {} function InnerMixin:OnLoad() local p = self:GetParent() end";
+        assert_eq!(types_of(inner, "p")[0], "Frame");
+        assert!(warnings(&format!("{inner} function InnerMixin:Go() self:GetParent():Show() end")).is_empty());
+        // Its frames may be made where the analysis can't see, so the parent
+        // isn't one to report missing methods by
+        assert!(warnings(&format!("{made} CreateFrame('Button', nil, CreateFrame('Button'), 'AddonT') function AddonMixin:Go() self:GetParent():Nope() end")).is_empty());
+        // Made nowhere it can see: the documented type
+        let lone = "LoneMixin = {} function LoneMixin:OnLoad() local p = self:GetParent() p:Click() end";
+        assert_eq!(types_of(lone, "p")[0], "Region");
+        assert!(warnings(lone).is_empty());
     }
 
     #[test]

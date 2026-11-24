@@ -1,0 +1,490 @@
+//Copyright (C) 2025-  plusmouse and other contributors
+//
+//This program is free software: you can redistribute it and/or modify
+//it under the terms of the GNU General Public License as published by
+//the Free Software Foundation, either version 3 of the License, or
+//(at your option) any later version.
+//
+//This program is distributed in the hope that it will be useful,
+//but WITHOUT ANY WARRANTY; without even the implied warranty of
+//MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//GNU General Public License for more details.
+//
+//You should have received a copy of the GNU General Public License
+//along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Generates `blizzard_templates.json` from wow-ui-source: the frames and
+//! templates Blizzard's XML defines, and the methods of the Lua mixins they use.
+//!
+//! Which wow_ls type an element makes comes from UI.xsd (see
+//! `xml::Schema::object_type`): its schema type's name without `Type` when
+//! that's a known WoW object type, else the first type it extends that is. A
+//! kind of object of its own that isn't known (`ModelFFX`, `FogOfWarFrame`)
+//! may have methods beyond that type's, so it's marked `extended`. An
+//! intrinsic (`<Button name="ItemButton" intrinsic="true">`), usable as an
+//! element of its own, gets a type of its own name, inheriting what its
+//! element makes, with the methods of its mixins.
+//!
+//! Mixins' methods come from wow_ls's own analysis of Blizzard's addons, each
+//! from its `.toc` over the addons it depends on. A method's parameters are
+//! given without types, and its returns as the analysis infers them. A field
+//! that may be a function the analysis can't pin down is a method taking and
+//! giving anything. A mixin holding functions under computed keys may have
+//! methods beyond those, so it's marked `open`.
+//!
+//! A `KeyValue` is typed by its `type`: boolean, number, string (also when it
+//! has none) or function, or for `global`, the type of the global its value
+//! names (`Enum.X.Y`), from the definitions or the analysis, else unknown.
+
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde_json::{json, Map, Value};
+
+use crate::definitions::Definitions;
+use crate::project::{self, Analysed};
+use crate::types::{FunctionInfo, FunctionRef, Layer, Type, TypeSet};
+use crate::xml::{self, Object, Schema};
+
+/// What the elements of Blizzard's XML make: the type of each object element
+/// (and whether it may have more methods than that type), for its tag
+struct Kinds<'a> {
+    schema: Schema,
+    definitions: &'a Definitions,
+    /// Intrinsic element names, with the tag each is defined by
+    intrinsics: HashMap<String, String>,
+}
+
+impl Kinds<'_> {
+    fn is_object_type(&self, name: &str) -> bool {
+        self.definitions.named_type_id(name)
+            .and_then(|id| self.definitions.named_type(id))
+            .is_some_and(|named| named.has_methods && !named.namespace)
+    }
+
+    fn of(&self, tag: &str) -> Option<(String, bool)> {
+        if self.intrinsics.contains_key(tag) {
+            return Some((tag.to_string(), false))
+        }
+        self.schema.object_type(tag, |name| self.is_object_type(name))
+    }
+
+    /// The type an intrinsic inherits: what its own element makes
+    fn intrinsic_base(&self, name: &str) -> Option<String> {
+        let tag = self.intrinsics.get(name)?;
+        if tag == name {
+            return None
+        }
+        self.of(tag).map(|(ty, _)| ty)
+    }
+}
+
+/// What the generator found that it couldn't type, for its report
+#[derive(Default)]
+struct Report {
+    missing_mixins: BTreeMap<String, usize>,
+    /// Mixins that may have methods beyond those found
+    open_mixins: Vec<String>,
+    unknown_globals: Vec<String>,
+    duplicates: Vec<String>,
+}
+
+pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Result<(), String> {
+    let addons_directory = source.join("Interface/AddOns");
+    let definitions = Arc::new(Definitions::load_directory_except(definitions_directory, out.file_name())?);
+    let xsd_path = addons_directory.join("Blizzard_SharedXML/UI.xsd");
+    let xsd = xml::read(&xsd_path).map_err(|e| format!("{}: {e}", xsd_path.display()))?;
+    let schema = Schema::parse(&xml::parse(&xsd).map_err(|e| format!("{}: {e}", xsd_path.display()))?);
+
+    let addons = project::discover(&addons_directory);
+    let mut xml_files: Vec<PathBuf> = Vec::new();
+    for addon in &addons {
+        for file in &addon.xml {
+            if !xml_files.contains(file) {
+                xml_files.push(file.clone());
+            }
+        }
+    }
+    let mut texts = Vec::new();
+    for path in &xml_files {
+        if let Ok(text) = xml::read(path) {
+            texts.push((path.clone(), text));
+        }
+    }
+
+    // Intrinsics first, as any file can use one as an element
+    let mut kinds = Kinds { schema, definitions: &definitions, intrinsics: HashMap::new() };
+    for (path, text) in &texts {
+        let document = xml::parse(text).map_err(|e| format!("{}: {e}", path.display()))?;
+        for node in document.root_element().descendants().filter(|n| n.is_element()) {
+            if node.attribute("intrinsic").is_some_and(|v| v.eq_ignore_ascii_case("true")) {
+                if let Some(name) = node.attribute("name") {
+                    kinds.intrinsics.insert(name.to_string(), node.tag_name().name().to_string());
+                }
+            }
+        }
+    }
+
+    let mut report = Report::default();
+    let mut templates: BTreeMap<String, Object> = BTreeMap::new();
+    let mut frames: BTreeMap<String, Object> = BTreeMap::new();
+    for (path, text) in &texts {
+        let document = xml::parse(text).map_err(|e| format!("{}: {e}", path.display()))?;
+        for object in xml::objects(&document, &|tag: &str| kinds.of(tag).is_some()) {
+            let Some(name) = object.name.clone() else { continue };
+            if object.is_virtual || object.intrinsic {
+                if templates.insert(name.clone(), object.clone()).is_some() {
+                    report.duplicates.push(name.clone());
+                }
+            }
+            // An intrinsic is an element to use, not a frame
+            if !object.is_virtual && !object.intrinsic {
+                let mut found = Vec::new();
+                xml::global_frames(&object, None, &mut found);
+                frames.extend(found);
+            }
+        }
+    }
+
+    eprintln!("analysing {} addons...", addons.len());
+    let started = std::time::Instant::now();
+    let mut cache: HashMap<PathBuf, Arc<Analysed>> = HashMap::new();
+    let mut layer = Layer::default();
+    for addon in &addons {
+        let analysed = project::analyse_addon(addon, &addons, &HashMap::new(), &definitions, &mut cache);
+        layer.add(&analysed.layer());
+    }
+    eprintln!("analysed in {:?}", started.elapsed());
+
+    let generator = Generator { kinds: &kinds, layer: &layer, templates: &templates };
+    let mut mixin_names: Vec<String> = Vec::new();
+    for object in templates.values().chain(frames.values()) {
+        collect_mixins(object, &mut mixin_names);
+    }
+    mixin_names.sort();
+    mixin_names.dedup();
+    let mut mixins = Map::new();
+    for name in &mixin_names {
+        match generator.mixin(name) {
+            Some((functions, false)) => { mixins.insert(name.clone(), json!({ "functions": functions })); }
+            Some((functions, true)) => {
+                report.open_mixins.push(name.clone());
+                mixins.insert(name.clone(), json!({ "open": true, "functions": functions }));
+            }
+            None => { report.missing_mixins.insert(name.clone(), 0); }
+        }
+    }
+
+    // Each intrinsic's type, with every mixin it gets from its template
+    let mut types = Map::new();
+    for name in kinds.intrinsics.keys() {
+        let mut mixins_of = Vec::new();
+        generator.template_mixins(name, &mut mixins_of, 0);
+        let known = |m: &String| mixins.get(m).is_some_and(|m| m.get("open").is_none());
+        let missing: Vec<&String> = mixins_of.iter().filter(|m| !known(m)).collect();
+        let mut ty = Map::new();
+        ty.insert("base".into(), json!("table"));
+        // Without all its mixins its methods aren't known, so it's left
+        // without any, rather than having its missing ones reported
+        if missing.is_empty() {
+            if let Some(base) = kinds.intrinsic_base(name) {
+                ty.insert("inherits".into(), json!([base]));
+            }
+            ty.insert("mixins".into(), json!(mixins_of));
+        } else {
+            eprintln!("intrinsic {name} has mixins whose methods aren't all known: {missing:?}");
+        }
+        types.insert(name.clone(), Value::Object(ty));
+    }
+
+    // What each element makes, for reading addons' XML without the schema
+    let mut elements = Map::new();
+    let mut tags: Vec<&str> = kinds.schema.tags().chain(kinds.intrinsics.keys().map(String::as_str)).collect();
+    tags.sort();
+    tags.dedup();
+    for tag in tags {
+        match kinds.of(tag) {
+            Some((ty, false)) => { elements.insert(tag.to_string(), json!(ty)); }
+            Some((ty, true)) => { elements.insert(tag.to_string(), json!({ "type": ty, "extended": true })); }
+            None => {}
+        }
+    }
+
+    let mut template_values = Map::new();
+    for (name, object) in &templates {
+        template_values.insert(name.clone(), generator.node(object, &mut report));
+    }
+    let mut frame_values = Map::new();
+    for (name, object) in &frames {
+        frame_values.insert(name.clone(), generator.node(object, &mut report));
+    }
+
+    let version = std::fs::read_to_string(source.join("version.txt")).unwrap_or_default();
+    let generated = format!("by `wow_ls generate-templates` from wow-ui-source {}; regenerate rather than editing. `elements` are the type each element makes (`extended` when it may have methods beyond it), `types` the intrinsic elements, `mixins` the methods of the Lua mixins Blizzard's XML uses (`open` when it holds functions under computed keys, so may have more), `templates` the virtual and intrinsic elements and `frames` the named frames, each with its type, the templates it inherits, its mixins, its `values` (KeyValues), `children` (by parentKey) and `arrays` (by parentArray)", version.trim());
+    let text = layout(&generated, &[("elements", &elements, false), ("types", &types, false), ("mixins", &mixins, true), ("templates", &template_values, false), ("frames", &frame_values, false)]);
+    std::fs::write(out, text).map_err(|e| format!("{}: {e}", out.display()))?;
+
+    eprintln!("{} templates, {} frames, {} intrinsics, {} of {} mixins found", templates.len(), frames.len(), types.len(), mixins.len(), mixin_names.len());
+    report.unknown_globals.sort();
+    report.unknown_globals.dedup();
+    eprintln!("{} globals named by KeyValues have no known type: {:?}", report.unknown_globals.len(), report.unknown_globals);
+    if !report.duplicates.is_empty() {
+        eprintln!("{} templates defined more than once (the last loaded is kept)", report.duplicates.len());
+    }
+    eprintln!("{} mixins may have methods beyond those found, held under computed keys: {:?}", report.open_mixins.len(), report.open_mixins);
+    if !report.missing_mixins.is_empty() {
+        let names: Vec<&String> = report.missing_mixins.keys().collect();
+        eprintln!("mixins with no table in the analysis: {names:?}");
+    }
+    Ok(())
+}
+
+/// Generates `global_strings.json` from a GlobalStrings table exported as CSV
+/// (`ID,BaseTag,TagText_lang,Flags`): each `BaseTag` is a global string, as the
+/// client defines them. Tags that aren't Lua names (`8.0_WARFRONTS_...`) can
+/// only be reached through `_G[...]`, so they're left out
+pub fn global_strings(csv: &Path, out: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(csv).map_err(|e| format!("{}: {e}", csv.display()))?;
+    let mut rows = csv_rows(&text).into_iter();
+    let header = rows.next().unwrap_or_default();
+    let column = header.iter().position(|h| h == "BaseTag").ok_or("no BaseTag column")?;
+    let mut values = Map::new();
+    let mut skipped = 0;
+    for row in rows {
+        let Some(name) = row.get(column) else { continue };
+        if is_name(name) {
+            values.insert(name.clone(), json!("string"));
+        } else {
+            skipped += 1;
+        }
+    }
+    let name = csv.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let generated = format!("by `wow_ls generate-global-strings` from {name}; regenerate rather than editing");
+    std::fs::write(out, layout(&generated, &[("values", &values, false)])).map_err(|e| format!("{}: {e}", out.display()))?;
+    eprintln!("{} global strings, {skipped} left out as they aren't Lua names", values.len());
+    Ok(())
+}
+
+/// Whether `text` is a Lua name
+fn is_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The rows of a CSV file: fields separated by commas, and quoted when they
+/// hold commas, quotes (doubled) or line breaks
+fn csv_rows(text: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = text.trim_start_matches('\u{feff}').chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quoted, c) {
+            (true, '"') if chars.peek() == Some(&'"') => { chars.next(); field.push('"'); }
+            (true, '"') => quoted = false,
+            (true, c) => field.push(c),
+            (false, '"') => quoted = true,
+            (false, ',') => row.push(std::mem::take(&mut field)),
+            (false, '\r') => {}
+            (false, '\n') => {
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            (false, c) => field.push(c),
+        }
+    }
+    if !field.is_empty() || !row.is_empty() {
+        row.push(field);
+        rows.push(row);
+    }
+    rows
+}
+
+/// The file's text: a line per entry of each section, and for `mixins`, a line
+/// per function, so a regenerated file's changes are easy to read
+fn layout(generated: &str, sections: &[(&str, &Map<String, Value>, bool)]) -> String {
+    let string = |text: &str| Value::String(text.to_string()).to_string();
+    let mut text = format!("{{\n  \"generated\": {}", string(generated));
+    for (name, entries, nested) in sections {
+        text += &format!(",\n  {}: {{", string(name));
+        for (i, (key, value)) in entries.iter().enumerate() {
+            let separator = if i == 0 { "" } else { "," };
+            match (nested, value.get("functions").and_then(Value::as_object)) {
+                (true, Some(functions)) if !functions.is_empty() => {
+                    // Its other keys, like `"open": true`, first
+                    let others: String = value.as_object().into_iter().flatten()
+                        .filter(|(k, _)| *k != "functions")
+                        .map(|(k, v)| format!("{}: {v}, ", string(k)))
+                        .collect();
+                    text += &format!("{separator}\n    {}: {{{others}\"functions\": {{", string(key));
+                    for (j, (function, signature)) in functions.iter().enumerate() {
+                        let separator = if j == 0 { "" } else { "," };
+                        text += &format!("{separator}\n        {}: {signature}", string(function));
+                    }
+                    text += "\n    }}";
+                }
+                _ => text += &format!("{separator}\n    {}: {value}", string(key)),
+            }
+        }
+        text += "\n  }";
+    }
+    text + "\n}\n"
+}
+
+fn collect_mixins(object: &Object, names: &mut Vec<String>) {
+    names.extend(object.mixins.iter().cloned());
+    for child in &object.children {
+        collect_mixins(child, names);
+    }
+}
+
+struct Generator<'a> {
+    kinds: &'a Kinds<'a>,
+    layer: &'a Layer,
+    templates: &'a BTreeMap<String, Object>,
+}
+
+impl Generator<'_> {
+    /// Every mixin a frame made from template `name` gets, the one whose
+    /// methods win first: its own (the last listed winning), then those of the
+    /// templates it inherits (the last winning)
+    fn template_mixins(&self, name: &str, mixins: &mut Vec<String>, depth: usize) {
+        let Some(object) = self.templates.get(name) else { return };
+        if depth > 32 {
+            return
+        }
+        for mixin in object.mixins.iter().rev() {
+            if !mixins.contains(mixin) {
+                mixins.push(mixin.clone());
+            }
+        }
+        for inherited in object.inherits.iter().rev() {
+            self.template_mixins(inherited, mixins, depth + 1);
+        }
+    }
+
+    /// The functions of the global table `name`, as its file and the mixins
+    /// mixed into it define them, and whether it may have others: when it or
+    /// one mixed into it holds functions under computed keys, which can be
+    /// methods (`handler[accessor] = function(self) ... end`)
+    fn mixin(&self, name: &str) -> Option<(Map<String, Value>, bool)> {
+        let table = self.layer.globals.get(name)?.named.identity()?;
+        let mut fields = HashMap::new();
+        let open = self.table_fields(table, &mut fields, 0);
+        let mut functions: BTreeMap<String, Value> = BTreeMap::new();
+        for (field, ty) in fields {
+            if !ty.set.contains(TypeSet::FUNCTION) {
+                continue
+            }
+            // One the analysis can't pin down, like a wrapped function
+            // (`M.F = Wrap(M.F)`), still is a method, taking and giving anything
+            let signature = match ty.function {
+                FunctionRef::One(id) => self.layer.functions.get(&id).map(|info| self.signature(info)),
+                _ => None,
+            };
+            functions.insert(field, signature.unwrap_or_else(|| json!({"parameters": ["..."], "returns": ["unknown"], "rest": "unknown"})));
+        }
+        Some((functions.into_iter().collect(), open))
+    }
+
+    /// A table's fields: those of its mixins, in the order they were mixed
+    /// in, and then its own, so later ones win as they do in Lua
+    /// Also whether any of them holds functions under computed keys
+    fn table_fields(&self, table: crate::types::TableId, fields: &mut HashMap<String, Type>, depth: usize) -> bool {
+        if depth > 16 {
+            return true
+        }
+        let mut open = self.layer.entries.get(&table).is_some_and(|e| e.keys.set.contains(TypeSet::STRING) && e.values.set.contains(TypeSet::FUNCTION));
+        for mixin in self.layer.mixins.get(&table).into_iter().flatten() {
+            if let Some(at) = mixin.named.identity() {
+                open |= self.table_fields(at, fields, depth + 1);
+            }
+        }
+        for (name, &ty) in self.layer.fields.get(&table).into_iter().flatten() {
+            fields.insert(name.clone(), ty);
+        }
+        open
+    }
+
+    fn signature(&self, info: &FunctionInfo) -> Value {
+        let mut parameters: Vec<String> = info.parameters.iter().map(|p| p.name.clone()).collect();
+        // `function M.F(self, x)`, called as a method like the rest
+        if !info.method && parameters.first().is_some_and(|p| p == "self") {
+            parameters.remove(0);
+        }
+        if info.varargs.is_some() {
+            parameters.push("...".to_string());
+        }
+        let mut function = Map::new();
+        if !parameters.is_empty() {
+            function.insert("parameters".into(), json!(parameters));
+        }
+        let returns: Vec<String> = info.returns.values.iter().map(|&ty| self.type_text(ty)).collect();
+        if !returns.is_empty() {
+            function.insert("returns".into(), json!(returns));
+        }
+        if info.returns.rest.set != TypeSet::NIL && info.returns.rest.set != TypeSet::NEVER {
+            function.insert("rest".into(), json!(self.type_text(info.returns.rest)));
+        }
+        Value::Object(function)
+    }
+
+    fn type_text(&self, ty: Type) -> String {
+        self.kinds.definitions.type_text(ty)
+    }
+
+    /// The type of the global a `type="global"` KeyValue names, like
+    /// `Enum.ItemQuality.Poor` or `BACKDROP_TOOLTIP_16_16_5555`
+    fn global_type(&self, path: &str) -> Option<String> {
+        if let Some(ty) = self.kinds.definitions.at_path(path) {
+            return Some(self.type_text(ty))
+        }
+        let mut parts = path.split('.');
+        let mut ty = *self.layer.globals.get(parts.next()?)?;
+        for part in parts {
+            ty = *self.layer.fields.get(&ty.named.identity()?)?.get(part)?;
+        }
+        Some(self.type_text(ty))
+    }
+
+    /// An object as the generated file gives it
+    fn node(&self, object: &Object, report: &mut Report) -> Value {
+        xml::node(object, &|tag: &str| self.kinds.of(tag), &mut |path: &str| {
+            let found = self.global_type(path);
+            if found.is_none() {
+                report.unknown_globals.push(path.to_string());
+            }
+            found
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lays_out_a_line_per_entry() {
+        let types = json!({"A": {"base": "table"}, "B": {"base": "table"}});
+        let mixins = json!({"M": {"open": true, "functions": {"F": {}, "G": {"returns": ["number"]}}}, "Empty": {"functions": {}}});
+        let text = layout("here", &[("types", types.as_object().unwrap(), false), ("mixins", mixins.as_object().unwrap(), true)]);
+        assert_eq!(text, "{\n  \"generated\": \"here\",\n  \"types\": {\n    \"A\": {\"base\":\"table\"},\n    \"B\": {\"base\":\"table\"}\n  },\n  \"mixins\": {\n    \"Empty\": {\"functions\":{}},\n    \"M\": {\"open\": true, \"functions\": {\n        \"F\": {},\n        \"G\": {\"returns\":[\"number\"]}\n    }}\n  }\n}\n");
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["mixins"], mixins);
+    }
+
+    #[test]
+    fn reads_csv() {
+        let text = "ID,BaseTag,TagText_lang,Flags\r\n1,ACCEPT,\"Accept\",1\n2,QUOTE,\"Say \"\"hi\"\", then\nleave\",3\n3,LAST,x,1";
+        assert_eq!(csv_rows(text), [
+            vec!["ID", "BaseTag", "TagText_lang", "Flags"],
+            vec!["1", "ACCEPT", "Accept", "1"],
+            vec!["2", "QUOTE", "Say \"hi\", then\nleave", "3"],
+            vec!["3", "LAST", "x", "1"],
+        ]);
+        assert!(is_name("ACCEPT") && is_name("_x1"));
+        assert!(!is_name("8.0_WARFRONTS") && !is_name("90POA_BOSS_01") && !is_name(""));
+    }
+}

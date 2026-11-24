@@ -61,6 +61,11 @@
 //!   `"Button": { "base": "table", "inherits": ["Frame"], "method_tables": ["SimpleButtonAPI"] }`.
 //!   A type that lists either has a known set of methods, so calls of other
 //!   methods on it can be reported as missing.
+//! * A type can also list `mixins`, declared in a `mixins` section of the same
+//!   form as `method_tables`: Lua mixins, whose methods it has. They come
+//!   after its method tables, so a method table's method wins. A type listing
+//!   them has a known set of methods too. A mixin with `"open": true` may have
+//!   methods beyond those listed, so a template using it doesn't.
 //!
 //! Every `.json` file in the directory is loaded, in filename order, and a later
 //! file's definition of a name replaces an earlier one. Tables are merged member
@@ -93,7 +98,28 @@ pub struct NamedType {
     pub namespace: bool,
 }
 
-#[derive(Debug, Default)]
+/// Templates' types while they're being made
+#[derive(Default)]
+struct Templates {
+    /// Each template's type and description, by name
+    nodes: HashMap<String, (NamedId, Value)>,
+    /// Templates made so far, and whether every method each has is known
+    complete: HashMap<NamedId, bool>,
+    /// The type of element each template is for
+    elements: HashMap<String, NamedId>,
+    /// Types templates and frames inherit
+    inherited: HashSet<NamedId>,
+}
+
+/// What a type is made of, by name, as its file lists them
+#[derive(Debug, Default, Clone)]
+struct Composition {
+    inherits: Vec<String>,
+    method_tables: Vec<String>,
+    mixins: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct Definitions {
     functions: Vec<FunctionInfo>,
     /// Global functions and namespace tables
@@ -102,9 +128,31 @@ pub struct Definitions {
     type_names: HashMap<String, NamedId>,
     /// Methods by table, from `method_tables` sections
     method_tables: HashMap<String, HashMap<String, Type>>,
-    /// What each type listed for `inherits` and `method_tables`, resolved once
+    /// Methods of Lua mixins, from `mixins` sections. Kept apart from
+    /// `method_tables`, as they aren't methods every object of a type has
+    mixins: HashMap<String, HashMap<String, Type>>,
+    /// Mixins with `"open": true`, which may have methods beyond those listed
+    open_mixins: HashSet<String>,
+    /// Templates' types, and the type of element each is for, by name
+    templates: HashMap<String, (NamedId, NamedId)>,
+    /// The type each XML element makes, and whether it may have methods
+    /// beyond it, by tag, from `elements` sections
+    elements: HashMap<String, (String, bool)>,
+    /// Named fonts, which font strings inherit only settings from
+    fonts: HashSet<String>,
+    /// For a template's or frame's type, the mixins it has (its own and those
+    /// of the templates it inherits) that aren't in `mixins`: Lua tables an
+    /// addon defines, whose methods it has too, as far as wow_ls knows
+    lua_mixins: HashMap<NamedId, Vec<String>>,
+    /// Each object an XML file defines that has a mixin not in `mixins`: the
+    /// mixin's name, and the object's type, which `self` is in its methods
+    xml_mixins: Vec<(String, NamedId)>,
+    /// The type of what each object with a Lua mixin is made in, when XML
+    /// says: the mixin's name, and that type
+    xml_parents: Vec<(String, NamedId)>,
+    /// What each type listed for `inherits`, `method_tables` and `mixins`, resolved once
     /// every file is loaded
-    compositions: HashMap<NamedId, (Vec<String>, Vec<String>)>,
+    compositions: HashMap<NamedId, Composition>,
     /// Types another type inherits from
     has_subtypes: HashSet<String>,
 }
@@ -261,10 +309,16 @@ impl Definitions {
 
     /// Loads every `.json` file in `directory`
     pub fn load_directory(directory: &Path) -> Result<Definitions, String> {
+        Definitions::load_directory_except(directory, None)
+    }
+
+    /// Loads every `.json` file in `directory` but the one called `except`
+    pub fn load_directory_except(directory: &Path, except: Option<&std::ffi::OsStr>) -> Result<Definitions, String> {
         let entries = std::fs::read_dir(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
         let mut paths: Vec<PathBuf> = entries
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .filter(|p| except.is_none() || p.file_name() != except)
             .collect();
         paths.sort();
         let mut files = Vec::new();
@@ -288,14 +342,327 @@ impl Definitions {
             definitions.add_types(root).map_err(|e| format!("{file}: {e}"))?;
         }
         definitions.has_subtypes = definitions.compositions.values()
-            .flat_map(|(inherits, _)| inherits.iter().cloned())
+            .flat_map(|composition| composition.inherits.iter().cloned())
             .collect();
         for (file, root) in files {
             definitions.add_method_tables(root).map_err(|e| format!("{file}: {e}"))?;
             definitions.add_members(root, None, "").map_err(|e| format!("{file}: {e}"))?;
         }
         definitions.compose()?;
+        definitions.add_templates(files);
         Ok(definitions)
+    }
+
+    /// Reads `elements`, then gives each template (`templates`) a type of its
+    /// own name, and each named frame (`frames`) a global of an unnamed type,
+    /// once every other type is known. A later file's template or frame
+    /// replaces an earlier one's
+    fn add_templates(&mut self, files: &[(String, Value)]) {
+        let mut templates: Vec<(String, Value)> = Vec::new();
+        let mut frames: Vec<(String, Value)> = Vec::new();
+        for (_, root) in files {
+            for (tag, kind) in root.get("elements").and_then(Value::as_object).into_iter().flatten() {
+                let kind = match kind {
+                    Value::String(ty) => Some((ty.clone(), false)),
+                    Value::Object(kind) => kind.get("type").and_then(Value::as_str)
+                        .map(|ty| (ty.to_string(), kind.get("extended").and_then(Value::as_bool).unwrap_or(false))),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    self.elements.insert(tag.clone(), kind);
+                }
+            }
+            for (key, found) in [("templates", &mut templates), ("frames", &mut frames)] {
+                let Some(Value::Object(entries)) = root.get(key) else { continue };
+                for (name, node) in entries {
+                    found.retain(|(n, _)| n != name);
+                    found.push((name.clone(), node.clone()));
+                }
+            }
+        }
+        self.add_objects(&templates, &frames);
+    }
+
+    /// These definitions with the templates and named frames of addons' XML
+    /// files (`objects`, the top ones of each file, in the order they load),
+    /// all in one namespace as they are in the game. A template replaces one
+    /// of the same name loaded before it; a frame doesn't replace a global
+    /// defined otherwise
+    pub fn with_xml(&self, objects: &[crate::xml::Object]) -> Definitions {
+        let mut definitions = self.clone();
+        // An intrinsic is an element of its own, making its own type
+        for object in objects.iter().filter(|o| o.intrinsic) {
+            if let Some(name) = &object.name {
+                definitions.elements.insert(name.clone(), (name.clone(), false));
+            }
+        }
+        let (mut templates, mut frames) = (Vec::new(), Vec::new());
+        {
+            let kind = |tag: &str| definitions.elements.get(tag).cloned();
+            let mut global = |path: &str| definitions.at_path(path).map(|ty| definitions.type_text(ty));
+            for object in objects {
+                if object.is_virtual || object.intrinsic {
+                    if let Some(name) = &object.name {
+                        templates.retain(|(n, _): &(String, Value)| n != name);
+                        templates.push((name.clone(), crate::xml::node(object, &kind, &mut global)));
+                    }
+                    continue
+                }
+                let mut found = Vec::new();
+                crate::xml::global_frames(object, None, &mut found);
+                for (name, object) in found {
+                    frames.retain(|(n, _): &(String, Value)| *n != name);
+                    frames.push((name, crate::xml::node(&object, &kind, &mut global)));
+                }
+            }
+        }
+        definitions.add_objects(&templates, &frames);
+        definitions
+    }
+
+    /// The type XML element `tag` makes, and whether it may have methods beyond it
+    pub fn element(&self, tag: &str) -> Option<(&str, bool)> {
+        self.elements.get(tag).map(|(ty, extended)| (ty.as_str(), *extended))
+    }
+
+    /// The mixins a template's or frame's type has that are Lua tables wow_ls
+    /// doesn't know, which its methods may come from
+    pub fn lua_mixins(&self, id: NamedId) -> &[String] {
+        self.lua_mixins.get(&id).map_or(&[], Vec::as_slice)
+    }
+
+    /// For each Lua mixin of an object XML makes inside another (or names a
+    /// `parent` for), the mixin's name and the type of that parent
+    pub fn xml_parents(&self) -> &[(String, NamedId)] {
+        &self.xml_parents
+    }
+
+    /// Each mixin XML gives an object that isn't in `mixins`, with the object's type
+    pub fn xml_mixins(&self) -> &[(String, NamedId)] {
+        &self.xml_mixins
+    }
+
+    /// Templates and named frames, by name: a type for each template, built
+    /// over those already known, and a global for each frame
+    fn add_objects(&mut self, templates: &[(String, Value)], frames: &[(String, Value)]) {
+        // Each template's type first, so they can inherit one another in any order
+        let mut building = Templates::default();
+        for (name, node) in templates {
+            let id = match self.type_names.get(name) {
+                Some(&id) => id,
+                None => {
+                    let id = self.types.len() as NamedId;
+                    self.type_names.insert(name.clone(), id);
+                    self.types.push(NamedType {
+                        name: name.clone(), base: TypeSet::TABLE, fields: HashMap::default(), inherits: Vec::new(), has_methods: false, namespace: false,
+                    });
+                    id
+                }
+            };
+            building.nodes.insert(name.clone(), (id, node.clone()));
+        }
+        self.fonts.extend(frames.iter()
+            .filter(|(_, node)| node.get("type").and_then(Value::as_str) == Some("Font"))
+            .map(|(name, _)| name.clone()));
+        for (name, _) in templates {
+            self.build_template(name, &mut building);
+        }
+        for (name, node) in frames {
+            if self.globals.contains_key(name) {
+                continue
+            }
+            if let Some((id, _)) = self.object_node(node, None, None, &mut building) {
+                self.globals.insert(name.clone(), Type::named(id, TypeSet::TABLE));
+            }
+        }
+        for (name, &(id, _)) in &building.nodes {
+            match building.elements.get(name) {
+                Some(&element) => { self.templates.insert(name.clone(), (id, element)); }
+                None => { self.templates.remove(name); }
+            }
+        }
+        for &id in &building.inherited {
+            self.has_subtypes.insert(self.types[id as usize].name.clone());
+        }
+    }
+
+    /// The type of element template `name` is for
+    fn template_element(&self, name: &str, building: &Templates) -> Option<NamedId> {
+        building.elements.get(name).copied().or_else(|| Some(self.templates.get(name)?.1))
+    }
+
+    /// Template `name`'s type, filled in if it isn't yet, and whether every
+    /// method it has is known
+    fn build_template(&mut self, name: &str, building: &mut Templates) -> Option<(NamedId, bool)> {
+        let Some((id, node)) = building.nodes.get(name).cloned() else {
+            // One built before, as Blizzard's are for an addon's
+            let &(id, _) = self.templates.get(name)?;
+            return Some((id, self.types[id as usize].has_methods))
+        };
+        if let Some(&complete) = building.complete.get(&id) {
+            return Some((id, complete))
+        }
+        // One that inherits itself, through others, isn't known
+        building.complete.insert(id, false);
+        let (_, complete) = self.object_node(&node, Some(id), None, building)?;
+        building.complete.insert(id, complete);
+        if let Some(element) = node.get("type").and_then(Value::as_str).and_then(|t| self.named_type_id(t)) {
+            building.elements.insert(name.to_string(), element);
+        }
+        Some((id, complete))
+    }
+
+    /// The type of an object a template or frame describes: `into`, the
+    /// template's own type, or else a new unnamed one, shown as the type of
+    /// its element. An object with nothing of its own is just of that type.
+    /// Also whether every method it has is known: it isn't when it's a kind
+    /// of object that isn't a known type, or something it inherits or mixes in
+    /// isn't known
+    fn object_node(&mut self, node: &Value, into: Option<NamedId>, parent: Option<NamedId>, building: &mut Templates) -> Option<(NamedId, bool)> {
+        let strings = |key: &str| -> Vec<String> {
+            node.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+        };
+        let element_name = node.get("type").and_then(Value::as_str);
+        let element = element_name.and_then(|t| self.named_type_id(t)).filter(|&id| self.types[id as usize].has_methods);
+        let extended = node.get("extended").and_then(Value::as_bool).unwrap_or(false);
+        let (inherits, mixins) = (strings("inherits"), strings("mixins"));
+        let own = ["values", "children", "arrays"].iter().any(|key| node.get(key).is_some());
+        if into.is_none() && inherits.is_empty() && mixins.is_empty() && !own {
+            return element.map(|id| (id, !extended))
+        }
+        let mut complete = element.is_some() && !extended;
+        let is_font = element_name == Some("Font");
+        // The last inherited wins, then the element's own methods
+        let mut parents = Vec::new();
+        for inherited in inherits.iter().rev() {
+            // A font string inheriting a font takes its settings, not methods
+            if !is_font && self.fonts.contains(inherited) {
+                continue
+            }
+            match self.build_template(inherited, building) {
+                Some((_, _)) if !is_font && self.template_element(inherited, building).is_some_and(|e| self.types[e as usize].name == "Font") => {}
+                Some((parent, parent_complete)) => {
+                    parents.push(parent);
+                    complete &= parent_complete;
+                }
+                None => complete = false,
+            }
+        }
+        parents.extend(element);
+        building.inherited.extend(parents.iter().copied());
+        let id = match into {
+            Some(id) => id,
+            None => {
+                let id = self.types.len() as NamedId;
+                let name = element.map_or_else(|| "Frame".to_string(), |e| self.types[e as usize].name.clone());
+                self.types.push(NamedType {
+                    name, base: TypeSet::TABLE, fields: HashMap::default(), inherits: Vec::new(), has_methods: false, namespace: false,
+                });
+                id
+            }
+        };
+        let mut fields: HashMap<String, Type> = HashMap::default();
+        for (key, value) in node.get("values").and_then(Value::as_object).into_iter().flatten() {
+            let ty = value.as_str().and_then(|t| self.parse_type(t).ok()).unwrap_or(Type::UNKNOWN);
+            fields.insert(key.clone(), ty);
+        }
+        for (key, child) in node.get("children").and_then(Value::as_object).into_iter().flatten() {
+            let ty = match self.object_node(child, None, Some(id), building) {
+                Some((id, _)) => Type::named(id, TypeSet::TABLE),
+                None => Type::UNKNOWN,
+            };
+            fields.insert(key.clone(), ty);
+        }
+        for key in node.get("arrays").and_then(Value::as_object).into_iter().flatten().map(|(key, _)| key) {
+            fields.insert(key.clone(), Type::of(TypeSet::TABLE));
+        }
+        // Lua mixins it has through what it inherits
+        let mut lua: Vec<String> = Vec::new();
+        for parent in &parents {
+            for mixin in self.lua_mixins.get(parent).into_iter().flatten() {
+                if !lua.contains(mixin) {
+                    lua.push(mixin.clone());
+                }
+            }
+        }
+        // The last mixed in wins
+        let mut own_lua = Vec::new();
+        for mixin in mixins.iter().rev() {
+            match self.mixins.get(mixin) {
+                Some(methods) => for (method, &ty) in methods {
+                    fields.entry(method.clone()).or_insert(ty);
+                },
+                // One wow_ls doesn't know, like an addon's own: whether its
+                // methods are known is up to the analysis
+                None => {
+                    own_lua.push(mixin.clone());
+                    if !lua.contains(mixin) {
+                        lua.push(mixin.clone());
+                    }
+                }
+            }
+            complete &= !self.open_mixins.contains(mixin);
+        }
+        let named = &mut self.types[id as usize];
+        named.fields = fields;
+        named.inherits = parents;
+        named.has_methods = complete;
+        if lua.is_empty() {
+            self.lua_mixins.remove(&id);
+        } else {
+            self.lua_mixins.insert(id, lua.clone());
+        }
+        self.xml_mixins.extend(own_lua.into_iter().map(|mixin| (mixin, id)));
+        // Where it's made, for `self:GetParent()` in its Lua mixins: inside
+        // another object, or the frame `parent` names
+        let parent = parent.or_else(|| {
+            let name = node.get("parent").and_then(Value::as_str)?;
+            self.globals.get(name)?.named.named_id()
+        });
+        if let Some(parent) = parent {
+            self.xml_parents.extend(lua.iter().map(|mixin| (mixin.clone(), parent)));
+        }
+        Some((id, complete))
+    }
+
+    /// The type a template gives what it's made into, and the type of element
+    /// it is for (`Button` for a button template)
+    pub fn template(&self, name: &str) -> Option<(NamedId, NamedId)> {
+        self.templates.get(name).copied()
+    }
+
+    /// A type as the definitions write it: `number|nil`, `Frame`, `Enum.ItemQuality`
+    pub fn type_text(&self, ty: Type) -> String {
+        let definitions = self;
+        let named = |id: Option<u32>| id.and_then(|id| definitions.named_type(id)).filter(|n| !n.namespace).map(|n| n.name.clone());
+        let mut parts: Vec<String> = Vec::new();
+        for name in ty.set.names() {
+            let part = match name {
+                _ if name.starts_with("unknown") => return "unknown".to_string(),
+                "never" => continue,
+                // Any of several objects: each's type
+                "table" | "userdata" if matches!(ty.named, NamedRef::Several(_)) => {
+                    let mut names: Vec<String> = Vec::new();
+                    for object in ty.named.alternatives() {
+                        let one = named(object.named_id()).unwrap_or_else(|| name.to_string());
+                        if !names.contains(&one) {
+                            names.push(one);
+                        }
+                    }
+                    names.join("|")
+                }
+                "table" | "userdata" => named(ty.named.named_id()).unwrap_or_else(|| name.to_string()),
+                "number" => named(ty.numeric.named_id()).unwrap_or_else(|| name.to_string()),
+                _ => name.to_string(),
+            };
+            if !parts.contains(&part) {
+                parts.push(part);
+            }
+        }
+        if parts.is_empty() {
+            return "nil".to_string()
+        }
+        parts.join("|")
     }
 
     fn add_types(&mut self, root: &Value) -> Result<(), String> {
@@ -335,27 +702,37 @@ impl Definitions {
                     Some(_) => Err(format!("{name}: `{key}` should be an array")),
                 }
             };
-            let (inherits, method_tables) = (names("inherits")?, names("method_tables")?);
-            if definition.get("inherits").is_some() || definition.get("method_tables").is_some() {
+            let (inherits, method_tables, mixins) = (names("inherits")?, names("method_tables")?, names("mixins")?);
+            if ["inherits", "method_tables", "mixins"].iter().any(|key| definition.get(key).is_some()) {
                 let composition = self.compositions.entry(id).or_default();
-                composition.0.extend(inherits);
-                composition.1.extend(method_tables);
+                composition.inherits.extend(inherits);
+                composition.method_tables.extend(method_tables);
+                composition.mixins.extend(mixins);
             }
         }
         Ok(())
     }
 
+    /// The `method_tables` and `mixins` sections, which have the same form
     fn add_method_tables(&mut self, root: &Value) -> Result<(), String> {
-        let Some(tables) = object(root, "method_tables")? else { return Ok(()) };
-        for (table, definition) in tables {
-            // Registered even if empty, so types can list it
-            self.method_tables.entry(table.clone()).or_default();
-            let Some(functions) = object(definition, "functions")? else { continue };
-            for (name, function) in functions {
-                let function = self.parse_function(function).map_err(|e| format!("{table}:{name}: {e}"))?;
-                let id = self.functions.len() as BuiltinId;
-                self.functions.push(function);
-                self.method_tables.entry(table.clone()).or_default().insert(name.clone(), Type::builtin(id));
+        for key in ["method_tables", "mixins"] {
+            let Some(tables) = object(root, key)? else { continue };
+            for (table, definition) in tables {
+                // Registered even if empty, so types can list it
+                let mut methods = HashMap::default();
+                if let Some(functions) = object(definition, "functions")? {
+                    for (name, function) in functions {
+                        let function = self.parse_function(function).map_err(|e| format!("{table}:{name}: {e}"))?;
+                        let id = self.functions.len() as BuiltinId;
+                        self.functions.push(function);
+                        methods.insert(name.clone(), Type::builtin(id));
+                    }
+                }
+                if key == "mixins" && definition.get("open").and_then(Value::as_bool) == Some(true) {
+                    self.open_mixins.insert(table.clone());
+                }
+                let section = if key == "mixins" { &mut self.mixins } else { &mut self.method_tables };
+                section.entry(table.clone()).or_default().extend(methods);
             }
         }
         Ok(())
@@ -366,7 +743,7 @@ impl Definitions {
     fn compose(&mut self) -> Result<(), String> {
         let mut compositions: Vec<_> = std::mem::take(&mut self.compositions).into_iter().collect();
         compositions.sort_by_key(|(id, _)| *id);
-        for (id, (inherits, method_tables)) in compositions {
+        for (id, Composition { inherits, method_tables, mixins }) in compositions {
             let name = self.types[id as usize].name.clone();
             let mut parents = Vec::new();
             for parent in &inherits {
@@ -374,16 +751,19 @@ impl Definitions {
                 parents.push(parent);
             }
             let mut fields = HashMap::default();
-            for table in &method_tables {
-                let methods = self.method_tables.get(table).ok_or_else(|| format!("{name}: no method table {table}"))?;
+            let tables = method_tables.iter().map(|table| self.method_tables.get(table).ok_or_else(|| format!("{name}: no method table {table}")))
+                .chain(mixins.iter().map(|mixin| self.mixins.get(mixin).ok_or_else(|| format!("{name}: no mixin {mixin}"))));
+            for methods in tables {
+                let methods = methods?;
                 for (method, ty) in methods {
                     // The first table listed wins
                     fields.entry(method.clone()).or_insert(*ty);
                 }
             }
+            let open = mixins.iter().any(|mixin| self.open_mixins.contains(mixin));
             let named = &mut self.types[id as usize];
             named.inherits = parents;
-            named.has_methods = true;
+            named.has_methods = !open;
             for (method, ty) in fields {
                 named.fields.entry(method).or_insert(ty);
             }
@@ -708,6 +1088,37 @@ mod tests {
         assert_eq!(definitions.function(create).unwrap().returns.values, [Type::named(texture, TypeSet::TABLE)]);
         assert!(definitions.named_type(definitions.named_type_id("Button").unwrap()).unwrap().has_methods);
         assert!(!definitions.named_type(texture).unwrap().has_methods);
+    }
+
+    #[test]
+    fn mixins() {
+        let definitions = Definitions::from_json(r#"{
+            "method_tables": {"ButtonAPI": {"functions": {"Click": {}}}},
+            "mixins": {"ItemMixin": {"functions": {"SetItem": {"parameters": ["item"]}, "Click": {"returns": ["number"]}}}},
+            "types": {
+                "Button": {"base": "table", "method_tables": ["ButtonAPI"]},
+                "ItemButton": {"base": "table", "inherits": ["Button"], "mixins": ["ItemMixin"]}
+            }
+        }"#).unwrap();
+        let id = definitions.named_type_id("ItemButton").unwrap();
+        assert!(definitions.named_type(id).unwrap().has_methods);
+        let members = definitions.members(id);
+        assert!(members.contains_key("SetItem"));
+        // Its own mixin's method replaces the inherited one
+        let click = definitions.field(Type::named(id, TypeSet::TABLE), "Click").unwrap();
+        let FunctionRef::Builtin(click) = click.function else { panic!() };
+        assert_eq!(definitions.function(click).unwrap().returns.first().set, TypeSet::NUMBER);
+        // Mixin methods aren't methods every object of some type has
+        assert!(!definitions.is_object_method("SetItem"));
+        // One that may have more methods than it lists
+        let open = Definitions::from_json(r#"{
+            "mixins": {"M": {"open": true, "functions": {"F": {}}}},
+            "types": {"T": {"base": "table", "mixins": ["M"]}}
+        }"#).unwrap();
+        let id = open.named_type_id("T").unwrap();
+        assert!(open.members(id).contains_key("F"));
+        assert!(!open.named_type(id).unwrap().has_methods);
+        assert!(Definitions::from_json(r#"{"types": {"A": {"base": "table", "mixins": ["Missing"]}}}"#).is_err());
     }
 
     #[test]

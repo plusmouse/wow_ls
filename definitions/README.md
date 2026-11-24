@@ -38,6 +38,9 @@ filename order; a later file's entry for a name replaces an earlier one.
   `string`, `function`, `table`, `userdata`, `thread`, `unknown`, or a named type.
 - `values` (at the top level or in a table) are members that aren't functions,
   each with a type: `"values": { "Immediate": "Enum.StatusBarInterpolation" }`.
+- `mixins` holds Lua mixins, each with its `functions` like a table's. A type
+  can list `"mixins": ["ItemButtonMixin"]` to have their methods, after those
+  of its `method_tables` and before inherited ones.
 - `types` declares named types: tables or userdata shown by their own name
   (`Frame`) rather than `table`, or numbers with a name, for enums (`"base":
   "number"`). Any file can use a type declared in any other.
@@ -57,6 +60,36 @@ where `Blizzard_APIDocumentationGenerated` is
 `Interface/AddOns/Blizzard_APIDocumentationGenerated` from wow-ui-source. How
 documentation type names map to wow_ls types is set by the tables at the top of
 the script, and it reports any names they don't cover.
+
+`blizzard_templates.json` is generated from wow-ui-source's XML and Lua; don't
+edit it by hand either. Regenerate it with:
+
+```sh
+wow_ls generate-templates ../wow-ui-source definitions/blizzard_templates.json
+```
+
+Generate `global_strings.json` first, as `KeyValue`s name global strings.
+
+It reads `UI.xsd` for the type each XML element makes, every XML file a
+Blizzard addon's `.toc` loads (for the current game version), and wow_ls's own
+analysis of Blizzard's Lua for the methods of the mixins that XML uses. It gives
+the intrinsic elements (`ItemButton`, `DropdownButton`, ...) a type each, and
+records every template and named frame for addons' frames to use. It also
+writes `elements`, the type each XML element makes (with `"extended": true`
+when it may have methods beyond it), which is how an addon's own XML is typed
+without `UI.xsd`. It reports mixins it found no table for, and globals named by
+`KeyValue`s it couldn't type.
+
+`global_strings.json` is the client's global strings (`ACCEPT`, `CANCEL`, ...),
+each a `string`, generated from the GlobalStrings table exported as CSV
+(`ID,BaseTag,TagText_lang,Flags`, as wago.tools gives it):
+
+```sh
+wow_ls generate-global-strings GlobalStrings.<version>.csv definitions/global_strings.json
+```
+
+Tags that aren't Lua names (`8.0_WARFRONTS_...`) are left out, as only
+`_G[...]` reaches them.
 
 `lua.json` is the Lua 5.1 standard library plus WoW's global aliases
 (`strsplit`, `tinsert`, ...).

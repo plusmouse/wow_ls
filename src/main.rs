@@ -27,6 +27,8 @@ mod definitions;
 mod project;
 mod ast;
 mod completion;
+mod xml;
+mod generate;
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let args: Vec<String> = env::args().collect();
@@ -58,6 +60,15 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         let (analysed, analysed_file, dependency_files);
         let (analysis, paths) = if target.extension().is_some_and(|e| e.eq_ignore_ascii_case("toc")) {
             let addon = project::Addon::load(target)?;
+            // With the templates and frames its XML, and its dependencies', define
+            let xml = project::xml_files(std::slice::from_ref(&addon), &[]);
+            let (definitions, errors) = project::with_xml(&definitions, &xml, &Default::default(), &mut Default::default());
+            for error in errors {
+                let text = xml::read(&error.path)?;
+                let numbers = line_numbers::LinePositions::from(text.as_str());
+                let (line, column) = numbers.from_offset(error.offset);
+                println!("error {}:{}:{} {}", error.path.display(), line.0 + 1, column + 1, error.message);
+            }
             analysed = project::analyse_addon(&addon, &[], &Default::default(), &definitions, &mut Default::default());
             dependency_files = analysed.involves.len() - analysed.paths.len();
             (&analysed.analysis, analysed.paths.clone())
@@ -95,6 +106,16 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         let replayed = if bodies == 0 { 0 } else { analysis.replayed * 100 / bodies };
         let with = if dependency_files > 0 { format!(" (and {dependency_files} of addons it depends on, analysed first)") } else { String::new() };
         eprintln!("{} files{with}, {} bindings, {} references in {:?} ({} walks, {}% of function bodies replayed)", paths.len(), analysis.bindings.len(), analysis.references.len(), dur, analysis.walks, replayed);
+        Ok(())
+    } else if args.len() > 3 && args[1] == "generate-templates" {
+        // wow_ls generate-templates <wow-ui-source> <out.json>
+        let out = std::path::Path::new(&args[3]);
+        let directory = definitions::locate(None).ok_or("no definitions directory found")?;
+        generate::templates(std::path::Path::new(&args[2]), &directory, out)?;
+        Ok(())
+    } else if args.len() > 3 && args[1] == "generate-global-strings" {
+        // wow_ls generate-global-strings <GlobalStrings.csv> <out.json>
+        generate::global_strings(std::path::Path::new(&args[2]), std::path::Path::new(&args[3]))?;
         Ok(())
     } else {
         lsp::start_ls()

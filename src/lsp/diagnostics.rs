@@ -63,3 +63,25 @@ pub fn publish(connection: &Connection, uri: Uri, text: &str, warnings: &[(rowan
     };
     connection.sender.send(Message::Notification(not));
 }
+
+/// Publishes an XML document's parse errors, each at a byte offset into `text`
+pub fn publish_xml(connection: &Connection, uri: Uri, text: &str, errors: &[(usize, String)]) {
+    let diagnostics = errors.iter().map(|(offset, message)| {
+        let at = rowan::TextSize::from((*offset).min(text.len()) as u32);
+        Diagnostic {
+            range: crate::lsp::position::range_of(text, rowan::TextRange::new(at, at)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some(String::from("wow_ls")),
+            message: message.clone(),
+            tags: None,
+            related_information: None,
+            data: None,
+        }
+    }).collect();
+    let params = PublishDiagnosticsParams { uri, version: None, diagnostics };
+    let Ok(encoded) = serde_json::to_value(params) else { return };
+    let not = Notification { method: String::from("textDocument/publishDiagnostics"), params: encoded };
+    let _ = connection.sender.send(Message::Notification(not));
+}

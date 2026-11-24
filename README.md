@@ -27,8 +27,12 @@ from the code itself, with no annotations needed.
 - **Diagnostics**:
   - syntax errors and Lua's compile-time errors
   - calls to methods a WoW object doesn't have
-    (`Frame has no method SetPiont`), except on frames made from a template,
-    which can add methods
+    (`Frame has no method SetPiont`), including frames made from XML
+    templates, Blizzard's or the addon's. Not reported when a template wow_ls
+    doesn't know may have added the method, or a mixin it uses may have
+    methods it can't see (functions stored under computed keys, or a Lua
+    mixin with no table in the addon or its dependencies)
+  - XML files that don't parse, at the error
   - calls to methods of a table made in the code when nothing in the addon or
     its dependencies defines a function by that name
     (``No function `ProcessQueue` is defined for this table``). Not reported
@@ -44,6 +48,8 @@ wow_ls                        # LSP server over stdio
 wow_ls types <file.lua>       # every reference in a file, with its type
 wow_ls types <Addon.toc>      # the same for a whole addon, with warnings and timing
 wow_ls evaluate <file.lua>    # the parse tree and syntax errors
+wow_ls generate-global-strings <GlobalStrings.csv> <out.json>   # see definitions/README.md
+wow_ls generate-templates <wow-ui-source> <out.json>             # likewise
 ```
 
 Preset types for WoW's API and the Lua standard library live in
@@ -56,6 +62,10 @@ format and how wow_ls finds them.
 - An addon's files, from its `.toc`, are analysed together in load order, as
   one program. `...` at the top of each file is the addon's name and its own
   namespace table
+- XML files are followed to the Lua and XML files they load, in place. Paths
+  are taken for the current game version (`[Family]` is `Mainline`, `[Game]` is
+  `Standard`, and `[AllowLoadGameType ...]` matches `mainline` and `standard`),
+  ignoring case as the game does
 - Dependencies (`## Dependencies`, `## RequiredDeps`, `## OptionalDeps`) are
   found in the workspace, or beside the addon's folder as `Interface/AddOns`
   would hold them
@@ -83,7 +93,26 @@ format and how wow_ls finds them.
   - `_G`, string methods, iterators and varargs
   - mixins, with a mixin's `self` typed by the frame it's mixed into
   - frame, texture and font string pools
-  - the parents of WoW objects
+  - XML templates, Blizzard's and the addon's: an object made from one
+    (`CreateFrame`, pools, `CreateTexture`, ...) has its type, with its
+    mixins' methods, its `parentKey` children and its `KeyValue`s, and those
+    of what it inherits. Named XML frames (`GameTooltip`) are typed globals,
+    and intrinsic elements (`ItemButton`) frame types of their own
+  - an addon's Lua mixin named in XML (`mixin="MyMixin"`): `self` in its
+    methods is the template or frame XML mixes it into, and a frame made from
+    that template has the mixin's fields
+  - a value that may be any of several WoW objects (a parameter given a
+    frame made from a template and a plain one, `c and a or b`) keeps each
+    apart, shown `ButtonT|Button`, up to 8 (past that, it's the closest type
+    they all are, which any may have more methods than). It has only the
+    members all of them have: a method missing from any whose methods are
+    known is reported (``This may be a Button, which has no method `Init` ``),
+    and a field only some have isn't known. A field set or `SetParent`, or a
+    `Mixin`, on it applies to each, and `GetParent` gives each one's parent
+  - the parents of WoW objects, and of `self` in a mixin: what its template
+    is made in by `CreateFrame`, or where XML puts its objects (inside another,
+    or `parent="..."`). As its frames may also be made where the analysis
+    can't see, missing methods aren't reported on that parent
 
 ## In the editor
 - Opening or editing a file shows diagnostics for every file of its addon,
@@ -92,9 +121,16 @@ format and how wow_ls finds them.
 - Each addon's analysis is cached until a file it involves changes. An edit to
   a dependency also refreshes the open files of addons depending on it
 - A burst of keystrokes is analysed once, for the last of them
+- Templates and named frames are in one namespace for every addon, as in the
+  game: the definitions hold those of every workspace addon's XML and its
+  dependencies'. Editing an XML file makes them again and re-analyses every
+  open file. A file that doesn't parse shows its error, and its types come
+  from its last text that did. Which Lua and XML files an XML file loads is
+  read from disk
 
-On a release build, Syndicator (32 files) takes about 60ms and Baganator (122
-files) about 350ms per edit, with Syndicator's analysis cached.
+On a release build, Syndicator (33 files) takes about 80ms and Baganator (122
+files) about 400ms per edit, with Syndicator's analysis cached. Making the
+definitions again after an XML edit adds about 20ms.
 
 # Layout
 
@@ -105,20 +141,32 @@ files) about 350ms per edit, with Syndicator's analysis cached.
 | `src/types.rs` | Type inference |
 | `src/definitions.rs` | Loading the preset types |
 | `src/project.rs` | Addons and their `.toc` files, and analysing an addon over its dependencies |
+| `src/xml.rs` | XML files: what they load, the objects they define, and `UI.xsd` |
+| `src/generate.rs` | Generating `definitions/blizzard_templates.json` from wow-ui-source |
 | `src/completion.rs` | Completion |
 | `src/lsp/` | The server loop, diagnostics, and positions |
-| `definitions/` | Preset types; `blizzard_api.json` is generated by `tools/generate_api_definitions.lua` |
+| `definitions/` | Preset types; `blizzard_api.json` is generated by `tools/generate_api_definitions.lua`, `blizzard_templates.json` by `wow_ls generate-templates` |
 | `tests/` | Lua fixtures, including a sample addon and addons depending on each other |
 
 # Not done yet
 
-- XML files, including the Lua files they load with `<Script file="..."/>`
-- `.toc` paths with `[Family]`-style variables
-- Mixins missing from the definitions, like `CallbackRegistryMixin`, add no
-  methods, so frames using them get false "has no method" warnings. Methods
-  from Blizzard's own Lua mixins that XML templates bring in
-  (`ItemButtonMixin`'s `SetItemButtonQuality`) aren't known either, so calls
-  to them on `self` in a template's mixin are reported
+- `GetParent()` gives the parent only of objects the analysis can follow to
+  where they were made, or of `self` in a mixin (from `CreateFrame` with its
+  template, or where XML puts its objects). Otherwise, as for a parent's
+  parent, it's the documented `ScriptObject`, and its methods are reported
+  missing (`ScriptObject has no method Show`)
+- `self` in a mixin is the one type the objects it's mixed into all are, not
+  each of them
+- `CreateAnimation("Flipbook")` gives an `Animation`, not the `FlipBook` its
+  first argument names
+- A `type="global"` `KeyValue` naming an addon's own global (a localised
+  string) is `unknown`
+- Making a frame from several templates at once, or from a template for
+  another kind of object, gives the kind made, not checked for missing methods
+- A `parentArray` is a plain `table`, not one of its objects
+- Blizzard's Lua mixins are known only as XML templates use them, not as
+  globals: `Mixin(frame, CallbackRegistryMixin)` adds no methods, so frames
+  using it get false "has no method" warnings
 - A mixin passed to `Mixin` through a parameter (`Mixin(frame, mixin)` in a
   helper called with several mixins) isn't tied to the frame, so its `self`
   is a plain table rather than the frame

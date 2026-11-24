@@ -2,3 +2,4 @@
 ## Title: User
 ## OptionalDeps: Lib, Missing
 User.lua
+User.xml

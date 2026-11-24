@@ -1,0 +1,1 @@
+TestAddonFrames = { shown = true }

@@ -216,15 +216,30 @@ fn last_name(node: &SyntaxNode) -> Option<SyntaxToken> {
 fn members(analysis: &Analysis, ty: Type, methods_only: bool) -> Vec<Candidate> {
     // A string's members are the `string` library's
     let ty = analysis.definitions.member_source(ty);
-    let mut found: HashMap<String, Type> = HashMap::new();
-    if let Some(at) = ty.named.identity() {
-        own_fields(analysis, at, &mut found, 0);
-    }
-    if let Some(id) = ty.named.named_id() {
-        for (name, types) in analysis.definitions.members(id) {
-            found.entry(name.to_string()).or_insert(types);
+    // Any of several objects has the members all of them have
+    let objects = match ty.named {
+        crate::types::NamedRef::Several(_) => ty.named.alternatives(),
+        named => vec![named],
+    };
+    let mut found: Option<HashMap<String, Type>> = None;
+    for object in objects {
+        let mut own: HashMap<String, Type> = HashMap::new();
+        if let Some(at) = object.identity() {
+            own_fields(analysis, at, &mut own, 0);
         }
+        if let Some(id) = object.named_id() {
+            for (name, types) in analysis.definitions.members(id) {
+                own.entry(name.to_string()).or_insert(types);
+            }
+        }
+        found = Some(match found {
+            None => own,
+            Some(found) => found.into_iter()
+                .filter_map(|(name, types)| Some((name.clone(), types | *own.get(&name)?)))
+                .collect(),
+        });
     }
+    let found = found.unwrap_or_default();
     let mut candidates: Vec<Candidate> = found.into_iter()
         .filter(|(_, types)| !methods_only || types.set.contains(TypeSet::FUNCTION))
         .map(|(name, types)| {
@@ -410,6 +425,16 @@ mod tests {
         let c = complete_at("local s = 'x'\ns:|");
         let names = names_of(&c);
         assert!(names.contains(&"upper") && names.contains(&"format"), "{names:?}");
+    }
+
+    #[test]
+    fn members_all_of_several_objects_have() {
+        let c = complete_at("local a = CreateFrame('Button') local b = CreateFrame('Frame') a.both = 1 b.both = 2 a.one = 3\nlocal x = c and a or b\nx:|");
+        let names = names_of(&c);
+        assert!(names.contains(&"SetPoint") && !names.contains(&"Click"));
+        let c = complete_at("local a = CreateFrame('Button') local b = CreateFrame('Frame') a.both = 1 b.both = 2 a.one = 3\nlocal x = c and a or b\nx.|");
+        let names = names_of(&c);
+        assert!(names.contains(&"both") && !names.contains(&"one"));
     }
 
     #[test]
