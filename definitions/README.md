@@ -38,6 +38,8 @@ filename order; a later file's entry for a name replaces an earlier one.
   `string`, `function`, `table`, `userdata`, `thread`, `unknown`, or a named type.
 - `values` (at the top level or in a table) are members that aren't functions,
   each with a type: `"values": { "Immediate": "Enum.StatusBarInterpolation" }`.
+- A table with `"open": true` may have functions beyond those listed (under
+  computed keys), so what mixes it in isn't checked for missing methods.
 - `mixins` holds Lua mixins, each with its `functions` like a table's. A type
   can list `"mixins": ["ItemButtonMixin"]` to have their methods, after those
   of its `method_tables` and before inherited ones.
@@ -77,8 +79,10 @@ the intrinsic elements (`ItemButton`, `DropdownButton`, ...) a type each, and
 records every template and named frame for addons' frames to use. It also
 writes `elements`, the type each XML element makes (with `"extended": true`
 when it may have methods beyond it), which is how an addon's own XML is typed
-without `UI.xsd`. It reports mixins it found no table for, and globals named by
-`KeyValue`s it couldn't type.
+without `UI.xsd`. Its `functions`, `tables` and `values` are every other global
+Blizzard's Lua assigns that the files here don't already define, with each
+table's members, as the analysis types them. It reports mixins it found no
+table for, and globals named by `KeyValue`s it couldn't type.
 
 `global_strings.json` is the client's global strings (`ACCEPT`, `CANCEL`, ...),
 each a `string`, generated from the GlobalStrings table exported as CSV

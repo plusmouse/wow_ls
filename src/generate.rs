@@ -176,6 +176,21 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
         }
     }
 
+    // Every global Blizzard's Lua assigns that nothing else defines: not the
+    // API, global strings or hand-written definitions, nor a named XML frame
+    let (mut functions, mut tables, mut values) = (Map::new(), Map::new(), Map::new());
+    let mut names: Vec<&String> = layer.globals.keys()
+        .filter(|name| is_name(name) && definitions.global(name).is_none() && !frames.contains_key(*name))
+        .collect();
+    names.sort();
+    for name in names {
+        match generator.member(layer.globals[name], &mut Vec::new()) {
+            Member::Function(signature) => { functions.insert(name.clone(), signature); }
+            Member::Table(table) => { tables.insert(name.clone(), table); }
+            Member::Value(ty) => { values.insert(name.clone(), json!(ty)); }
+        }
+    }
+
     // Each intrinsic's type, with every mixin it gets from its template
     let mut types = Map::new();
     for name in kinds.intrinsics.keys() {
@@ -221,11 +236,16 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
     }
 
     let version = std::fs::read_to_string(source.join("version.txt")).unwrap_or_default();
-    let generated = format!("by `wow_ls generate-templates` from wow-ui-source {}; regenerate rather than editing. `elements` are the type each element makes (`extended` when it may have methods beyond it), `types` the intrinsic elements, `mixins` the methods of the Lua mixins Blizzard's XML uses (`open` when it holds functions under computed keys, so may have more), `templates` the virtual and intrinsic elements and `frames` the named frames, each with its type, the templates it inherits, its mixins, its `values` (KeyValues), `children` (by parentKey) and `arrays` (by parentArray)", version.trim());
-    let text = layout(&generated, &[("elements", &elements, false), ("types", &types, false), ("mixins", &mixins, true), ("templates", &template_values, false), ("frames", &frame_values, false)]);
+    let generated = format!("by `wow_ls generate-templates` from wow-ui-source {}; regenerate rather than editing. `elements` are the type each element makes (`extended` when it may have methods beyond it), `types` the intrinsic elements, `mixins` the methods of the Lua mixins Blizzard's XML uses (`open` when it holds functions under computed keys, so may have more), `templates` the virtual and intrinsic elements and `frames` the named frames, each with its type, the templates it inherits, its mixins, its `values` (KeyValues), `children` (by parentKey) and `arrays` (by parentArray). `functions`, `tables` and `values` are the other globals Blizzard's Lua assigns", version.trim());
+    let text = layout(&generated, &[
+        ("elements", &elements, Style::Line), ("types", &types, Style::Line), ("mixins", &mixins, Style::Functions),
+        ("templates", &template_values, Style::Line), ("frames", &frame_values, Style::Line),
+        ("functions", &functions, Style::Line), ("tables", &tables, Style::Tree), ("values", &values, Style::Line),
+    ]);
     std::fs::write(out, text).map_err(|e| format!("{}: {e}", out.display()))?;
 
     eprintln!("{} templates, {} frames, {} intrinsics, {} of {} mixins found", templates.len(), frames.len(), types.len(), mixins.len(), mixin_names.len());
+    eprintln!("globals: {} functions, {} tables, {} values", functions.len(), tables.len(), values.len());
     report.unknown_globals.sort();
     report.unknown_globals.dedup();
     eprintln!("{} globals named by KeyValues have no known type: {:?}", report.unknown_globals.len(), report.unknown_globals);
@@ -261,7 +281,7 @@ pub fn global_strings(csv: &Path, out: &Path) -> Result<(), String> {
     }
     let name = csv.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let generated = format!("by `wow_ls generate-global-strings` from {name}; regenerate rather than editing");
-    std::fs::write(out, layout(&generated, &[("values", &values, false)])).map_err(|e| format!("{}: {e}", out.display()))?;
+    std::fs::write(out, layout(&generated, &[("values", &values, Style::Line)])).map_err(|e| format!("{}: {e}", out.display()))?;
     eprintln!("{} global strings, {skipped} left out as they aren't Lua names", values.len());
     Ok(())
 }
@@ -302,16 +322,37 @@ fn csv_rows(text: &str) -> Vec<Vec<String>> {
     rows
 }
 
-/// The file's text: a line per entry of each section, and for `mixins`, a line
-/// per function, so a regenerated file's changes are easy to read
-fn layout(generated: &str, sections: &[(&str, &Map<String, Value>, bool)]) -> String {
-    let string = |text: &str| Value::String(text.to_string()).to_string();
+/// How a section of the generated file is laid out
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Style {
+    /// A line per entry
+    Line,
+    /// A line per entry, and per function of each (`mixins`)
+    Functions,
+    /// Each table's functions and values a line each, and its tables
+    /// likewise, indented (`tables`)
+    Tree,
+}
+
+fn json_string(text: &str) -> String {
+    Value::String(text.to_string()).to_string()
+}
+
+/// The file's text: a line per entry of each section, and for `mixins` and
+/// `tables`, a line per function, so a regenerated file's changes are easy
+/// to read
+fn layout(generated: &str, sections: &[(&str, &Map<String, Value>, Style)]) -> String {
+    let string = json_string;
     let mut text = format!("{{\n  \"generated\": {}", string(generated));
-    for (name, entries, nested) in sections {
+    for (name, entries, style) in sections {
         text += &format!(",\n  {}: {{", string(name));
         for (i, (key, value)) in entries.iter().enumerate() {
             let separator = if i == 0 { "" } else { "," };
-            match (nested, value.get("functions").and_then(Value::as_object)) {
+            if *style == Style::Tree {
+                text += &format!("{separator}\n    {}: {}", string(key), tree(value, 2));
+                continue
+            }
+            match (*style == Style::Functions, value.get("functions").and_then(Value::as_object)) {
                 (true, Some(functions)) if !functions.is_empty() => {
                     // Its other keys, like `"open": true`, first
                     let others: String = value.as_object().into_iter().flatten()
@@ -333,11 +374,44 @@ fn layout(generated: &str, sections: &[(&str, &Map<String, Value>, bool)]) -> St
     text + "\n}\n"
 }
 
+/// A table as `tables` holds it, at `depth` levels of indent: a line for each
+/// of its functions and values, and each of its own tables laid out the same
+fn tree(table: &Value, depth: usize) -> String {
+    let indent = "  ".repeat(depth);
+    let mut parts = Vec::new();
+    if let Some(open) = table.get("open") {
+        parts.push(format!("\n{indent}  \"open\": {open}"));
+    }
+    for key in ["functions", "values", "tables"] {
+        let Some(entries) = table.get(key).and_then(Value::as_object).filter(|e| !e.is_empty()) else { continue };
+        let lines: Vec<String> = entries.iter()
+            .map(|(name, value)| {
+                let value = if key == "tables" { tree(value, depth + 2) } else { value.to_string() };
+                format!("\n{indent}    {}: {value}", json_string(name))
+            })
+            .collect();
+        parts.push(format!("\n{indent}  {}: {{{}\n{indent}  }}", json_string(key), lines.join(",")));
+    }
+    if parts.is_empty() {
+        return "{}".to_string()
+    }
+    format!("{{{}\n{indent}}}", parts.join(","))
+}
+
 fn collect_mixins(object: &Object, names: &mut Vec<String>) {
     names.extend(object.mixins.iter().cloned());
     for child in &object.children {
         collect_mixins(child, names);
     }
+}
+
+/// A global, or a member of one, as the definitions give it
+enum Member {
+    Function(Value),
+    /// Its `functions`, `tables` and `values`
+    Table(Value),
+    /// A type
+    Value(String),
 }
 
 struct Generator<'a> {
@@ -408,6 +482,56 @@ impl Generator<'_> {
         open
     }
 
+    /// A global (or a field of one) of type `ty`: a function with its
+    /// signature, a table made in Blizzard's Lua with its members, or a value
+    /// of a type. `within` are the tables it's inside, which a table holding
+    /// itself is just a `table` in
+    fn member(&self, ty: Type, within: &mut Vec<crate::types::TableId>) -> Member {
+        let only = |set: TypeSet| ty.set.without(set) == TypeSet::NEVER && ty.set != TypeSet::NEVER;
+        if only(TypeSet::FUNCTION) {
+            let info = match ty.function {
+                FunctionRef::One(id) => self.layer.functions.get(&id),
+                FunctionRef::Builtin(id) => self.kinds.definitions.function(id),
+                _ => None,
+            };
+            return Member::Function(info.map(|info| self.signature(info))
+                .unwrap_or_else(|| json!({"parameters": ["..."], "returns": ["unknown"], "rest": "unknown"})))
+        }
+        let table = match ty.named {
+            crate::types::NamedRef::Table(at) if only(TypeSet::TABLE) => at,
+            _ => return Member::Value(self.type_text(ty)),
+        };
+        // Deep enough for any real namespace, and stops a loop
+        if within.contains(&table) || within.len() > 8 {
+            return Member::Value("table".to_string())
+        }
+        within.push(table);
+        let mut fields = HashMap::new();
+        let open = self.table_fields(table, &mut fields, 0);
+        let mut names: Vec<&String> = fields.keys().filter(|name| is_name(name)).collect();
+        names.sort();
+        let (mut functions, mut tables, mut values) = (Map::new(), Map::new(), Map::new());
+        for name in names {
+            match self.member(fields[name], within) {
+                Member::Function(signature) => { functions.insert(name.clone(), signature); }
+                Member::Table(table) => { tables.insert(name.clone(), table); }
+                Member::Value(ty) => { values.insert(name.clone(), json!(ty)); }
+            }
+        }
+        within.pop();
+        let mut members = Map::new();
+        // Functions under computed keys may be more of its methods
+        if open {
+            members.insert("open".into(), json!(true));
+        }
+        for (key, entries) in [("functions", functions), ("tables", tables), ("values", values)] {
+            if !entries.is_empty() {
+                members.insert(key.into(), Value::Object(entries));
+            }
+        }
+        Member::Table(Value::Object(members))
+    }
+
     fn signature(&self, info: &FunctionInfo) -> Value {
         let mut parameters: Vec<String> = info.parameters.iter().map(|p| p.name.clone()).collect();
         // `function M.F(self, x)`, called as a method like the rest
@@ -469,10 +593,16 @@ mod tests {
     fn lays_out_a_line_per_entry() {
         let types = json!({"A": {"base": "table"}, "B": {"base": "table"}});
         let mixins = json!({"M": {"open": true, "functions": {"F": {}, "G": {"returns": ["number"]}}}, "Empty": {"functions": {}}});
-        let text = layout("here", &[("types", types.as_object().unwrap(), false), ("mixins", mixins.as_object().unwrap(), true)]);
+        let text = layout("here", &[("types", types.as_object().unwrap(), Style::Line), ("mixins", mixins.as_object().unwrap(), Style::Functions)]);
         assert_eq!(text, "{\n  \"generated\": \"here\",\n  \"types\": {\n    \"A\": {\"base\":\"table\"},\n    \"B\": {\"base\":\"table\"}\n  },\n  \"mixins\": {\n    \"Empty\": {\"functions\":{}},\n    \"M\": {\"open\": true, \"functions\": {\n        \"F\": {},\n        \"G\": {\"returns\":[\"number\"]}\n    }}\n  }\n}\n");
         let parsed: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["mixins"], mixins);
+        // Tables a line per member, nested ones indented
+        let tables = json!({"T": {"functions": {"F": {}}, "values": {"v": "number"}, "tables": {"Inner": {"functions": {"G": {}}}, "Empty": {}}}, "O": {"open": true}});
+        let text = layout("here", &[("tables", tables.as_object().unwrap(), Style::Tree)]);
+        assert_eq!(text, "{\n  \"generated\": \"here\",\n  \"tables\": {\n    \"O\": {\n      \"open\": true\n    },\n    \"T\": {\n      \"functions\": {\n        \"F\": {}\n      },\n      \"values\": {\n        \"v\": \"number\"\n      },\n      \"tables\": {\n        \"Empty\": {},\n        \"Inner\": {\n          \"functions\": {\n            \"G\": {}\n          }\n        }\n      }\n    }\n  }\n}\n");
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["tables"], tables);
     }
 
     #[test]

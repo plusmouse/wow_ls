@@ -133,6 +133,9 @@ pub struct Definitions {
     mixins: HashMap<String, HashMap<String, Type>>,
     /// Mixins with `"open": true`, which may have methods beyond those listed
     open_mixins: HashSet<String>,
+    /// Tables with `"open": true`, which may have functions beyond those
+    /// listed, under computed keys
+    open_tables: HashSet<NamedId>,
     /// Templates' types, and the type of element each is for, by name
     templates: HashMap<String, (NamedId, NamedId)>,
     /// The type each XML element makes, and whether it may have methods
@@ -423,6 +426,15 @@ impl Definitions {
     /// The type XML element `tag` makes, and whether it may have methods beyond it
     pub fn element(&self, tag: &str) -> Option<(&str, bool)> {
         self.elements.get(tag).map(|(ty, extended)| (ty.as_str(), *extended))
+    }
+
+    /// Whether table `ty` is one the definitions give that may hold functions
+    /// beyond those listed (`"open": true`), or isn't one they give at all
+    pub fn may_have_more(&self, ty: Type) -> bool {
+        match ty.named.named_id() {
+            Some(id) => !self.types[id as usize].namespace || self.open_tables.contains(&id),
+            None => true,
+        }
     }
 
     /// The mixins a template's or frame's type has that are Lua tables wow_ls
@@ -817,6 +829,9 @@ impl Definitions {
                         id
                     }
                 };
+                if definition.get("open").and_then(Value::as_bool) == Some(true) {
+                    self.open_tables.insert(table);
+                }
                 self.add_members(definition, Some(table), &path)?;
             }
         }

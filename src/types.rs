@@ -1646,6 +1646,14 @@ impl Analysis {
             return
         }
         for mixin in self.mixins.get(&at).or_else(|| self.layer.mixins.get(&at)).into_iter().flatten() {
+            // One the definitions give, by its name
+            let defined = mixin.named.named_id().and_then(|id| self.definitions.named_type(id)).filter(|named| named.namespace);
+            if let Some(named) = defined {
+                if !names.contains(&named.name) {
+                    names.push(named.name.clone());
+                }
+                continue
+            }
             let Some(mixin) = mixin.named.identity() else { continue };
             match self.table_name(mixin) {
                 Some(name) => if !names.contains(name) { names.push(name.clone()) },
@@ -3096,9 +3104,14 @@ impl<'a> Walker<'a> {
             return None
         }
         self.note(Read::Mixins(table));
-        let from_mixins = prior.mixins.get(&table).into_iter().flatten().rev().find_map(|mixin| {
-            let mixin = mixin.named.identity()?;
-            self.own_field(prior, mixin, name, depth + 1)
+        // Its own mixins, or a dependency's table's
+        let mixins = prior.mixins.get(&table).or_else(|| self.layer.mixins.get(&table));
+        let from_mixins = mixins.into_iter().flatten().rev().find_map(|&mixin| {
+            match mixin.named.identity() {
+                Some(at) => self.own_field(prior, at, name, depth + 1),
+                // One the definitions give, like Blizzard's `CallbackRegistryMixin`
+                None => self.definitions.field(mixin, name),
+            }
         });
         from_mixins.or_else(|| {
             // Missing fields come from the metatable's `__index`: another table
@@ -3918,7 +3931,13 @@ impl<'a> Walker<'a> {
             if prior.function_fields.contains(name) || self.layer.function_fields.contains(name) {
                 return
             }
-            if self.definitions.field(Type { named: *object, ..receiver }, name).is_none() && !lacking.contains(&named.name) {
+            // Its own fields and mixins', for an object made in the files,
+            // which may have more if a mixin may
+            if object.identity().is_some_and(|at| self.may_gain_fields(prior, at, 0)) {
+                return
+            }
+            let own = object.identity().and_then(|at| self.own_field(prior, at, name, 0));
+            if own.is_none() && self.definitions.field(Type { named: *object, ..receiver }, name).is_none() && !lacking.contains(&named.name) {
                 lacking.push(named.name.clone());
             }
         }
@@ -4020,7 +4039,8 @@ impl<'a> Walker<'a> {
         let mixins = [prior.mixins.get(&table), self.layer.mixins.get(&table)];
         let open_mixin = mixins.into_iter().flatten().flatten().any(|mixin| match mixin.named.identity() {
             Some(mixin) => self.may_gain_fields(prior, mixin, depth + 1),
-            None => true,
+            // One the definitions give is known, unless it's open
+            None => self.definitions.may_have_more(*mixin),
         });
         if open_mixin {
             return true
@@ -6269,6 +6289,10 @@ mod tests {
                 "UIParent": {"type": "Button"}
             },
             "values": {"UIParent": "Frame"},
+            "tables": {
+                "RegistryMixin": {"functions": {"Register": {}, "Count": {"returns": ["number"]}}},
+                "OpenRegistryMixin": {"open": true, "functions": {"Register": {}}}
+            },
             "functions": {
                 "CreateFrame": {"parameters": ["frameType: string", "name: string|nil", "parent: Frame|nil", "template: string|nil"], "returns": ["Frame"]},
                 "GetItemKey": {"returns": ["ItemKey"]},
@@ -6386,6 +6410,22 @@ mod tests {
         let source = format!("local f = CreateFrame('Button') {many} local g = f g:Nope()");
         assert_eq!(widget_types_of(&source, "g")[0], "Button");
         assert!(warnings(&source).is_empty());
+    }
+
+    #[test]
+    fn mixins_the_definitions_give() {
+        // Blizzard's Lua mixins, as tables in the definitions
+        let made = "local f = CreateFrame('Frame') Mixin(f, RegistryMixin) local n = f:Count() ";
+        assert_eq!(widget_types_of(made, "f")[0], "Frame & RegistryMixin");
+        assert_eq!(widget_types_of(made, "n"), ["number"]);
+        assert!(warnings(&format!("{made} f:Register() f:Show()")).is_empty());
+        assert_eq!(warnings(&format!("{made} f:Nope()")), ["Frame has no method `Nope`"]);
+        let table = "local t = CreateFromMixins(RegistryMixin) ";
+        assert!(warnings(&format!("{table} t:Register()")).is_empty());
+        assert_eq!(warnings(&format!("{table} t:Nope()")), ["No function `Nope` is defined for this table"]);
+        // One that may have more, under computed keys
+        assert!(warnings("local f = CreateFrame('Frame') Mixin(f, OpenRegistryMixin) f:Nope()").is_empty());
+        assert!(warnings("local t = CreateFromMixins(OpenRegistryMixin) t:Nope()").is_empty());
     }
 
     #[test]

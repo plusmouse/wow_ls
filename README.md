@@ -93,6 +93,11 @@ format and how wow_ls finds them.
   - `_G`, string methods, iterators and varargs
   - mixins, with a mixin's `self` typed by the frame it's mixed into
   - frame, texture and font string pools
+  - every global Blizzard's Lua defines that the API documentation and
+    hand-written definitions don't (`MenuUtil`, `CreateDataProvider`,
+    `CallbackRegistryMixin`), from its own analysis of that Lua. One mixed in
+    with `Mixin` or `CreateFromMixins` gives its functions, unless it holds
+    functions under computed keys
   - XML templates, Blizzard's and the addon's: an object made from one
     (`CreateFrame`, pools, `CreateTexture`, ...) has its type, with its
     mixins' methods, its `parentKey` children and its `KeyValue`s, and those
@@ -130,7 +135,7 @@ format and how wow_ls finds them.
 
 On a release build, Syndicator (33 files) takes about 80ms and Baganator (122
 files) about 400ms per edit, with Syndicator's analysis cached. Making the
-definitions again after an XML edit adds about 20ms.
+definitions again after an XML edit adds about 30ms.
 
 # Layout
 
@@ -164,9 +169,10 @@ definitions again after an XML edit adds about 20ms.
 - Making a frame from several templates at once, or from a template for
   another kind of object, gives the kind made, not checked for missing methods
 - A `parentArray` is a plain `table`, not one of its objects
-- Blizzard's Lua mixins are known only as XML templates use them, not as
-  globals: `Mixin(frame, CallbackRegistryMixin)` adds no methods, so frames
-  using it get false "has no method" warnings
+- Blizzard's Lua globals are typed by wow_ls's analysis of Blizzard's code,
+  so a function whose returns come from undocumented C code
+  (`MenuUtil.CreateContextMenu`) returns `unknown`, and a global its Lua only
+  ever sets to one value (`X = true`) has that value's type
 - A mixin passed to `Mixin` through a parameter (`Mixin(frame, mixin)` in a
   helper called with several mixins) isn't tied to the frame, so its `self`
   is a plain table rather than the frame
