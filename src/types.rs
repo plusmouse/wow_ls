@@ -879,6 +879,15 @@ impl Operation {
     }
 }
 
+/// Whether calling a value of type `ty` raises an error whatever it is: it's
+/// a number, string or boolean (or nil), and nothing that can be called (a
+/// function, or a table or userdata, which may have `__call`). Nil alone isn't
+/// sure enough, as a field or variable not seen set reads as nil
+fn uncallable(ty: Type) -> bool {
+    ty.set.intersection(TypeSet::FUNCTION | OBJECTS) == TypeSet::NEVER
+        && ty.set.intersection(TypeSet::BOOLEAN | TypeSet::NUMBER | TypeSet::STRING) != TypeSet::NEVER
+}
+
 /// The kinds of Lua value `set` may be, as Lua names them: `boolean or function`
 fn kind_names(set: TypeSet) -> String {
     let kinds = [
@@ -3940,13 +3949,29 @@ impl<'a> Walker<'a> {
                         reference.callee = true;
                         callee_read = Some(CalleeRead::Variable(self.references.len() - 1));
                     }
+                    if i.simple_name().is_some() {
+                        self.check_called_local(types);
+                    }
                 }
                 Expression::Identifier(i) if !is_method && field_access(i.syntax()).is_some() => {
                     self.last_field_is_callee();
                     callee_read = self.field_references.len().checked_sub(1).map(CalleeRead::Field);
                     if let Some((_, name)) = field_access(i.syntax()) {
                         let base = self.field_references.last().map_or(NamedRef::None, |field| field.base);
-                        self.check_called_field(base, &name, types);
+                        self.check_called_field(base, name.text(), name.text_range(), types);
+                    }
+                }
+                // `t["f"]()`: the field reference `expression` just recorded
+                // for the key, if it's one naming a field
+                Expression::Identifier(i) if !is_method && index_access(i.syntax()).is_some() => {
+                    let Some((_, Expression::Literal(key))) = index_access(i.syntax()) else { return types };
+                    let name = key.get_string().as_deref().and_then(string_field_name).map(str::to_string);
+                    let range = key.syntax().text_range();
+                    let base = self.field_references.last()
+                        .filter(|field| range.contains_range(field.range))
+                        .map(|field| field.base);
+                    if let (Some(name), Some(base)) = (name, base) {
+                        self.check_called_field(base, &name, range, types);
                     }
                 }
                 _ => {}
@@ -3961,7 +3986,7 @@ impl<'a> Walker<'a> {
                 self.field_reference(call.syntax(), &method, base, types, false);
                 self.last_field_is_callee();
                 callee_read = Some(CalleeRead::Field(self.field_references.len() - 1));
-                self.check_called_field(base.named, &method, types);
+                self.check_called_field(base.named, method.text(), method.text_range(), types);
                 self.check_method(base, &method);
                 Some(types)
             }
@@ -4210,13 +4235,11 @@ impl<'a> Walker<'a> {
     /// definitions give, or one a table made in the files is given, not the
     /// guess from fields of that name on other tables. Nil alone isn't
     /// reported, as a field not yet seen set reads as nothing
-    fn check_called_field(&mut self, base: NamedRef, name: &SyntaxToken, types: Type) {
+    fn check_called_field(&mut self, base: NamedRef, text: &str, range: TextRange, types: Type) {
         let Some(prior) = self.prior else { return };
-        let callable = types.set.intersection(TypeSet::FUNCTION | OBJECTS) != TypeSet::NEVER;
-        if callable || types.set.intersection(TypeSet::BOOLEAN | TypeSet::NUMBER | TypeSet::STRING) == TypeSet::NEVER {
+        if !uncallable(types) {
             return
         }
-        let text = name.text();
         let sure = match base {
             NamedRef::One(id) | NamedRef::Extended(id) => {
                 self.definitions.field(Type::named(id, TypeSet::TABLE), text).is_some()
@@ -4234,7 +4257,25 @@ impl<'a> Walker<'a> {
             return
         }
         let message = format!("`{text}` is {}, not a function", self.definitions.type_text(types));
-        self.diagnostics.push(Diagnostic { file: self.file, range: name.text_range(), message });
+        self.diagnostics.push(Diagnostic { file: self.file, range, message });
+    }
+
+    /// Reports calling a local variable (`n()`) whose value here can only be
+    /// one that can't be called, as for `check_called_field`. Not a parameter,
+    /// whose type is only what the calls the analysis sees pass, nor a global,
+    /// which code anywhere may set
+    fn check_called_local(&mut self, types: Type) {
+        if self.prior.is_none() || !uncallable(types) {
+            return
+        }
+        let Some(reference) = self.references.last() else { return };
+        let binding = &self.bindings[reference.binding];
+        if binding.kind != BindingKind::Local {
+            return
+        }
+        let message = format!("`{}` is {}, not a function", binding.name, self.definitions.type_text(types));
+        let range = reference.range;
+        self.diagnostics.push(Diagnostic { file: self.file, range, message });
     }
 
     /// Reports `operand` of unary `op` (or one side of a binary one) when it can
@@ -6880,6 +6921,23 @@ mod tests {
         assert!(warnings("local function f(x) x.n() end local a = {} a.n = 1 f(a) local b = {} b.n = print f(b)").is_empty());
         assert_eq!(warnings("local function f(x) x.n() end local a = {} a.n = 1 f(a)"), ["`n` is number, not a function"]);
         assert!(warnings("local t = {} t.n()").is_empty());
+        // Through a string key
+        assert_eq!(warnings("local i = GetInfo() i['count']()"), ["`count` is number, not a function"]);
+        assert_eq!(warnings("local t = {n = 's'} t['n']()"), ["`n` is string, not a function"]);
+        assert!(warnings("local t = {n = print} t['n']() local k = 'n' t[k]()").is_empty());
+        // A local variable
+        assert_eq!(warnings("local n = 1 n()"), ["`n` is number, not a function"]);
+        assert_eq!(warnings("local f = x and 'a' or 2 f()"), ["`f` is number|string, not a function"]);
+        assert_eq!(warnings("local n = 1 local function g() n() end g()"), ["`n` is number, not a function"]);
+        assert!(warnings("local n = 1 n = print n()").is_empty());
+        assert!(warnings("local f = x and 1 or print f()").is_empty());
+        assert!(warnings("local f if x then f = print end f()").is_empty());
+        assert!(warnings("local f = 1 local function g() f() end f = print g()").is_empty());
+        assert!(warnings("local t = setmetatable({}, {__call = print}) t()").is_empty());
+        assert!(warnings("local f f()").is_empty());
+        // Not a parameter or a global
+        assert!(warnings("local function g(cb) cb() end g(1)").is_empty());
+        assert!(warnings("G = 1 G()").is_empty());
     }
 
     #[test]
