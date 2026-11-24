@@ -114,9 +114,17 @@ format and how wow_ls finds them.
   - an addon's Lua mixin named in XML (`mixin="MyMixin"`): `self` in its
     methods is the template or frame XML mixes it into, and a frame made from
     that template has the mixin's fields
+  - script handlers written inline in XML (`<OnLoad>Mixin(self, M)</OnLoad>`),
+    Blizzard's and the addon's, each as the function the game makes of it:
+    `self` is the object it's on, and the other arguments are named as the
+    game names them (`event`, `button`, `elapsed`, ...). A mixin mixed in
+    there has `self` typed by that object too
+  - an object from XML is shown by its native type or intrinsic (`Button`,
+    `ItemButton`), not the template or mixins it's made with, though its
+    members are all of theirs
   - a value that may be any of several WoW objects (a parameter given a
     frame made from a template and a plain one, `c and a or b`) keeps each
-    apart, shown `ButtonT|Button`, up to 8 (past that, it's the closest type
+    apart, up to 8 (past that, it's the closest type
     they all are, which any may have more methods than). It has only the
     members all of them have: a method missing from any whose methods are
     known is reported (``This may be a Button, which has no method `Init` ``),

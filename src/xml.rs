@@ -160,9 +160,20 @@ pub struct Object {
     /// `parent="..."`, the frame it's made in when it isn't inside one
     pub parent: Option<String>,
     pub key_values: Vec<KeyValue>,
+    /// Its script handlers written inline, as Lua in the element
+    pub scripts: Vec<Script>,
     /// The objects inside it, however deeply its other elements hold them
     pub children: Vec<Object>,
     /// Where the element is in its file
+    pub range: std::ops::Range<usize>,
+}
+
+/// A script handler written inline, `<OnLoad>self:Init()</OnLoad>`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Script {
+    /// `OnLoad`
+    pub handler: String,
+    /// Where its Lua is, in the document
     pub range: std::ops::Range<usize>,
 }
 
@@ -219,6 +230,20 @@ fn object(node: roxmltree::Node, is_object: &impl Fn(&str) -> bool) -> Object {
             kind: n.attribute("type").map(str::to_string),
         }))
         .collect();
+    // `<Scripts><OnLoad>...</OnLoad></Scripts>`, not those naming a
+    // `method` or `function` instead
+    let scripts = node.children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "Scripts")
+        .flat_map(|n| n.children())
+        .filter(|n| n.is_element())
+        .filter_map(|n| {
+            let (first, last) = (n.first_child()?, n.last_child()?);
+            n.text().is_some_and(|t| !t.trim().is_empty()).then(|| Script {
+                handler: n.tag_name().name().to_string(),
+                range: first.range().start..last.range().end,
+            })
+        })
+        .collect();
     let mut children = Vec::new();
     collect_objects(node, is_object, &mut children);
     Object {
@@ -232,6 +257,7 @@ fn object(node: roxmltree::Node, is_object: &impl Fn(&str) -> bool) -> Object {
         parent_array: attribute("parentArray"),
         parent: attribute("parent"),
         key_values,
+        scripts,
         children,
         range: node.range(),
     }
@@ -336,6 +362,131 @@ pub fn sites(objects: &[Object], file: &str, text: &str) -> Vec<(String, String)
     sites
 }
 
+/// An inline script handler of an object `objects` define in `text`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineScript {
+    /// How sites name the object (see `sites`): `template:T.Key`, a frame's
+    /// name, or `Frame.Key`, if it has one
+    pub object: Option<String>,
+    /// The object's element, `Button`
+    pub tag: String,
+    pub handler: String,
+    /// Where its Lua starts in `text`
+    pub start: usize,
+    /// The Lua, at the same places as in `text`: everything else is blank
+    /// but for line breaks, entities are the character they stand for, and
+    /// CDATA markers are gone
+    pub lua: String,
+}
+
+/// Each inline script handler of `objects`, which are from `text`
+pub fn inline_scripts(objects: &[Object], text: &str) -> Vec<InlineScript> {
+    fn visit(object: &Object, key: Option<String>, frame: Option<&str>, in_template: bool, text: &str, found: &mut Vec<InlineScript>) {
+        // A frame of its own made outside a template is named by its global
+        let name = object.name.as_deref().filter(|_| !in_template).and_then(|name| resolve_parent(name, frame));
+        let key = name.clone().or(key);
+        for script in &object.scripts {
+            found.push(InlineScript {
+                object: key.clone(),
+                tag: object.tag.clone(),
+                handler: script.handler.clone(),
+                start: start(text) + script.range.start,
+                lua: lua_at(text, start(text) + script.range.start..start(text) + script.range.end),
+            });
+        }
+        for child in &object.children {
+            let child_key = key.as_ref().zip(child.parent_key.as_ref()).map(|(key, child)| format!("{key}.{child}"));
+            visit(child, child_key, name.as_deref().or(frame), in_template, text, found);
+        }
+    }
+    let mut found = Vec::new();
+    for object in objects {
+        let in_template = object.is_virtual || object.intrinsic;
+        let key = object.name.as_ref().filter(|_| in_template).map(|name| format!("template:{name}"));
+        visit(object, key, None, in_template, text, &mut found);
+    }
+    found
+}
+
+/// The Lua in `range` of `text`, as an XML element's text: at the same
+/// places, with everything before it blank but for line breaks
+fn lua_at(text: &str, range: std::ops::Range<usize>) -> String {
+    // A space for each byte, so offsets stay the same
+    let blank = |part: &str| part.chars().map(|c| if c == '\n' { "\n".to_string() } else { " ".repeat(c.len_utf8()) }).collect::<String>();
+    let mut lua = blank(&text[..range.start]);
+    let mut rest = &text[range];
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            lua.push_str("         ");
+            let (inside, end) = after.split_once("]]>").map_or((after, ""), |(inside, end)| (inside, end));
+            lua.push_str(inside);
+            if inside.len() < after.len() {
+                lua.push_str("   ");
+            }
+            rest = end;
+            continue
+        }
+        if rest.starts_with('&') {
+            if let Some((entity, c)) = rest.find(';').filter(|&end| end < 12).and_then(|end| Some((&rest[..=end], entity(&rest[1..end])?))) {
+                lua.push(c);
+                lua.extend(std::iter::repeat_n(' ', entity.len() - c.len_utf8()));
+                rest = &rest[entity.len()..];
+                continue
+            }
+        }
+        let c = rest.chars().next().unwrap_or_default();
+        lua.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    lua
+}
+
+/// The character an XML entity (between `&` and `;`) stands for
+fn entity(name: &str) -> Option<char> {
+    match name {
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "amp" => Some('&'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ => {
+            let number = name.strip_prefix('#')?;
+            let code = match number.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => number.parse().ok()?,
+            };
+            char::from_u32(code)
+        }
+    }
+}
+
+/// The names the game gives the arguments of a kind of script handler
+/// written inline, after `self`. Others get only `self` (and `...`)
+pub fn handler_parameters(handler: &str) -> &'static [&'static str] {
+    match handler {
+        "OnEvent" => &["event"],
+        "OnUpdate" => &["elapsed"],
+        "OnClick" | "PreClick" | "PostClick" => &["button", "down"],
+        "OnDoubleClick" | "OnMouseDown" | "OnMouseUp" | "OnDragStart" => &["button"],
+        "OnMouseWheel" => &["delta"],
+        "OnEnter" | "OnLeave" => &["motion"],
+        "OnValueChanged" => &["value", "userInput"],
+        "OnTextChanged" => &["userInput"],
+        "OnChar" => &["text"],
+        "OnKeyDown" | "OnKeyUp" => &["key"],
+        "OnSizeChanged" => &["width", "height"],
+        "OnAttributeChanged" => &["name", "value"],
+        "OnHyperlinkClick" => &["link", "text", "button"],
+        "OnHyperlinkEnter" | "OnHyperlinkLeave" => &["link", "text"],
+        "OnVerticalScroll" | "OnHorizontalScroll" => &["offset"],
+        "OnScrollRangeChanged" => &["xrange", "yrange"],
+        "OnFinished" | "OnStop" => &["requested"],
+        "OnLoop" => &["loopState"],
+        "OnCursorChanged" => &["x", "y", "w", "h"],
+        _ => &[],
+    }
+}
+
 /// Each named frame among `object` and those inside it, by its name with
 /// `$parent` replaced by the name of the nearest named object holding it
 pub fn global_frames(object: &Object, parent: Option<&str>, frames: &mut Vec<(String, Object)>) {
@@ -370,6 +521,28 @@ mod tests {
             Load::Xml("Sub/B.xml".into()),
             Load::Lua("C.lua".into()),
         ]);
+    }
+
+    #[test]
+    fn finds_inline_scripts() {
+        let text = "\u{feff}<Ui>\n<Frame name=\"F\"><Scripts><OnLoad>a(1 &lt; 2)</OnLoad><OnShow method=\"Show\"/></Scripts>\n<Frames><Button parentKey=\"B\"><Scripts><OnClick><![CDATA[b(x < y)]]></OnClick></Scripts></Button><Button><Scripts><OnHide>c()</OnHide></Scripts></Button></Frames></Frame>\n<Frame name=\"T\" virtual=\"true\"><Frames><Frame name=\"$parentInner\" parentKey=\"Inner\"><Scripts><OnEvent>d()</OnEvent></Scripts></Frame></Frames></Frame></Ui>";
+        let document = parse(text).unwrap();
+        let objects = objects(&document, &|tag: &str| tag == "Frame" || tag == "Button");
+        let scripts = inline_scripts(&objects, text);
+        let found: Vec<(Option<&str>, &str, &str)> = scripts.iter().map(|s| (s.object.as_deref(), s.handler.as_str(), s.lua.trim())).collect();
+        assert_eq!(found, [
+            (Some("F"), "OnLoad", "a(1 <    2)"),
+            (Some("F.B"), "OnClick", "b(x < y)"),
+            (None, "OnHide", "c()"),
+            // Named in a template, but not a global: by its key
+            (Some("template:T.Inner"), "OnEvent", "d()"),
+        ]);
+        // At the same places as in the file
+        for script in &scripts {
+            assert_eq!(script.lua.len(), script.start + text[script.start..].find("</").unwrap());
+            assert_eq!(script.lua[..script.start].matches('\n').count(), text[..script.start].matches('\n').count());
+        }
+        assert!(text[scripts[0].start..].starts_with("a(1"));
     }
 
     #[test]

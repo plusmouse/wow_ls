@@ -122,6 +122,10 @@ struct Composition {
 #[derive(Debug, Default, Clone)]
 pub struct Definitions {
     functions: Vec<FunctionInfo>,
+    /// The type of each named frame the definitions' `frames` give, by the
+    /// frame's name, which types elsewhere in them can name it by. Shown as
+    /// the type of its element, as any frame is
+    frame_types: HashMap<String, NamedId>,
     /// Global functions and namespace tables
     globals: HashMap<String, Type>,
     types: Vec<NamedType>,
@@ -370,6 +374,8 @@ impl Definitions {
         definitions.has_subtypes = definitions.compositions.values()
             .flat_map(|composition| composition.inherits.iter().cloned())
             .collect();
+        // Templates and frames can be named as types before they're built
+        definitions.reserve_objects(files);
         for (file, root) in files {
             definitions.add_method_tables(root).map_err(|e| format!("{file}: {e}"))?;
             definitions.add_members(root, None, "").map_err(|e| format!("{file}: {e}"))?;
@@ -377,6 +383,32 @@ impl Definitions {
         definitions.compose()?;
         definitions.add_templates(files);
         Ok(definitions)
+    }
+
+    /// A type for each template of `templates` (of its own name) and named
+    /// frame of `frames`, to be filled in by `add_templates`, so the types
+    /// of functions and values can name them
+    fn reserve_objects(&mut self, files: &[(String, Value)]) {
+        for (_, root) in files {
+            for (name, _) in root.get("templates").and_then(Value::as_object).into_iter().flatten() {
+                if !self.type_names.contains_key(name) {
+                    self.type_names.insert(name.clone(), self.types.len() as NamedId);
+                    self.types.push(NamedType {
+                        name: name.clone(), base: TypeSet::TABLE, fields: HashMap::default(), inherits: Vec::new(), has_methods: false, namespace: false,
+                    });
+                }
+            }
+            for (name, node) in root.get("frames").and_then(Value::as_object).into_iter().flatten() {
+                if self.frame_types.contains_key(name) {
+                    continue
+                }
+                let element = node.get("type").and_then(Value::as_str).unwrap_or("Frame").to_string();
+                self.frame_types.insert(name.clone(), self.types.len() as NamedId);
+                self.types.push(NamedType {
+                    name: element, base: TypeSet::TABLE, fields: HashMap::default(), inherits: Vec::new(), has_methods: false, namespace: false,
+                });
+            }
+        }
     }
 
     /// Reads `elements`, then gives each template (`templates`) a type of its
@@ -428,7 +460,7 @@ impl Definitions {
         let (mut templates, mut frames) = (Vec::new(), Vec::new());
         {
             let kind = |tag: &str| definitions.elements.get(tag).cloned();
-            let mut global = |path: &str| definitions.at_path(path).map(|ty| definitions.type_text(ty));
+            let mut global = |path: &str| definitions.at_path(path).map(|ty| definitions.written_type_text(ty));
             for object in objects {
                 if object.is_virtual || object.intrinsic {
                     if let Some(name) = &object.name {
@@ -447,6 +479,36 @@ impl Definitions {
         }
         definitions.add_objects(&templates, &frames);
         definitions
+    }
+
+    /// These definitions with what each element makes, by tag: its type, and
+    /// whether it may have methods beyond it, as `elements` gives them
+    pub fn with_elements(&self, elements: impl IntoIterator<Item = (String, (String, bool))>) -> Definitions {
+        let mut definitions = self.clone();
+        definitions.elements.extend(elements);
+        definitions
+    }
+
+    /// The type of an object the XML defines, by how sites name it
+    /// (`template:T.Key`, a frame's name, `Frame.Key`), or failing that the
+    /// type its element `tag` makes
+    pub fn xml_object(&self, object: Option<&str>, tag: &str) -> Option<Type> {
+        let by_name = object.and_then(|object| {
+            let mut parts = object.split('.');
+            let first = parts.next()?;
+            let mut ty = match first.strip_prefix("template:") {
+                Some(template) => Type::named(self.template(template)?.0, TypeSet::TABLE),
+                None => self.global(first)?,
+            };
+            for key in parts {
+                ty = *self.types.get(ty.named.named_id()? as usize)?.fields.get(key)?;
+            }
+            Some(ty)
+        });
+        by_name.or_else(|| {
+            let (element, _) = self.element(tag)?;
+            Some(Type::named(self.named_type_id(element)?, TypeSet::TABLE))
+        })
     }
 
     /// How sites name type `id`'s members: a namespace table's path, a
@@ -567,7 +629,12 @@ impl Definitions {
             if self.globals.contains_key(name) {
                 continue
             }
-            if let Some((id, _)) = self.object_node_at(node, None, None, Some(name), &mut building) {
+            // Into the type reserved for it, when types elsewhere name it
+            let into = self.frame_types.get(name).copied();
+            if let Some(id) = into {
+                self.type_paths.insert(id, name.clone());
+            }
+            if let Some((id, _)) = self.object_node_at(node, into, None, Some(name), &mut building) {
                 self.globals.insert(name.clone(), Type::named(id, TypeSet::TABLE));
             }
         }
@@ -625,7 +692,11 @@ impl Definitions {
             node.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
         };
         let element_name = node.get("type").and_then(Value::as_str);
-        let element = element_name.and_then(|t| self.named_type_id(t)).filter(|&id| self.types[id as usize].has_methods);
+        // An intrinsic element, built first so whether its methods are known is
+        if let Some(intrinsic) = element_name.filter(|name| building.nodes.contains_key(*name)) {
+            self.build_template(intrinsic, building);
+        }
+        let element =element_name.and_then(|t| self.named_type_id(t)).filter(|&id| self.types[id as usize].has_methods);
         let extended = node.get("extended").and_then(Value::as_bool).unwrap_or(false);
         let (inherits, mixins) = (strings("inherits"), strings("mixins"));
         let own = ["values", "children", "arrays"].iter().any(|key| node.get(key).is_some());
@@ -746,8 +817,82 @@ impl Definitions {
 
     /// A type as the definitions write it: `number|nil`, `Frame`, `Enum.ItemQuality`
     pub fn type_text(&self, ty: Type) -> String {
+        self.type_text_naming(ty, false)
+    }
+
+    /// A type as definitions are written: like `type_text`, but naming a
+    /// template's type by the template and a named frame's by the frame, so
+    /// what it's made with (its mixins, templates and children) is kept, as
+    /// definitions' types can name both
+    pub fn written_type_text(&self, ty: Type) -> String {
+        self.type_text_naming(ty, true)
+    }
+
+    /// How type `id` is shown: by its name, but a template's type by the
+    /// element it's for (`Button`), as an object from XML is shown by its
+    /// native type, not the template or mixins it's made with. An intrinsic
+    /// is an element of its own, so it's shown by its name (`ItemButton`)
+    pub fn display_name(&self, id: NamedId) -> Option<&str> {
+        let mut id = id;
+        // Deep enough for any real template, and stops a loop
+        for _ in 0..16 {
+            let named = self.named_type(id)?;
+            match self.templates.get(&named.name) {
+                Some(&(template, element)) if template == id && !self.elements.contains_key(&named.name) => id = element,
+                _ => return Some(&named.name),
+            }
+        }
+        self.named_type(id).map(|named| named.name.as_str())
+    }
+
+    /// The named frame whose type `id` is, if it's one's own and its name
+    /// isn't a type's too
+    fn frame_name(&self, id: NamedId) -> Option<&str> {
+        let path = self.type_paths.get(&id)?;
+        let is_frame = !path.contains([':', '.']) && self.globals.get(path).and_then(|ty| ty.named.named_id()) == Some(id);
+        (is_frame && self.named_type_id(path).is_none()).then_some(path.as_str())
+    }
+
+    /// How type `id` is written in definitions, so that it loads with the
+    /// same methods: by its name, a template's or named frame's by theirs.
+    /// An object's type of its own that has no name (a `parentKey` child's)
+    /// is written as what it inherits when that's all it is, the methods
+    /// of mixins it has itself aside. Otherwise it can't be written
+    fn written_name(&self, id: NamedId, depth: usize) -> Option<String> {
+        let named = self.named_type(id)?;
+        if let Some(frame) = self.frame_name(id) {
+            return Some(frame.to_string())
+        }
+        if self.type_names.get(&named.name) == Some(&id) || depth > 16 {
+            return (depth <= 16).then(|| named.name.clone())
+        }
+        // Each it inherits that isn't already one of the others: its element,
+        // when its template is for that element, is just the template
+        let parents: Vec<NamedId> = named.inherits.iter().copied()
+            .filter(|&parent| !named.inherits.iter().any(|&other| other != parent && self.is_a(other, parent)))
+            .collect();
+        match parents.as_slice() {
+            [parent] if !self.type_mixins.contains_key(&id) => self.written_name(*parent, depth + 1),
+            _ => None,
+        }
+    }
+
+    fn type_text_naming(&self, ty: Type, written: bool) -> String {
         let definitions = self;
-        let named = |id: Option<u32>| id.and_then(|id| definitions.named_type(id)).filter(|n| !n.namespace).map(|n| n.name.clone());
+        // An object whose type can't be written makes the whole unknown,
+        // rather than one with fewer methods
+        let unwritable = std::cell::Cell::new(false);
+        let named = |id: Option<u32>| id.and_then(|id| {
+            definitions.named_type(id).filter(|n| !n.namespace)?;
+            match written {
+                true => {
+                    let name = definitions.written_name(id, 0);
+                    unwritable.set(unwritable.get() || name.is_none());
+                    name
+                }
+                false => definitions.display_name(id).map(str::to_string),
+            }
+        });
         let mut parts: Vec<String> = Vec::new();
         for name in ty.set.names() {
             let part = match name {
@@ -771,6 +916,9 @@ impl Definitions {
             if !parts.contains(&part) {
                 parts.push(part);
             }
+        }
+        if unwritable.get() {
+            return "unknown".to_string()
         }
         if parts.is_empty() {
             return "nil".to_string()
@@ -995,6 +1143,7 @@ impl Definitions {
             types |= match (parse_builtin_type(name), self.named_type_id(name)) {
                 (Some(set), _) => Type::of(set),
                 (None, Some(id)) => Type::named(id, self.types[id as usize].base),
+                (None, None) if self.frame_types.contains_key(name) => Type::named(self.frame_types[name], TypeSet::TABLE),
                 (None, None) => return Err(format!("unknown type `{name}` in `{text}`")),
             };
         }
@@ -1304,6 +1453,48 @@ mod tests {
         // Not in Blizzard's code
         assert_eq!(definitions.member_site(sub, "Show"), None);
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn types_naming_templates_and_frames() {
+        let definitions = Definitions::from_json(r#"{
+            "types": {"Button": {"base": "table", "method_tables": ["ButtonAPI"]}},
+            "method_tables": {"ButtonAPI": {"functions": {"Click": {}}}},
+            "mixins": {"DriverMixin": {"functions": {"Drive": {}}}},
+            "elements": {"Button": "Button"},
+            "functions": {"GetRack": {"returns": ["RackT"]}, "GetDriver": {"returns": ["Driver|nil"]}},
+            "templates": {"RackT": {"type": "Button"}},
+            "frames": {"Driver": {"type": "Button", "mixins": ["DriverMixin"]}}
+        }"#).unwrap();
+        let returned = |name: &str| match definitions.global(name).unwrap().function {
+            crate::types::FunctionRef::Builtin(id) => definitions.function(id).unwrap().returns.values[0],
+            _ => panic!("{name} isn't a function"),
+        };
+        let (rack, driver) = (returned("GetRack"), returned("GetDriver"));
+        // Named before they're built, and the frame's type is its own, with its mixin
+        assert_eq!(driver.named.named_id(), definitions.global("Driver").unwrap().named.named_id());
+        assert!(definitions.field(driver, "Drive").is_some() && definitions.field(rack, "Click").is_some());
+        // Shown by the native type, but written by name, so loading keeps them
+        assert_eq!(definitions.type_text(rack), "Button");
+        assert_eq!(definitions.type_text(driver), "Button|nil");
+        assert_eq!(definitions.written_type_text(rack), "RackT");
+        assert_eq!(definitions.written_type_text(driver), "Driver|nil");
+        // A child's type, written as what it inherits when that's all it is,
+        // else not at all rather than with fewer methods
+        let definitions = Definitions::from_json(r#"{
+            "types": {"Button": {"base": "table", "method_tables": ["ButtonAPI"]}},
+            "method_tables": {"ButtonAPI": {"functions": {"Click": {}}}},
+            "mixins": {"M": {"functions": {"Drive": {}}}},
+            "elements": {"Button": "Button"},
+            "templates": {
+                "BoxT": {"type": "Button", "mixins": ["M"]},
+                "OuterT": {"type": "Button", "children": {"Box": {"type": "Button", "inherits": ["BoxT"], "values": {"n": "number"}}, "Own": {"type": "Button", "inherits": ["BoxT"], "mixins": ["M"]}}}
+            }
+        }"#).unwrap();
+        let child = |key: &str| definitions.xml_object(Some(&format!("template:OuterT.{key}")), "Button").unwrap();
+        assert_eq!(definitions.written_type_text(child("Box")), "BoxT");
+        assert_eq!(definitions.written_type_text(child("Own")), "unknown");
+        assert_eq!(definitions.type_text(child("Box")), "Button");
     }
 
     #[test]

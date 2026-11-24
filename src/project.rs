@@ -44,7 +44,7 @@ use std::sync::Arc;
 use crate::definitions::Definitions;
 use crate::syntax::SyntaxNode;
 use crate::syntax::syntax::Generator;
-use crate::types::{Analysis, Layer, SourceFile};
+use crate::types::{Analysis, Handler, Layer, SourceFile};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Addon {
@@ -110,8 +110,11 @@ impl Addon {
     /// Analyses the addon's own files together, seeing what the addons it
     /// depends on make visible (`layer`) but not walking them. Open documents'
     /// text is used instead of what's on disk; files that can't be read are
-    /// skipped. Returns the files analysed, whose positions are their `FileId`s
-    pub fn analyse(&self, layer: Arc<Layer>, open: &HashMap<PathBuf, String>, definitions: &Arc<Definitions>) -> (Analysis, Vec<PathBuf>) {
+    /// skipped. After its Lua files come the script handlers its XML writes
+    /// inline, each a file of its own. Returns the Lua files analysed, whose
+    /// positions are their `FileId`s, and then a name for each handler, by
+    /// its XML file and where in it it starts
+    pub fn analyse(&self, layer: Arc<Layer>, open: &HashMap<PathBuf, String>, definitions: &Arc<Definitions>) -> (Analysis, Vec<PathBuf>, Vec<PathBuf>) {
         let mut sources = Vec::new();
         let mut paths = Vec::new();
         for path in &self.files {
@@ -126,10 +129,24 @@ impl Addon {
                 },
             };
             let root = SyntaxNode::new_root(Generator::new(&text).process_all());
-            sources.push(SourceFile { root, addon: Some(0) });
+            sources.push(SourceFile { root, addon: Some(0), handler: None });
             paths.push(path.clone());
         }
-        (Analysis::analyse_over(&sources, definitions, layer), paths)
+        let mut scripts = Vec::new();
+        let is_object = |tag: &str| definitions.element(tag).is_some();
+        for path in &self.xml {
+            let Some(text) = open.get(path).cloned().or_else(|| crate::xml::read(path).ok()) else { continue };
+            let Ok(document) = crate::xml::parse(&text) else { continue };
+            let objects = crate::xml::objects(&document, &is_object);
+            for script in crate::xml::inline_scripts(&objects, &text) {
+                let Some(self_type) = definitions.xml_object(script.object.as_deref(), &script.tag) else { continue };
+                let parameters = crate::xml::handler_parameters(&script.handler).iter().map(|p| p.to_string()).collect();
+                let root = SyntaxNode::new_root(Generator::new(&script.lua).process_all());
+                sources.push(SourceFile { root, addon: None, handler: Some(Handler { self_type, parameters }) });
+                scripts.push(PathBuf::from(format!("{}#{}", path.display(), script.start)));
+            }
+        }
+        (Analysis::analyse_over(&sources, definitions, layer), paths, scripts)
     }
 }
 
@@ -141,6 +158,8 @@ pub struct Analysed {
     pub analysis: Analysis,
     /// The files analysed, by `FileId`
     pub paths: Vec<PathBuf>,
+    /// The XML script handlers analysed, by `FileId` after `paths`
+    pub scripts: Vec<PathBuf>,
     /// Every file the analysis depends on: its own, and its dependencies',
     /// however indirectly. A change to any of them makes it out of date
     pub involves: Vec<PathBuf>,
@@ -151,7 +170,7 @@ pub struct Analysed {
 impl Analysed {
     /// What this addon (and those it depends on) make visible to its dependents
     pub fn layer(&self) -> Arc<Layer> {
-        self.layer.get_or_init(|| Arc::new(Layer::of(&self.analysis, &self.paths, &self.addon.toc.to_string_lossy()))).clone()
+        self.layer.get_or_init(|| Arc::new(Layer::of(&self.analysis, &[&self.paths[..], &self.scripts[..]].concat(), &self.addon.toc.to_string_lossy()))).clone()
     }
 }
 
@@ -183,13 +202,13 @@ fn analyse_visiting(addon: &Addon, known: &[Addon], open: &HashMap<PathBuf, Stri
         }
     }
     visiting.pop();
-    let (analysis, paths) = addon.analyse(Arc::new(layer), open, definitions);
+    let (analysis, paths, scripts) = addon.analyse(Arc::new(layer), open, definitions);
     for path in &paths {
         if !involves.contains(path) {
             involves.push(path.clone());
         }
     }
-    let analysed = Arc::new(Analysed { addon: addon.clone(), analysis, paths, involves, layer: Default::default() });
+    let analysed = Arc::new(Analysed { addon: addon.clone(), analysis, paths, scripts, involves, layer: Default::default() });
     cache.insert(addon.toc.clone(), analysed.clone());
     analysed
 }
@@ -601,7 +620,7 @@ mod tests {
         assert_eq!(assigned(&top, "fromUser"), "number");
         assert_eq!(top.involves.len(), 3);
         // Alone, Lib's global is unknown to User
-        let (alone, _) = user.analyse(Arc::default(), &HashMap::new(), &definitions);
+        let (alone, _, _) = user.analyse(Arc::default(), &HashMap::new(), &definitions);
         let from_lib = alone.references.iter().find(|r| r.write && alone.binding(r).name.as_ref() == "fromLib").unwrap();
         assert_eq!(alone.describe(from_lib.types), "unknown");
     }
@@ -661,6 +680,55 @@ mod tests {
         assert_eq!(definition("Get"), ["Get()"]);
         // Each addon's namespace is its own, so Lib's field isn't User's
         assert!(definition("secret").is_empty());
+    }
+
+    #[test]
+    fn inline_xml_scripts_are_functions_of_their_object() {
+        let definitions = Arc::new(Definitions::from_json(r#"{
+            "types": {"Button": {"base": "table", "method_tables": ["ButtonAPI"]}, "Frame": {"base": "table", "method_tables": ["ButtonAPI"]}},
+            "method_tables": {"ButtonAPI": {"functions": {"Show": {}}}},
+            "functions": {"Mixin": {"parameters": ["object", "..."], "returns": ["unknown"]}},
+            "elements": {"Button": "Button", "Frame": "Frame"}
+        }"#).unwrap());
+        let xml = PathBuf::from("/nowhere/Inline/Frames.xml");
+        let lua = PathBuf::from("/nowhere/Inline/Mixins.lua");
+        let mut open = HashMap::new();
+        open.insert(xml.clone(), r#"<Ui>
+  <Button name="T" virtual="true">
+    <Scripts>
+      <OnLoad inherit="prepend">
+        if 1 &lt; 2 then Mixin(self, M) end
+      </OnLoad>
+      <OnClick>clicked = button</OnClick>
+    </Scripts>
+    <Frames>
+      <Frame parentKey="Child"><Scripts><OnShow><![CDATA[Mixin(self, C)]]></OnShow></Scripts></Frame>
+    </Frames>
+  </Button>
+</Ui>"#.to_string());
+        open.insert(lua.clone(), "M = {} function M:Get() return self end C = {} function C:Get() return self end".to_string());
+        let addon = Addon { name: "Inline".into(), toc: "/nowhere/Inline/Inline.toc".into(), files: vec![lua.clone()], xml: vec![xml.clone()], dependencies: Vec::new() };
+        let (definitions, errors) = with_xml(&definitions, std::slice::from_ref(&xml), &open, &mut HashMap::new());
+        assert!(errors.is_empty());
+        let analysed = analyse_addon(&addon, &[], &open, &definitions, &mut HashMap::new());
+        // Each handler is analysed after the Lua files, named by where it starts
+        assert_eq!(analysed.paths, [lua]);
+        assert_eq!(analysed.scripts.len(), 3);
+        let analysis = &analysed.analysis;
+        let selves = || -> Vec<String> {
+            analysis.references.iter()
+                .filter(|r| r.file == crate::types::FileId(0) && analysis.binding(r).name.as_ref() == "self")
+                .map(|r| analysis.describe(r.types))
+                .collect()
+        };
+        // Shown by its native type, not the template or mixin it's made with
+        assert_eq!(selves(), ["Button", "Frame"]);
+        // `self` in each mixin's methods is the object the XML mixes it into
+        let _made_with = crate::types::MadeWith::shown();
+        assert_eq!(selves(), ["T & M", "Frame & C"]);
+        // The game's names for a handler's arguments are its parameters
+        assert_eq!(assigned(&analysed, "clicked"), "unknown");
+        assert!(analysis.bindings.iter().any(|b| b.name.as_ref() == "button" && b.kind == crate::types::BindingKind::Parameter));
     }
 
     #[test]

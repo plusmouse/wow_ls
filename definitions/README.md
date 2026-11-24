@@ -89,8 +89,13 @@ writes `elements`, the type each XML element makes (with `"extended": true`
 when it may have methods beyond it), which is how an addon's own XML is typed
 without `UI.xsd`. Its `functions`, `tables` and `values` are every other global
 Blizzard's Lua assigns that the files here don't already define, with each
-table's members, as the analysis types them. It reports mixins it found no
-table for, and globals named by `KeyValue`s it couldn't type.
+table's members, as the analysis types them. The analysis knows Blizzard's
+templates and frames, as an addon's does its own, so it walks the script
+handlers Blizzard's XML writes inline. Its types name a template by the
+template and a named frame by the frame (`"NamePlateDriverFrame"`), which keep
+their mixins when loaded, and a `parentKey` child's by what it inherits when
+that's all it is, else `unknown`. It reports mixins it found no table for, and
+globals named by `KeyValue`s it couldn't type.
 
 `global_strings.json` is the client's global strings (`ACCEPT`, `CANCEL`, ...),
 each a `string`, generated from the GlobalStrings table exported as CSV

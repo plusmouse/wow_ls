@@ -80,6 +80,8 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
             (&analysed_file, vec![target.to_path_buf()])
         };
         let dur = std::time::Instant::now() - before;
+        // Everything the analysis knows, not just what hover shows
+        let _made_with = types::MadeWith::shown();
         for (i, path) in paths.iter().enumerate() {
             let text = std::fs::read_to_string(path)?;
             let numbers = line_numbers::LinePositions::from(text.as_str());

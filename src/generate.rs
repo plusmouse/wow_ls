@@ -134,11 +134,14 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
     let mut frames: BTreeMap<String, Object> = BTreeMap::new();
     // Where each thing is, by name, within wow-ui-source, for go to definition
     let mut sites: BTreeMap<String, String> = BTreeMap::new();
+    // Every object, in load order, for the analysis to type them by
+    let mut all_objects: Vec<Object> = Vec::new();
     for (path, text) in &texts {
         let document = xml::parse(text).map_err(|e| format!("{}: {e}", path.display()))?;
         let objects = xml::objects(&document, &|tag: &str| kinds.of(tag).is_some());
         let file = path.strip_prefix(source).unwrap_or(path).display().to_string();
         sites.extend(xml::sites(&objects, &file, text));
+        all_objects.extend(objects.iter().cloned());
         for object in objects {
             let Some(name) = object.name.clone() else { continue };
             if object.is_virtual || object.intrinsic {
@@ -155,17 +158,38 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
         }
     }
 
+    // What each element makes, for reading addons' XML without the schema
+    let mut elements = Map::new();
+    let mut tags: Vec<&str> = kinds.schema.tags().chain(kinds.intrinsics.keys().map(String::as_str)).collect();
+    tags.sort();
+    tags.dedup();
+    for tag in tags {
+        match kinds.of(tag) {
+            Some((ty, false)) => { elements.insert(tag.to_string(), json!(ty)); }
+            Some((ty, true)) => { elements.insert(tag.to_string(), json!({ "type": ty, "extended": true })); }
+            None => {}
+        }
+    }
+
+    // Analysed knowing Blizzard's templates and frames, as an addon's code is
+    // with its own: so the script handlers its XML writes inline are walked,
+    // each with `self` the object it's on, and its Lua mixins' `self` is the
+    // objects XML mixes them into
+    let analysis_definitions = Arc::new(definitions
+        .with_elements(kinds.schema.tags().chain(kinds.intrinsics.keys().map(String::as_str)).filter_map(|tag| Some((tag.to_string(), kinds.of(tag)?))))
+        .with_xml(&all_objects, Vec::new()));
     eprintln!("analysing {} addons...", addons.len());
     let started = std::time::Instant::now();
     let mut cache: HashMap<PathBuf, Arc<Analysed>> = HashMap::new();
     let mut layer = Layer::default();
     for addon in &addons {
-        let analysed = project::analyse_addon(addon, &addons, &HashMap::new(), &definitions, &mut cache);
+        let analysed = project::analyse_addon(addon, &addons, &HashMap::new(), &analysis_definitions, &mut cache);
         layer.add(&analysed.layer());
     }
-    eprintln!("analysed in {:?}", started.elapsed());
+    let handlers: usize = cache.values().map(|analysed| analysed.scripts.len()).sum();
+    eprintln!("analysed in {:?}, with {handlers} script handlers written inline in XML", started.elapsed());
 
-    let generator = Generator { kinds: &kinds, layer: &layer, templates: &templates, source, texts: Default::default() };
+    let generator = Generator { kinds: &kinds, definitions: &analysis_definitions, layer: &layer, templates: &templates, source, texts: Default::default() };
     let mut mixin_names: Vec<String> = Vec::new();
     for object in templates.values().chain(frames.values()) {
         collect_mixins(object, &mut mixin_names);
@@ -222,19 +246,6 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
             eprintln!("intrinsic {name} has mixins whose methods aren't all known: {missing:?}");
         }
         types.insert(name.clone(), Value::Object(ty));
-    }
-
-    // What each element makes, for reading addons' XML without the schema
-    let mut elements = Map::new();
-    let mut tags: Vec<&str> = kinds.schema.tags().chain(kinds.intrinsics.keys().map(String::as_str)).collect();
-    tags.sort();
-    tags.dedup();
-    for tag in tags {
-        match kinds.of(tag) {
-            Some((ty, false)) => { elements.insert(tag.to_string(), json!(ty)); }
-            Some((ty, true)) => { elements.insert(tag.to_string(), json!({ "type": ty, "extended": true })); }
-            None => {}
-        }
     }
 
     let mut template_values = Map::new();
@@ -445,6 +456,9 @@ enum Member {
 
 struct Generator<'a> {
     kinds: &'a Kinds<'a>,
+    /// What the analysis was over, whose types it gives: with Blizzard's
+    /// templates and frames
+    definitions: &'a Definitions,
     layer: &'a Layer,
     templates: &'a BTreeMap<String, Object>,
     /// wow-ui-source, which sites are given within
@@ -524,7 +538,7 @@ impl Generator<'_> {
         if only(TypeSet::FUNCTION) {
             let info = match ty.function {
                 FunctionRef::One(id) => self.layer.functions.get(&id),
-                FunctionRef::Builtin(id) => self.kinds.definitions.function(id),
+                FunctionRef::Builtin(id) => self.definitions.function(id),
                 _ => None,
             };
             return Member::Function(info.map(|info| self.signature(info))
@@ -619,7 +633,7 @@ impl Generator<'_> {
     }
 
     fn type_text(&self, ty: Type) -> String {
-        self.kinds.definitions.type_text(ty)
+        self.definitions.written_type_text(ty)
     }
 
     /// The type of the global a `type="global"` KeyValue names, like

@@ -1194,6 +1194,27 @@ fn renumber_function(info: &FunctionInfo, file: &impl Fn(FileId) -> FileId) -> F
     }
 }
 
+thread_local! {
+    static MADE_WITH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While one is held, objects are described with the template and mixins
+/// they're made with (`ButtonT & M`) rather than just their native type
+/// (`Button`), as hover shows them: for looking into the analysis
+pub struct MadeWith(bool);
+
+impl MadeWith {
+    pub fn shown() -> MadeWith {
+        MadeWith(MADE_WITH.replace(true))
+    }
+}
+
+impl Drop for MadeWith {
+    fn drop(&mut self) {
+        MADE_WITH.set(self.0);
+    }
+}
+
 /// A file to analyse
 pub struct SourceFile {
     pub root: SyntaxNode,
@@ -1201,6 +1222,18 @@ pub struct SourceFile {
     /// its top is that addon's name and namespace. Addons analysed together
     /// (one and those it depends on) each have their own namespace
     pub addon: Option<u32>,
+    /// For a script handler written inline in XML, which the game makes a
+    /// function of: what it's called with
+    pub handler: Option<Handler>,
+}
+
+/// What an inline XML script handler is called with: `self`, the object the
+/// XML makes, and the arguments the game passes that kind of handler, by the
+/// names it gives them
+#[derive(Debug, Clone)]
+pub struct Handler {
+    pub self_type: Type,
+    pub parameters: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1273,7 +1306,7 @@ pub struct Analysis {
 impl Analysis {
     /// One file on its own
     pub fn analyse_file(root: &SyntaxNode, definitions: &Arc<Definitions>) -> Analysis {
-        Analysis::analyse(&[SourceFile { root: root.clone(), addon: None }], definitions)
+        Analysis::analyse(&[SourceFile { root: root.clone(), addon: None, handler: None }], definitions)
     }
 
     /// Files in the order they load, as one program. The `FileId`s in the
@@ -1620,12 +1653,17 @@ impl Analysis {
                 (_, Some(named), "table" | "userdata") if named.base.names() == [name] && signatures
                     && ty.named.identity().is_some_and(|at| self.pool_object(at).is_some()) => {
                     let object = ty.named.identity().and_then(|at| self.pool_object(at)).unwrap_or(Type::UNKNOWN);
-                    format!("{}<{}>", named.name, self.describe_shallow(object))
+                    format!("{}<{}>", self.display_name(ty), self.describe_shallow(object))
                 }
+                // By its native type alone, not the template or mixins it's
+                // made with, unless those are being shown
                 (_, Some(named), "table" | "userdata") if named.base.names() == [name] => {
-                    let mixins = ty.named.identity().map(|at| self.object_mixins(at)).unwrap_or_default();
+                    let mixins = match MADE_WITH.get() {
+                        true => ty.named.identity().map(|at| self.object_mixins(at)).unwrap_or_default(),
+                        false => Vec::new(),
+                    };
                     match mixins.is_empty() {
-                        true => named.name.clone(),
+                        true => self.display_name(ty),
                         false if wrap || optional => format!("({} & {})", named.name, mixins.join(" & ")),
                         false => format!("{} & {}", named.name, mixins.join(" & ")),
                     }
@@ -1682,6 +1720,16 @@ impl Analysis {
     /// The name a table was first stored under, here or in a dependency
     fn table_name(&self, at: TableId) -> Option<&String> {
         self.table_names.get(&at).or_else(|| self.layer.table_names.get(&at))
+    }
+
+    /// How an object's type is shown: by its native type, or while
+    /// `MadeWith` is held, by the template it's made from
+    fn display_name(&self, ty: Type) -> String {
+        let Some(id) = ty.named.named_id() else { return String::new() };
+        match MADE_WITH.get() {
+            true => self.definitions.named_type(id).map(|named| named.name.clone()),
+            false => self.definitions.display_name(id).map(str::to_string),
+        }.unwrap_or_default()
     }
 
     /// What a pool made here or in a dependency holds
@@ -2270,11 +2318,28 @@ impl<'a> Walker<'a> {
             self.addon = file.addon;
             if let Some(block) = Block::cast(file.root.clone()) {
                 self.push_scope(false, file.root.text_range().end());
+                if let Some(handler) = &file.handler {
+                    self.declare_handler(handler, file.root.text_range());
+                }
                 self.statements(&block);
                 self.pop_scope();
             }
         }
         self.finish()
+    }
+
+    /// `self` and the other arguments of an inline XML handler, which its
+    /// body (the file's top level) sees as the game's function's parameters
+    fn declare_handler(&mut self, handler: &Handler, range: TextRange) {
+        let depth = self.scopes.len() - 1;
+        let names = std::iter::once("self").chain(handler.parameters.iter().map(String::as_str));
+        for (i, name) in names.enumerate() {
+            let types = if i == 0 { handler.self_type } else { Type::UNKNOWN };
+            let id = self.new_binding(name, BindingKind::Parameter, None, types, MAIN_CHUNK, depth);
+            self.bindings[id].assigned = true;
+            self.bindings[id].visible = Some(range);
+            self.scopes[depth].names.insert(name.to_string(), id);
+        }
     }
 
     fn location(&self, offset: TextSize) -> Location {
@@ -6017,7 +6082,7 @@ mod tests {
     fn replaying_matches_walking() {
         let parse = |path: &std::path::Path, in_addon: bool| {
             let text = std::fs::read_to_string(path).unwrap();
-            SourceFile { root: SyntaxNode::new_root(Generator::new(&text).process_all()), addon: in_addon.then_some(0) }
+            SourceFile { root: SyntaxNode::new_root(Generator::new(&text).process_all()), addon: in_addon.then_some(0), handler: None }
         };
         let mut programs: Vec<(String, Vec<SourceFile>)> = Vec::new();
         for entry in std::fs::read_dir("tests").unwrap() {
@@ -6130,7 +6195,7 @@ mod tests {
     /// sharing globals
     fn analyse_files(sources: &[&str], in_addon: bool) -> Analysis {
         let files: Vec<SourceFile> = sources.iter()
-            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: in_addon.then_some(0) })
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: in_addon.then_some(0), handler: None })
             .collect();
         Analysis::analyse(&files, &Arc::new(Definitions::default()))
     }
@@ -6196,7 +6261,7 @@ mod tests {
         }}"#).unwrap());
         let analyse = |sources: &[&str]| {
             let files: Vec<SourceFile> = sources.iter()
-                .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
+                .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0), handler: None })
                 .collect();
             Analysis::analyse(&files, &definitions)
         };
@@ -6262,7 +6327,7 @@ mod tests {
 
     fn analyse_mixins(sources: &[&str]) -> Analysis {
         let files: Vec<SourceFile> = sources.iter()
-            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0), handler: None })
             .collect();
         Analysis::analyse(&files, &mixin_definitions())
     }
@@ -6298,7 +6363,7 @@ mod tests {
 
     fn analyse_files_with(sources: &[&str], definitions: &Arc<Definitions>) -> Analysis {
         let files: Vec<SourceFile> = sources.iter()
-            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0), handler: None })
             .collect();
         Analysis::analyse(&files, definitions)
     }
@@ -6315,13 +6380,15 @@ mod tests {
             }
         }"#).unwrap());
         let files: Vec<SourceFile> = sources.iter()
-            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0), handler: None })
             .collect();
         Analysis::analyse(&files, &definitions)
     }
 
     #[test]
     fn functions_mixing_in_parameters() {
+        // What the objects are made with, which hover doesn't show
+        let _made_with = MadeWith::shown();
         // Coolinator's InitFrameWithMixin
         let analysis = analyse_objects(&[
             "local _, ns = ... function ns.Init(parent, mixin) local f = CreateFrame('Frame', nil, parent) Mixin(f, mixin) f:OnLoad() return f end",
@@ -6629,6 +6696,8 @@ mod tests {
 
     #[test]
     fn mixins_the_definitions_give() {
+        // What the objects are made with, which hover doesn't show
+        let _made_with = MadeWith::shown();
         // Blizzard's Lua mixins, as tables in the definitions
         let made = "local f = CreateFrame('Frame') Mixin(f, RegistryMixin) local n = f:Count() ";
         assert_eq!(widget_types_of(made, "f")[0], "Frame & RegistryMixin");
@@ -6662,6 +6731,8 @@ mod tests {
 
     #[test]
     fn mixins_are_what_they_are_mixed_into() {
+        // What the objects are made with, which hover doesn't show
+        let _made_with = MadeWith::shown();
         // `self` in a mixin's methods is the frame it's mixed into, with the mixin's fields
         let source = "local M = {} function M:OnLoad() local s, t, n = self, self:GetText(), self:Count() end function M:Count() return 1 end
             local b = CreateFrame('Button') Mixin(b, M)";
@@ -6686,6 +6757,8 @@ mod tests {
 
     #[test]
     fn mixins_shown_on_frames() {
+        // What the objects are made with, which hover doesn't show
+        let _made_with = MadeWith::shown();
         let source = "local A, B = {}, {} local f = CreateFrame('Button') Mixin(f, A, B) local g = f
             local h = Mixin(CreateFrame('Frame'), CreateFromMixins(A, B)) local plain = CreateFrame('Frame')
             local maybe = c and f or nil";
@@ -6698,6 +6771,8 @@ mod tests {
 
     #[test]
     fn pools_give_their_objects() {
+        // What the objects are made with, which hover doesn't show
+        let _made_with = MadeWith::shown();
         let source = "local M = {} function M:Count() return 1 end
             local pool = CreateFramePool('Button', UIParent, nil, function(p, frame) local r = frame end, false, function(frame) Mixin(frame, M) frame.label = 's' end)
             local got, new = pool:Acquire()
@@ -6725,6 +6800,8 @@ mod tests {
 
     #[test]
     fn pool_callbacks_held_in_variables() {
+        // What the objects are made with, which hover doesn't show
+        let _made_with = MadeWith::shown();
         // Named init and reset functions count as called by the pool too
         let source = "local function Reset(pool, fs) local r = fs end
             local pool = CreateFontStringPool(UIParent, 'OVERLAY', 0, nil, Reset) local s = pool:Acquire()";
@@ -6742,6 +6819,8 @@ mod tests {
 
     #[test]
     fn pools_made_by_functions() {
+        // What the objects are made with, which hover doesn't show
+        let _made_with = MadeWith::shown();
         // Coolinator's GeneratePool: the init function mixes in a parameter of
         // the function making the pool, so each call's pool has its own mixin
         let analysis = analyse_files_with(&[
@@ -6771,7 +6850,8 @@ mod tests {
             local got = pool:Acquire() local b = CreateFrame('Button')";
         let analysis = analyse_with(source, &widgets());
         let hover = |text: &str| analysis.hover(FileId(0), TextSize::new(source.find(text).unwrap() as u32)).unwrap().0;
-        assert_eq!(hover("Acquire"), "field pool:Acquire: function() -> Button & M, boolean");
+        // Hover shows the native type, not the mixins it's made with
+        assert_eq!(hover("Acquire"), "field pool:Acquire: function() -> Button, boolean");
         assert_eq!(hover("CreateFrame('Button')"), "global CreateFrame: function(frameType: string, name: string?, parent: Frame?, template: string?) -> Button");
     }
 
@@ -6789,6 +6869,8 @@ mod tests {
 
     #[test]
     fn mixins_given_to_functions_making_frames() {
+        // What the objects are made with, which hover doesn't show
+        let _made_with = MadeWith::shown();
         // Coolinator's InitFrameWithMixin, with the frame made in another file
         let analysis = analyse_objects(&[
             "local _, ns = ... function ns.Init(parent, mixin) local f = CreateFrame('Frame', nil, parent) Mixin(f, mixin) return f end",
@@ -6808,6 +6890,12 @@ mod tests {
     #[test]
     fn frames_made_from_templates() {
         let made = "local f = CreateFrame('Button', nil, nil, 'ButtonT') ";
+        // Hover shows the native type, not the template
+        assert_eq!(widget_types_of(made, "f"), ["Button"]);
+        let either = "local f = c and CreateFrame('Button', nil, nil, 'ButtonT') or CreateFrame('Button') ";
+        assert_eq!(widget_types_of(either, "f"), ["Button"]);
+        // What the objects are made with
+        let _made_with = MadeWith::shown();
         assert_eq!(widget_types_of(made, "f"), ["ButtonT"]);
         // Its own methods, its mixins', those of what it inherits, and its children
         assert!(warnings(&format!("{made} f:Init() f:Base() f:Click() f.Label:SetText() f.Icon:Show()")).is_empty());
@@ -6876,6 +6964,8 @@ mod tests {
 
     #[test]
     fn addon_templates() {
+        // What the objects are made with, which hover doesn't show
+        let _made_with = MadeWith::shown();
         let definitions = with_xml(ADDON_XML);
         let warnings = |source: &str| -> Vec<String> { analyse_with(source, &definitions).diagnostics.iter().map(|d| d.message.clone()).collect() };
         let types_of = |source: &str, name: &str| describe_uses(&analyse_with(source, &definitions), name);
@@ -7019,7 +7109,7 @@ mod tests {
             .expect("a cursor");
         let sources: Vec<String> = sources.iter().map(|s| s.replace('@', "")).collect();
         let files: Vec<SourceFile> = sources.iter()
-            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0) })
+            .map(|source| SourceFile { root: SyntaxNode::new_root(Generator::new(source).process_all()), addon: Some(0), handler: None })
             .collect();
         let analysis = Analysis::analyse(&files, definitions);
         analysis.definition(FileId(file as u32), TextSize::from(offset as u32)).iter().map(|site| {
