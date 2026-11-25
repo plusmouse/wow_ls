@@ -75,6 +75,14 @@
 //!   methods, with their types, like a mixin's `self.count` of a type that
 //!   isn't known.
 //!
+//! * `returned_templates` says, for functions of the files analysed (by path,
+//!   `Mixin.Method` for `function Mixin:Method()`), the template each kind of
+//!   object they return is made with, where the analysis can't tell, as when
+//!   the templates are joined into a string at run time:
+//!   `{"AuraContainerCustomFrameProviderMixin.AcquireFrame": {"AuraButton": "CustomAuraButtonTemplate"}}`.
+//!   Each returned object of that kind is of the template's type, and may
+//!   have members beyond it, as it may be made with more templates.
+//!
 //! Every `.json` file in the directory is loaded, in filename order, and a later
 //! file's definition of a name replaces an earlier one. Tables are merged member
 //! by member, so a later file can replace or add single members of `string`.
@@ -188,9 +196,38 @@ pub struct Definitions {
     compositions: HashMap<NamedId, Composition>,
     /// Types another type inherits from
     has_subtypes: HashSet<String>,
+    /// For functions of the files analysed, by path
+    /// (`AuraContainerCustomFrameProviderMixin.AcquireFrame`), the template
+    /// each kind of object they return is taken to be made with, by the
+    /// kind's name (`AuraButton`), from `returned_templates` sections
+    returned_templates: HashMap<String, Vec<(String, String)>>,
 }
 
 impl Definitions {
+    /// For a function of the files at `path`, the templates the objects it
+    /// returns are taken to be made with, each by the kind of object it's
+    /// for (see `returned_templates`)
+    pub fn returned_templates(&self, path: &str) -> &[(String, String)] {
+        self.returned_templates.get(path).map_or(&[], Vec::as_slice)
+    }
+
+    /// Reads `returned_templates`: by function path, an object of kind name
+    /// to template name. They're names, not types, as the templates may be
+    /// ones XML defines later (Blizzard's own, while they're generated)
+    fn add_returned_templates(&mut self, root: &Value) -> Result<(), String> {
+        let Some(functions) = object(root, "returned_templates")? else { return Ok(()) };
+        for (path, kinds) in functions {
+            let kinds = kinds.as_object().ok_or_else(|| format!("returned_templates: {path} should be an object of kinds to templates"))?;
+            let mut templates = Vec::new();
+            for (kind, template) in kinds {
+                let template = template.as_str().ok_or_else(|| format!("returned_templates: {path}: {kind}'s template should be a name"))?;
+                templates.push((kind.clone(), template.to_string()));
+            }
+            self.returned_templates.insert(path.clone(), templates);
+        }
+        Ok(())
+    }
+
     /// The preset type of a global, if it has one
     pub fn global(&self, name: &str) -> Option<Type> {
         self.globals.get(name).copied()
@@ -395,6 +432,7 @@ impl Definitions {
             definitions.add_method_tables(root).map_err(|e| format!("{file}: {e}"))?;
             definitions.add_type_values(root).map_err(|e| format!("{file}: {e}"))?;
             definitions.add_members(root, None, "").map_err(|e| format!("{file}: {e}"))?;
+            definitions.add_returned_templates(root).map_err(|e| format!("{file}: {e}"))?;
         }
         definitions.compose()?;
         definitions.add_templates(files);
@@ -1239,7 +1277,7 @@ impl Definitions {
                     let mixin_globals = list("mixins")?.iter()
                         .map(|m| m.as_str().map(str::to_string).ok_or_else(|| "`fresh_returns` mixins should be names".to_string()))
                         .collect::<Result<Vec<_>, _>>()?;
-                    Ok(Some(crate::types::FreshObject { made: None, mixed_parameters, pool_mixed_parameters: None, mixin_globals }))
+                    Ok(Some(crate::types::FreshObject { made: None, mixed_parameters, pool_mixed_parameters: None, mixin_globals, kind_parameter: None }))
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             Some(_) => return Err("`fresh_returns` should be an array".to_string()),
@@ -1316,7 +1354,7 @@ impl Definitions {
             }).collect::<Result<Vec<_>, _>>()?,
             Some(_) => return Err("`returned_fields` should be an array".to_string()),
         };
-        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns, calls: Vec::new(), forwarded_calls, field_writes, returned_fields })
+        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns, calls: Vec::new(), forwarded_calls, field_writes, returned_fields, iterated: None })
     }
 
     /// `"name"` or `"name: type"`
@@ -1618,6 +1656,16 @@ mod tests {
         assert!(open.members(id).contains_key("F"));
         assert!(!open.named_type(id).unwrap().has_methods);
         assert!(Definitions::from_json(r#"{"types": {"A": {"base": "table", "mixins": ["Missing"]}}}"#).is_err());
+    }
+
+    #[test]
+    fn returned_templates() {
+        let definitions = Definitions::from_json(r#"{"returned_templates": {"Pool.Acquire": {"AuraButton": "CustomAuraButtonTemplate"}}}"#).unwrap();
+        assert_eq!(definitions.returned_templates("Pool.Acquire"), [("AuraButton".to_string(), "CustomAuraButtonTemplate".to_string())]);
+        assert!(definitions.returned_templates("Pool.Release").is_empty());
+        // By name, so a template that isn't known yet loads
+        assert!(Definitions::from_json(r#"{"returned_templates": {"Pool.Acquire": ["AuraButton"]}}"#).is_err());
+        assert!(Definitions::from_json(r#"{"returned_templates": {"Pool.Acquire": {"AuraButton": 1}}}"#).is_err());
     }
 
     #[test]

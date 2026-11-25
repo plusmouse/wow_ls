@@ -27,5 +27,8 @@
     "CreateTexturePool": {"parameters": ["parent: Frame|nil", "layer: string|nil", "subLayer: number|nil", "textureTemplate: string|nil", "resetFunc: function|nil"], "returns": ["ObjectPool"]},
     "CreateFontStringPool": {"parameters": ["parent: Frame|nil", "layer: string|nil", "subLayer: number|nil", "fontStringTemplate: string|nil", "resetFunc: function|nil"], "returns": ["ObjectPool"]},
     "CreateObjectPool": {"parameters": ["createFunc: function|nil", "resetFunc: function|nil", "capacity: number|nil"], "returns": ["ObjectPool"]}
+  },
+  "returned_templates": {
+    "AuraContainerCustomFrameProviderMixin.AcquireFrame": {"AuraButton": "CustomAuraButtonTemplate"}
   }
 }

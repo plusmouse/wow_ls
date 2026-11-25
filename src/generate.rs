@@ -36,7 +36,7 @@
 //! has none) or function, or for `global`, the type of the global its value
 //! names (`Enum.X.Y`), from the definitions or the analysis, else unknown.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -90,7 +90,7 @@ struct Report {
     duplicates: Vec<String>,
 }
 
-pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Result<(), String> {
+pub fn templates(source: &Path, definitions_directory: &Path, out: &Path, colors: Option<&Path>) -> Result<(), String> {
     // Absolute, as the paths of the files read are
     let source = &project::normalise(source);
     let source = source.as_path();
@@ -100,7 +100,17 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
     let xsd = xml::read(&xsd_path).map_err(|e| format!("{}: {e}", xsd_path.display()))?;
     let schema = Schema::parse(&xml::parse(&xsd).map_err(|e| format!("{}: {e}", xsd_path.display()))?);
 
-    let addons = project::discover(&addons_directory);
+    let mut addons = project::discover(&addons_directory);
+    // The client's global colors, made as if by Lua after `ColorUtil.lua`
+    // defines `CreateColorFromHexString`, so they're typed as colors it makes
+    let mut open: HashMap<PathBuf, String> = HashMap::new();
+    let mut color_names: HashSet<String> = HashSet::new();
+    if let Some(csv) = colors {
+        let (path, text, names) = global_colors(csv, &mut addons)?;
+        eprintln!("{} global colors, from {}", names.len(), csv.display());
+        open.insert(path, text);
+        color_names = names;
+    }
     let mut xml_files: Vec<PathBuf> = Vec::new();
     for addon in &addons {
         for file in &addon.xml {
@@ -183,7 +193,7 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
     let mut cache: HashMap<PathBuf, Arc<Analysed>> = HashMap::new();
     let mut layer = Layer::default();
     for addon in &addons {
-        let analysed = project::analyse_addon(addon, &addons, &HashMap::new(), &analysis_definitions, &mut cache);
+        let analysed = project::analyse_addon(addon, &addons, &open, &analysis_definitions, &mut cache);
         layer.add(&analysed.layer());
     }
     let handlers: usize = cache.values().map(|analysed| analysed.scripts.len()).sum();
@@ -227,7 +237,13 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
         if let Some(site) = layer.global_sites.get(name).and_then(|found| found.first()).and_then(|site| generator.place(site)) {
             sites.entry(name.clone()).or_insert(site);
         }
-        match generator.member(layer.globals[name], name, &mut sites, &mut Vec::new()) {
+        // The client makes each global color, so it's never nil, though
+        // `CreateColorFromHexString` may return nil for a string the wrong length
+        let ty = match color_names.contains(name.as_str()) {
+            true => layer.globals[name].without(crate::types::TypeSet::NIL),
+            false => layer.globals[name],
+        };
+        match generator.member(ty, name, &mut sites, &mut Vec::new()) {
             Member::Function(signature) => { functions.insert(name.clone(), signature); }
             Member::Table(table) => { tables.insert(name.clone(), table); }
             Member::Value(ty) => { values.insert(name.clone(), json!(ty)); }
@@ -332,6 +348,42 @@ pub fn global_strings(csv: &Path, out: &Path) -> Result<(), String> {
     std::fs::write(out, layout(&generated, &[("values", &values, Style::Line)])).map_err(|e| format!("{}: {e}", out.display()))?;
     eprintln!("{} global strings, {skipped} left out as they aren't Lua names", values.len());
     Ok(())
+}
+
+/// The client's global colors, from the GlobalColor table exported as CSV
+/// (`ID,LuaConstantName,Color`, as wago.tools gives it, the color a signed
+/// 32-bit ARGB number), as Lua making each with `CreateColorFromHexString`
+/// from its hex digits, and its `_CODE` markup string:
+/// a file loaded by `Blizzard_SharedXML` straight after `ColorUtil.lua`,
+/// which defines that. The file's path (beside `ColorUtil.lua`, though it
+/// isn't there), its text, and the names of the colors it makes
+fn global_colors(csv: &Path, addons: &mut [project::Addon]) -> Result<(PathBuf, String, HashSet<String>), String> {
+    let text = std::fs::read_to_string(csv).map_err(|e| format!("{}: {e}", csv.display()))?;
+    let mut rows = csv_rows(&text).into_iter();
+    let header = rows.next().unwrap_or_default();
+    let column = |name: &str| header.iter().position(|h| h == name).ok_or(format!("{}: no {name} column", csv.display()));
+    let (name_column, color_column) = (column("LuaConstantName")?, column("Color")?);
+    let mut lua = String::new();
+    let mut names = HashSet::new();
+    for row in rows {
+        let (Some(name), Some(color)) = (row.get(name_column), row.get(color_column)) else { continue };
+        if !is_name(name) {
+            continue
+        }
+        let color: i64 = color.trim().parse().map_err(|_| format!("{}: {name}'s color `{color}` isn't a number", csv.display()))?;
+        let hex = format!("{:08x}", color as u32);
+        lua += &format!("{name} = CreateColorFromHexString(\"{hex}\");\n");
+        // And its markup, as the client makes it: `"|cffffd200"`
+        lua += &format!("{name}_CODE = \"|c{hex}\";\n");
+        names.insert(name.clone());
+    }
+    let shared = addons.iter_mut()
+        .find(|addon| addon.files.iter().any(|f| f.ends_with("Blizzard_SharedXML/ColorUtil.lua")))
+        .ok_or("no addon loads Blizzard_SharedXML/ColorUtil.lua")?;
+    let after = shared.files.iter().position(|f| f.ends_with("Blizzard_SharedXML/ColorUtil.lua")).expect("found above");
+    let path = shared.files[after].with_file_name("GlobalColor.lua");
+    shared.files.insert(after + 1, path.clone());
+    Ok((path, lua, names))
 }
 
 /// Whether `text` is a Lua name
@@ -657,6 +709,10 @@ impl Generator<'_> {
     /// A site as `path:line`, with the path within wow-ui-source
     fn place(&self, site: &crate::types::Site) -> Option<String> {
         let file = crate::types::layer_file_key(site.file)?;
+        // Not one of wow-ui-source's, like the global colors' (see `global_colors`)
+        if !Path::new(&file).exists() {
+            return None
+        }
         let relative = Path::new(&file).strip_prefix(self.source).ok()?.display().to_string();
         let mut texts = self.texts.borrow_mut();
         if !texts.contains_key(&file) {

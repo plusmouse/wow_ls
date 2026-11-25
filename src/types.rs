@@ -427,6 +427,11 @@ pub enum NamedRef {
     /// variable given different frames holds: an index into `OBJECT_SETS`.
     /// It has the members all of them have
     Several(u32),
+    /// Any of several tables made in the files (`Table`), as a field reset
+    /// to a new table holds: an index into `OBJECT_SETS`. Shown as a plain
+    /// table. What's written to it may be in any of them, and what's read is
+    /// what any of them has
+    Tables(u32),
     /// A plain table, or one of several named types
     Unknown,
 }
@@ -497,8 +502,59 @@ impl NamedRef {
                     all.extend(more);
                     NamedRef::several(all)
                 }
-                _ => NamedRef::Unknown,
+                _ => match (a.tables(), b.tables()) {
+                    (Some(mut all), Some(more)) => {
+                        all.extend(more);
+                        NamedRef::several_tables(all)
+                    }
+                    _ => NamedRef::Unknown,
+                },
             },
+        }
+    }
+
+    /// The tables made in the files this may be, if it's only those
+    fn tables(self) -> Option<Vec<TableId>> {
+        match self {
+            NamedRef::Table(at) => Some(vec![at]),
+            NamedRef::Tables(id) => Some(object_set(id).iter().filter_map(|t| t.identity()).collect()),
+            _ => None,
+        }
+    }
+
+    /// Any of the tables `tables`: one, or several, each once. Those of one
+    /// family are its identity. Past `MOST_OBJECTS` none is known
+    fn several_tables(tables: Vec<TableId>) -> NamedRef {
+        let mut joined: Vec<NamedRef> = tables.iter()
+            .map(|&at| match family(at) {
+                Some(f) if tables.iter().any(|&other| other != at && family(other) == Some(f)) => NamedRef::Table(f),
+                _ => NamedRef::Table(at),
+            })
+            .collect();
+        joined.sort();
+        joined.dedup();
+        match joined.len() {
+            1 => return joined[0],
+            n if n > MOST_OBJECTS => return NamedRef::Unknown,
+            _ => {}
+        }
+        let mut sets = OBJECT_SETS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&id) = sets.ids.get(joined.as_slice()) {
+            return NamedRef::Tables(id)
+        }
+        let list: &'static [NamedRef] = Box::leak(joined.into_boxed_slice());
+        let id = sets.lists.len() as u32;
+        sets.lists.push(list);
+        sets.ids.insert(list, id);
+        NamedRef::Tables(id)
+    }
+
+    /// Every table or object made in the files this may be: its identity, or
+    /// each of `Tables`
+    pub fn identities(self) -> Vec<TableId> {
+        match self {
+            NamedRef::Tables(_) => self.tables().unwrap_or_default(),
+            other => other.identity().into_iter().collect(),
         }
     }
 
@@ -810,6 +866,10 @@ pub struct FunctionInfo {
     /// For each return, the field of `self` or a parameter it returns, if it
     /// always returns one: what each call returns is that field of its own
     pub returned_fields: Vec<Option<ReturnedField>>,
+    /// What a `for` loop over what it returns gets, when every return is a
+    /// call a loop knows that of, like `return ipairs(self.list)`: so
+    /// `for _, v in object:Enumerate()` gets what the list holds
+    pub iterated: Option<Values>,
 }
 
 /// What a `FieldWrite` or `ReturnedField` is on
@@ -879,6 +939,10 @@ pub struct FreshObject {
     /// For a function of the definitions, the globals mixed in besides the
     /// parameters, by name. One made in the files has them through `made`
     pub mixin_globals: Vec<String>,
+    /// For a frame `CreateFrame` makes with a kind the function is passed,
+    /// the parameter it's passed in: a call passing a literal kind
+    /// (`"Button"`) gets a frame of that kind
+    pub kind_parameter: Option<usize>,
 }
 
 /// What calling a function reads of it: all but what it calls, which
@@ -893,6 +957,7 @@ impl PartialEq for Signature<'_> {
             && a.parameters.len() == b.parameters.len()
             && a.parameters.iter().zip(&b.parameters).all(|(a, b)| a.name == b.name && a.mandated == b.mandated)
             && a.forwarded_calls == b.forwarded_calls && a.field_writes == b.field_writes && a.returned_fields == b.returned_fields
+            && a.iterated == b.iterated
     }
 }
 
@@ -1258,6 +1323,8 @@ pub struct Layer {
     pub metatables: HashMap<TableId, Type>,
     pub mixins: HashMap<TableId, Vec<Type>>,
     pub mixed_into: HashMap<TableId, (NamedId, bool)>,
+    /// The tables each mixin was mixed into (see `Analysis::mixin_copies`)
+    pub mixin_copies: HashMap<TableId, Vec<TableId>>,
     /// The table each table `CopyTable` made is a copy of
     pub copies: HashMap<TableId, TableId>,
     pub parents: HashMap<TableId, Type>,
@@ -1342,6 +1409,9 @@ impl Layer {
         for (at, &target) in &analysis.mixed_into {
             own.mixed_into.insert(renumber(*at, &file), target);
         }
+        for (at, tables) in &analysis.mixin_copies {
+            own.mixin_copies.insert(renumber(*at, &file), tables.iter().map(|&t| renumber(t, &file)).collect());
+        }
         for (copy, source) in &analysis.copies {
             own.copies.insert(renumber(*copy, &file), renumber(*source, &file));
         }
@@ -1411,6 +1481,9 @@ impl Layer {
         for (at, &target) in &other.mixed_into {
             self.mixed_into.entry(*at).or_insert(target);
         }
+        for (at, tables) in &other.mixin_copies {
+            self.mixin_copies.entry(*at).or_insert_with(|| tables.clone());
+        }
         for (copy, source) in &other.copies {
             self.copies.entry(*copy).or_insert(*source);
         }
@@ -1471,6 +1544,7 @@ fn renumber_named(named: NamedRef, file: &impl Fn(FileId) -> FileId) -> NamedRef
         NamedRef::Table(at) => NamedRef::Table(renumber(at, file)),
         NamedRef::Instance { named, at, extended } => NamedRef::Instance { named, at: renumber(at, file), extended },
         NamedRef::Several(_) => named.map_objects(|object| renumber_named(object, file)),
+        NamedRef::Tables(_) => NamedRef::several_tables(named.identities().into_iter().map(|at| renumber(at, file)).collect()),
         other => other,
     }
 }
@@ -1508,6 +1582,7 @@ fn renumber_function(info: &FunctionInfo, file: &impl Fn(FileId) -> FileId) -> F
             ..write.clone()
         }).collect(),
         returned_fields: info.returned_fields.clone(),
+        iterated: info.iterated.as_ref().map(|values| renumber_values(values, file)),
     }
 }
 
@@ -1615,6 +1690,13 @@ pub struct Analysis {
     /// and whether they may have members beyond that type's. What `self` is in
     /// the table's methods
     pub mixed_into: HashMap<TableId, (NamedId, bool)>,
+    /// The tables each mixin was mixed into, as `CreateFromMixins(M)` makes
+    /// one: an object `M` reaches through one of them has its fields too,
+    /// so `self` in `M`'s methods may have them
+    pub mixin_copies: HashMap<TableId, Vec<TableId>>,
+    /// Whether the walk took something not known yet to be nothing (see
+    /// `Walker::provisional`)
+    pub provisional: bool,
     /// The table each table `CopyTable` made is a copy of
     pub copies: HashMap<TableId, TableId>,
     /// The name each table made in the files was first stored under (a
@@ -1662,8 +1744,13 @@ impl Analysis {
         // Whether walks have started to cycle, so each is combined with the
         // one before
         let mut combining = false;
+        // Whether walks have settled once, and go on with what tables nothing's
+        // been seen stored in hold unknown (see `Walker::settled`)
+        let mut unstored_unknown = false;
         for walks in 2.. {
-            let mut next = Walker::new(Some(&result), definitions, &layer, changed, replay).walk(files);
+            let mut walker = Walker::new(Some(&result), definitions, &layer, changed, replay);
+            walker.settled = unstored_unknown;
+            let mut next = walker.walk(files);
             next.walks = walks;
             next.replayed += result.replayed;
             next.walked += result.walked;
@@ -1680,9 +1767,30 @@ impl Analysis {
             // grows, so it settles
             combining |= !seen.insert(next.fingerprint());
             result = next;
-            if settled {
+            if !settled {
+                continue
+            }
+            if unstored_unknown {
                 break
             }
+            // What isn't known yet is unknown from here on, until walks
+            // settle again (see `Walker::settled`). Starting from where they
+            // settled, a table filled from itself already holds what it's
+            // given, and a function called round a loop is passed it. Bodies
+            // reading a table nothing's been seen stored in are walked again;
+            // parameters change at the end of this walk, which the next sees
+            changed = result.records.values()
+                .flat_map(|record| record.reads.iter())
+                .filter(|read| matches!(read, Read::Entries(at) if !result.entries.contains_key(at) && !layer.entries.contains_key(at)))
+                .cloned()
+                .collect();
+            if changed.is_empty() && !result.provisional {
+                break
+            }
+            unstored_unknown = true;
+            seen.clear();
+            seen.insert(result.fingerprint());
+            combining = false;
         }
         result.complete();
         result
@@ -1797,6 +1905,11 @@ impl Analysis {
                 changed.insert(Read::MixedInto(at));
             }
         }
+        for at in keys(&self.mixin_copies, &older.mixin_copies) {
+            if self.mixin_copies.get(&at) != older.mixin_copies.get(&at) {
+                changed.insert(Read::MixedInto(at));
+            }
+        }
         for at in keys(&self.parents, &older.parents) {
             if self.parents.get(&at) != older.parents.get(&at) {
                 changed.insert(Read::Parent(at));
@@ -1844,6 +1957,15 @@ impl Analysis {
                 // Mixed into objects of no one type
                 Some(_) => { self.mixed_into.remove(at); }
             }
+        }
+        for (at, tables) in &other.mixin_copies {
+            let mine = self.mixin_copies.entry(*at).or_default();
+            for table in tables {
+                if !mine.contains(table) {
+                    mine.push(*table);
+                }
+            }
+            mine.sort();
         }
         for (at, &ty) in &other.pool_objects {
             *self.pool_objects.entry(*at).or_default() |= ty;
@@ -1917,6 +2039,7 @@ impl Analysis {
             map(2, &self.parents),
             map(3, &self.mixins),
             map(4, &self.mixed_into),
+            map(11, &self.mixin_copies),
             map(5, &self.pool_objects),
             map(6, &self.any_table_fields),
             map(7, &self.entries),
@@ -2277,11 +2400,16 @@ impl Analysis {
     /// A table with entries (not just named fields) shown by what it holds:
     /// `string[]` when its keys are all numbers, otherwise `table<K, V>`
     fn describe_contents(&self, ty: Type) -> Option<String> {
-        let NamedRef::Table(at) = ty.named else { return None };
-        if !self.entries.contains_key(&at) && !self.layer.entries.contains_key(&at) {
+        // Any of several tables: what any of them holds
+        let tables = match ty.named {
+            NamedRef::Table(_) | NamedRef::Tables(_) => ty.named.identities(),
+            _ => return None,
+        };
+        if !tables.iter().any(|at| self.entries.contains_key(at) || self.layer.entries.contains_key(at)) {
             return None
         }
-        let contents = self.contents(at)?;
+        let contents = tables.iter().filter_map(|&at| self.contents(at))
+            .reduce(|a, b| Entries { keys: a.keys | b.keys, values: a.values | b.values })?;
         // Nothing stored is nil, so `unknown (not nil)` would only be noise
         let shown = |ty: Type| match ty.set == TypeSet::UNKNOWN.without(TypeSet::NIL) {
             true => self.describe_shallow(Type::UNKNOWN),
@@ -2357,6 +2485,21 @@ struct Walker<'a> {
     dirty: HashSet<Read>,
     /// Whether bodies can be replayed, rather than always walked
     replay: bool,
+    /// Whether walks have settled once, so what isn't known yet is taken to
+    /// be unknown. Until then, what a table made in the files that nothing's
+    /// been seen stored in holds is nothing yet, as are the parameters of a
+    /// function with no calls seen yet: so values passed round a loop (a
+    /// pool's frames, released into its list of free ones and acquired from
+    /// it again) grow from what's given them, rather than from unknown,
+    /// which they'd never be rid of. Once walks settle, such a table holds
+    /// unknown, as it may be filled where that can't be seen, and a function
+    /// that may be called where it isn't seen takes anything, and walks go
+    /// on until they settle again
+    settled: bool,
+    /// Whether this walk took something not known yet to be nothing (see
+    /// `settled`), outside any body it replayed (whose record notes what it
+    /// read), so walks go on once they settle
+    provisional: std::cell::Cell<bool>,
     /// The function bodies being walked, innermost last, and what each has read
     frames: Vec<Frame>,
     reads: std::cell::RefCell<Vec<HashSet<Read>>>,
@@ -2476,10 +2619,16 @@ struct Walker<'a> {
     /// Per function being walked: for each return, the field of `self` or a
     /// parameter it returns, so far (None once returns disagree)
     returned_fields: Vec<Option<Vec<Option<ReturnedField>>>>,
+    /// Per function being walked: what a loop over what it returns gets, so
+    /// far (Some(None) once a return gives none)
+    iterating: Vec<Option<Option<Values>>>,
     /// Per function being walked: its `self`, if it's a method
     self_bindings: Vec<Option<BindingId>>,
     /// Which parameter of its function each parameter binding is
     parameter_index: HashMap<BindingId, usize>,
+    /// For each frame made with a kind its function is passed, which of the
+    /// function's parameters that is (see `FreshObject::kind_parameter`)
+    kind_parameters: HashMap<TableId, usize>,
     /// For tables and objects made in a function: which of its parameters
     /// were mixed into them
     parameter_mixins: HashMap<TableId, Vec<usize>>,
@@ -2657,9 +2806,9 @@ fn addon_namespace(addon: u32) -> TableId {
 
 /// The library functions calls are checked against, found once for each walk
 /// rather than at every call
-const BUILTIN_PATHS: [&str; 20] = [
+const BUILTIN_PATHS: [&str; 21] = [
     "assert", "getmetatable", "gmatch", "ipairs", "next", "pairs", "pcall", "rawget", "setmetatable", "unpack", "xpcall",
-    "string.gmatch", "table.insert", "table.remove", "tinsert", "tremove",
+    "string.gmatch", "table.create", "table.insert", "table.remove", "tinsert", "tremove",
     "CreateFontStringPool", "CreateFramePool", "CreateObjectPool", "CreateTexturePool",
 ];
 
@@ -2794,9 +2943,23 @@ impl<'a> Walker<'a> {
                 _ => None,
             })
             .collect();
+        // The tables among what each mixin was mixed into, in a fixed order
+        let mixin_copies = self.mixed_into.iter()
+            .filter_map(|(&mixin, objects)| {
+                let mut tables: Vec<TableId> = objects.iter().flat_map(|object| match object {
+                    NamedRef::Table(_) | NamedRef::Tables(_) => object.identities(),
+                    _ => Vec::new(),
+                }).collect();
+                tables.sort();
+                tables.dedup();
+                (!tables.is_empty()).then_some((mixin, tables))
+            })
+            .collect();
         Analysis {
             function_fields,
             mixed_into,
+            mixin_copies,
+            provisional: self.provisional.get(),
             lua_mixins,
             // Filled in by `complete`, once the last walk is known
             table_names: HashMap::default(),
@@ -2927,10 +3090,27 @@ impl<'a> Walker<'a> {
         let mut parameters: HashMap<FunctionId, Vec<Type>> = ids.iter()
             .map(|id| (*id, vec![Type::default(); self.functions[id].parameters.len()]))
             .collect();
+        // Until walks settle, which calls are seen grows as callees are found
+        // (finding a method reads a field, which only the previous walk
+        // knows), so a function is taken to have the calls seen so far: a
+        // parameter with none is nothing yet. Taking it to be unknown as soon
+        // as a call might not be seen would put unknown in what's passed
+        // round a loop of calls (a pool's frames, released and acquired
+        // again), which it would never be rid of. Once walks settle, a
+        // function that may be called where it isn't seen takes anything
+        // (see `Walker::settled`)
+        let trusted: HashMap<FunctionId, bool> = ids.iter().map(|id| (*id, all_seen[id] || !self.settled)).collect();
+        // A function that may be called where it isn't seen, taking only the
+        // calls seen, is provisional too, as are parameters taking nothing
+        // below
+        if !self.settled && ids.iter().any(|id| !all_seen[id] && (!self.functions[id].parameters.is_empty() || self.functions[id].varargs.is_some())) {
+            self.provisional.set(true);
+        }
+        let open = if self.settled { Type::UNKNOWN } else { Type::default() };
         let mut varargs: HashMap<FunctionId, Values> = ids.iter()
-            .map(|id| (*id, match self.functions[id].varargs.is_some() && all_seen[id] {
+            .map(|id| (*id, match self.functions[id].varargs.is_some() && trusted[id] {
                 true => Values { values: Vec::new(), rest: Type::default() },
-                false => Values::unknown(),
+                false => Values { values: Vec::new(), rest: open },
             }))
             .collect();
         // Each function once, then again whenever what's passed on to it grows
@@ -2954,8 +3134,13 @@ impl<'a> Walker<'a> {
                     let ty = match (parameter.mandated, &passed) {
                         (Some(mandated), Some(passed)) if all_seen[id] && meets(passed.get(i), mandated) => passed.get(i),
                         (Some(mandated), _) => mandated,
-                        (None, Some(passed)) if all_seen[id] => passed.get(i),
-                        _ => Type::UNKNOWN,
+                        (None, Some(passed)) if trusted[id] => passed.get(i),
+                        _ => {
+                            if !self.settled {
+                                self.provisional.set(true);
+                            }
+                            open
+                        }
                     };
                     let slot = &mut parameters.get_mut(id).expect("every function")[i];
                     if *slot | ty != *slot {
@@ -2963,7 +3148,7 @@ impl<'a> Walker<'a> {
                         changed = true;
                     }
                 }
-                if let (true, true, Some(passed)) = (function.varargs.is_some(), all_seen[id], &passed) {
+                if let (true, true, Some(passed)) = (function.varargs.is_some(), trusted[id], &passed) {
                     let values = Values {
                         values: passed.values.iter().skip(function.parameters.len()).copied().collect(),
                         rest: passed.rest,
@@ -2993,7 +3178,7 @@ impl<'a> Walker<'a> {
                 parameter.types = ty;
             }
             let has_calls = self.call_arguments.contains_key(id) || pending.contains_key(id);
-            if let (Some(shown), true, true) = (&mut function.varargs, all_seen[id], has_calls) {
+            if let (Some(shown), true, true) = (&mut function.varargs, trusted[id], has_calls) {
                 let values = varargs[id].clone();
                 // For the signature: anything one of them can be. Some calls
                 // passing fewer isn't a nil worth showing
@@ -3222,7 +3407,7 @@ impl<'a> Walker<'a> {
         }
         // Kept where another call can return it again
         if self.bindings[id].function != self.function || self.bindings[id].kind == BindingKind::Global {
-            let kept: Vec<TableId> = types.named.identity().into_iter().chain(self.several_objects(types)).collect();
+            let kept: Vec<TableId> = types.named.identities().into_iter().chain(self.several_objects(types)).collect();
             for function in &mut self.kept_outside {
                 function.extend(kept.iter().copied());
             }
@@ -3555,7 +3740,7 @@ impl<'a> Walker<'a> {
                             let mixed_parameters = self.parameter_mixins.get(&made).cloned().unwrap_or_default();
                             let pool_mixed_parameters = { self.note(Read::PoolObject(made)); self.pool_objects.get(&made) }.and_then(|object| object.named.identity())
                                 .map(|object| self.parameter_mixins.get(&object).cloned().unwrap_or_default());
-                            Some(FreshObject { made: Some(made), mixed_parameters, pool_mixed_parameters, mixin_globals: Vec::new() })
+                            Some(FreshObject { made: Some(made), mixed_parameters, pool_mixed_parameters, mixin_globals: Vec::new(), kind_parameter: self.kind_parameters.get(&made).copied() })
                         })
                         .collect();
                     if let Some(fresh) = self.fresh.last_mut() {
@@ -3570,6 +3755,19 @@ impl<'a> Walker<'a> {
                                 .collect(),
                         });
                     }
+                }
+                // `return ipairs(t)`: what a loop over it gets, for a loop
+                // over a call to this function
+                let iterated = match s.expressions().as_slice() {
+                    [Expression::FunctionCall(call)] => self.iterated.get(&self.location(call.syntax().text_range().start())).cloned(),
+                    _ => None,
+                };
+                if let Some(iterating) = self.iterating.last_mut() {
+                    *iterating = Some(match (iterating.take(), iterated) {
+                        (None, iterated) => iterated,
+                        (Some(Some(earlier)), Some(iterated)) => Some(earlier.union(&iterated)),
+                        _ => None,
+                    });
                 }
                 // At the top of the file there's no function to return from
                 if let Some(returns) = self.returns.last_mut() {
@@ -3642,11 +3840,24 @@ impl<'a> Walker<'a> {
 
     /// The type of field `name` of a value of type `base`
     fn field_read(&self, base: Type, name: &str) -> Type {
+        // Nothing known of it yet, like a parameter no call is seen passing
+        // yet: so nothing known of its field. Unknown would stay in what it
+        // flows into, as for a call of nothing
+        if base.set == TypeSet::NEVER {
+            return Type::default()
+        }
         // Any of several objects: what each has, which is only known for a
         // field all of them have
         if let NamedRef::Several(_) = base.named {
             return base.named.alternatives().into_iter()
                 .map(|object| self.field_read(Type { named: object, ..base }, name))
+                .reduce(Type::union)
+                .unwrap_or(Type::UNKNOWN)
+        }
+        // Any of several tables: what any of them has
+        if let NamedRef::Tables(_) = base.named {
+            return base.named.identities().into_iter()
+                .map(|at| self.field_read(Type { named: NamedRef::Table(at), ..base }, name))
                 .reduce(Type::union)
                 .unwrap_or(Type::UNKNOWN)
         }
@@ -3666,9 +3877,12 @@ impl<'a> Walker<'a> {
         // Writes can come later in the file, so only a previous walk knows them all
         let Some(prior) = self.prior else { return Type::default() };
         let own = match base.named {
-            NamedRef::Table(id) | NamedRef::Instance { at: id, .. } => self.own_field(prior, id, name, 0),
+            NamedRef::Table(id) => self.own_field(prior, id, name, 0),
+            // In a mixin's methods, `self` is an object with the fields of
+            // the tables the mixin was mixed into on its way to it
+            NamedRef::Instance { at: id, .. } => self.own_field(prior, id, name, 0).or_else(|| self.copied_into_field(prior, id, name)),
             NamedRef::One(_) | NamedRef::Extended(_) => None,
-            NamedRef::Several(_) => unreachable!("read from each object"),
+            NamedRef::Several(_) | NamedRef::Tables(_) => unreachable!("read from each object"),
             // Not a table we know, so nothing to go on
             NamedRef::None | NamedRef::Unknown => return Type::UNKNOWN,
         };
@@ -3691,6 +3905,30 @@ impl<'a> Walker<'a> {
                 Type { named: found.named.loosened(), ..found }
             }
         }
+    }
+
+    /// For mixin `mixin`, field `name` of the tables it was mixed into, and
+    /// those they were, as `CreateFromMixins(mixin)` makes: what an object it
+    /// reaches through any of them has. None if none has it
+    fn copied_into_field(&self, prior: &Analysis, mixin: TableId, name: &str) -> Option<Type> {
+        let mut found: Option<Type> = None;
+        let mut seen: HashSet<TableId> = HashSet::default();
+        let mut pending = vec![mixin];
+        while let Some(at) = pending.pop() {
+            // Deep enough for any real chain of mixins
+            if !seen.insert(at) || seen.len() > 64 {
+                continue
+            }
+            self.note(Read::MixedInto(at));
+            let copies = prior.mixin_copies.get(&at).into_iter().chain(self.layer.mixin_copies.get(&at)).flatten();
+            for &table in copies {
+                if let Some(ty) = self.own_field(prior, table, name, 0) {
+                    *found.get_or_insert_default() |= ty;
+                }
+                pending.push(table);
+            }
+        }
+        found
     }
 
     /// A field of a table made in the files: its own, else one it got from its
@@ -3884,6 +4122,12 @@ impl<'a> Walker<'a> {
                 }
                 self.apply(Write::AnyTableField(name.to_string(), value));
             }
+            // Whichever table it is gets it
+            NamedRef::Tables(_) => {
+                for at in base.named.identities() {
+                    self.apply(Write::Field(at, name.to_string(), value));
+                }
+            }
             NamedRef::None => {}
         }
     }
@@ -4052,6 +4296,7 @@ impl<'a> Walker<'a> {
         self.forwarded.push(Vec::new());
         self.field_writes.push(Vec::new());
         self.returned_fields.push(None);
+        self.iterating.push(None);
         self.self_bindings.push(None);
         if let Some(self_type) = self_type {
             let depth = self.scopes.len() - 1;
@@ -4093,6 +4338,10 @@ impl<'a> Walker<'a> {
         let forwarded_calls = self.forwarded.pop().unwrap_or_default();
         self.self_bindings.pop();
         let returned_fields = self.returned_fields.pop().flatten().unwrap_or_default();
+        // Only when every return gives a loop what to iterate, and it can't
+        // reach `end` without returning
+        let iterated = self.iterating.pop().flatten().flatten()
+            .filter(|_| def.block().as_ref().is_some_and(always_returns));
         // A table it makes is given by the return that gives it new
         let mut field_writes: Vec<FieldWrite> = Vec::new();
         for (on, field, value) in self.field_writes.pop().unwrap_or_default() {
@@ -4114,6 +4363,7 @@ impl<'a> Walker<'a> {
             Some(returns) => returns.union(&Values::none()),
             None => Values::none(),
         };
+        let returns = self.with_returned_templates(def, returns);
         self.pop_scope();
         self.function = outer_function;
         self.function_scope = outer_function_scope;
@@ -4128,7 +4378,48 @@ impl<'a> Walker<'a> {
         }).collect();
         let varargs = params.is_some_and(|p| p.ellipsis())
             .then(|| Parameter { name: "...".to_string(), types: Type::UNKNOWN, mandated: None });
-        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls, field_writes, returned_fields }));
+        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls, field_writes, returned_fields, iterated }));
+    }
+
+    /// `returns`, with the templates the definitions say objects the function
+    /// returns are made with (see `Definitions::returned_templates`): each of
+    /// that kind is of the template's type, and may have members beyond it,
+    /// as others may be made with more templates
+    fn with_returned_templates(&mut self, def: &FunctionDefinition, returns: Values) -> Values {
+        let Some(path) = function_path(def) else { return returns };
+        let declared = self.definitions.returned_templates(&path).to_vec();
+        if declared.is_empty() {
+            return returns
+        }
+        let templates: Vec<(NamedId, NamedId)> = declared.iter()
+            .filter_map(|(kind, template)| {
+                let kind = self.definitions.named_type_id(kind)?;
+                let (template, element) = self.definitions.template(template)?;
+                (element == kind).then_some((kind, template))
+            })
+            .collect();
+        let made: std::cell::RefCell<Vec<(TableId, NamedId)>> = Default::default();
+        let with = |ty: Type| -> Type {
+            let named = ty.named.map_objects(|object| {
+                let Some((id, _)) = object.object_type() else { return object };
+                let Some(&(_, template)) = templates.iter().find(|&&(kind, _)| kind == id) else { return object };
+                match object {
+                    NamedRef::Instance { at, .. } => {
+                        made.borrow_mut().push((at, template));
+                        NamedRef::Instance { named: template, at, extended: true }
+                    }
+                    _ => NamedRef::Extended(template),
+                }
+            });
+            Type { named, ..ty }
+        };
+        let returns = Values { values: returns.values.iter().map(|&v| with(v)).collect(), rest: with(returns.rest) };
+        // What it's made in has the template's mixins as it would made with it
+        for (at, template) in made.into_inner() {
+            let parent = self.known_parent(at).unwrap_or(Type::UNKNOWN);
+            self.add_lua_mixins(at, template, parent);
+        }
+        returns
     }
 
     fn prior_parameter_types(&self, id: FunctionId, index: usize) -> Type {
@@ -4533,11 +4824,17 @@ impl<'a> Walker<'a> {
                         returns.values[slot] = self.fresh_object(call, slot, value, fresh, &parameter_types, &arguments, offset, None);
                     }
                 }
+                // A loop over this call gets what one over the function's
+                // own return does
+                if let Some(iterated) = self.known_function(FunctionRef::One(id)).and_then(|f| f.iterated.clone()) {
+                    self.iterated.insert(self.location(call.syntax().text_range().start()), iterated);
+                }
                 returns
             }
             _ => self.select(callee, &arguments, &argument_types)
                 .or_else(|| self.library_returns(callee, &arguments, &argument_types))
                 .or_else(|| self.create_frame(call, callee, &arguments, &argument_types))
+                .or_else(|| self.create_table(call, callee))
                 .or_else(|| self.create_pool(call, callee, &arguments, &argument_types))
                 .or_else(|| self.mix(call, callee, &arguments, &argument_types))
                 .or_else(|| self.copy_table(call, callee, &arguments, &argument_types))
@@ -4581,7 +4878,11 @@ impl<'a> Walker<'a> {
                 On::Returned(_) => None,
             };
             let (Some(on), Some(&value)) = (on, returns.values.get(slot)) else { continue };
-            if on.named.identity().is_none() && !matches!(on.named, NamedRef::Several(_)) {
+            // A table made in the files, or one the definitions give the field
+            // (a global table like `NORMAL_FONT_COLOR`, with its `r`): not
+            // what any table's field of that name may be
+            let declared = self.definitions.field(self.definitions.member_source(on), &field.field).is_some();
+            if on.named.identity().is_none() && !matches!(on.named, NamedRef::Several(_)) && !declared {
                 continue
             }
             returns.values[slot] = narrowed_to(self.field_read(on, &field.field), value);
@@ -4714,7 +5015,10 @@ impl<'a> Walker<'a> {
             if object.identity().is_some_and(|at| self.may_gain_fields(prior, at, 0)) {
                 return
             }
-            let own = object.identity().and_then(|at| self.own_field(prior, at, name, 0));
+            let own = object.identity().and_then(|at| self.own_field(prior, at, name, 0).or_else(|| match object {
+                NamedRef::Instance { .. } => self.copied_into_field(prior, at, name),
+                _ => None,
+            }));
             if own.is_none() && self.definitions.field(Type { named: *object, ..receiver }, name).is_none() && !lacking.contains(&named.name) {
                 lacking.push(named.name.clone());
             }
@@ -4997,11 +5301,25 @@ impl<'a> Walker<'a> {
         let kind = self.frame_type(arguments.first())?;
         let (named, extended) = self.templated(kind, arguments.get(3));
         let at = self.location(call.syntax().text_range().start());
+        // A kind the function making it is passed: each call's own
+        let caller = self.function_ranges.last().map(|&(_, function)| function);
+        if let Some((_, index)) = arguments.first().and_then(|kind| self.parameter_read(kind)).filter(|&(function, _)| Some(function) == caller) {
+            self.kind_parameters.insert(at, index);
+        }
         // The third argument, or nil without one
         self.apply(Write::Parent(at, argument_types.get(2)));
         self.add_lua_mixins(at, named, argument_types.get(2));
         let named = NamedRef::Instance { named, at, extended };
         Some(Values { values: vec![Type { named, ..Type::of(TypeSet::TABLE) }], rest: Type::NIL })
+    }
+
+    /// `table.create(n)`: a new empty table, as `{}` written at the call is
+    fn create_table(&self, call: &FunctionCall, callee: Type) -> Option<Values> {
+        if self.builtin("table.create") != Some(callee) {
+            return None
+        }
+        let at = self.location(call.syntax().text_range().start());
+        Some(Values { values: vec![Type::table(at)], rest: Type::NIL })
     }
 
     /// The type of an object of type `kind` made from the template `template`
@@ -5597,9 +5915,22 @@ impl<'a> Walker<'a> {
                 self.apply(Write::ParameterMixin(at, index));
             }
         }
+        // A frame of the kind the call passes, if the function makes one of
+        // the kind it's passed: a literal kind names it, and a parameter of
+        // the function calling is passed on, for each call to that
+        let kind_expression = fresh.kind_parameter
+            .and_then(|position| usize::try_from(position as isize - offset).ok())
+            .and_then(|i| expressions.get(i));
+        let passed_kind = kind_expression.and_then(|expression| {
+            if let Some((_, index)) = self.parameter_read(expression).filter(|&(function, _)| Some(function) == caller) {
+                self.kind_parameters.insert(at, index);
+            }
+            let frame = self.definitions.named_type_id("Frame")?;
+            Some(self.kind_named(Some(expression), frame)).filter(|&kind| kind != frame)
+        });
         let named = match value.named {
             NamedRef::Table(_) => NamedRef::Table(at),
-            NamedRef::Instance { named, extended, .. } => NamedRef::Instance { named, at, extended },
+            NamedRef::Instance { named, extended, .. } => NamedRef::Instance { named: passed_kind.unwrap_or(named), at, extended },
             // A definition's `table`
             NamedRef::None | NamedRef::Unknown if value.set.contains(TypeSet::TABLE) && fresh.made.is_none() => NamedRef::Table(at),
             // A definition's table of the type its mixins make (see
@@ -5847,18 +6178,38 @@ impl<'a> Walker<'a> {
             return Some(Values { values, rest: returns.rest | Type::NIL })
         }
         let table = arguments.get(0).named.identity();
-        if let Some(at) = table {
+        // Whichever table it is, of several
+        let tables = arguments.get(0).named.identities();
+        for &at in &tables {
             self.note(Read::Entries(at));
             self.note(Read::Fields(at));
         }
-        // What a table's array holds, any of which may be missing
-        let array = |prior: &Analysis| self.entries_of(prior, table?)
-            .filter(|e| e.keys.set.contains(TypeSet::NUMBER))
-            .map(|e| e.values | Type::NIL);
+        // What a table's array holds, any of which may be missing. For a
+        // table made in the files that nothing's been seen stored in, nothing
+        // yet (see `settled`)
+        let array = |prior: &Analysis| match self.entries_of_any(prior, &tables).filter(|e| e.keys.set.contains(TypeSet::NUMBER)) {
+            Some(entries) => Some(entries.values | Type::NIL),
+            None => (!tables.is_empty() && !self.settled).then(|| {
+                self.provisional.set(true);
+                Type::default()
+            }),
+        };
+        // On the first walk, nothing yet, as a field read gives, rather than
+        // the documented unknown, which a table filled from itself (as a
+        // pool's list of free objects is) would never be rid of. Even when
+        // the table isn't known: it may be one read from a field, which only
+        // the previous walk knows
+        let unwalked = self.prior.is_none();
         if is("unpack") {
+            if unwalked {
+                return Some(Values { values: Vec::new(), rest: Type::default() })
+            }
             return Some(Values { values: Vec::new(), rest: array(self.prior?)? })
         }
         if is("table.remove") || is("tremove") {
+            if unwalked {
+                return one(Type::default())
+            }
             return one(array(self.prior?)?)
         }
         // A field without the metatable: the table's own
@@ -5880,7 +6231,19 @@ impl<'a> Walker<'a> {
         }
         // A key and value from the table, or nil when it's empty
         if is("next") {
-            let contents = self.contents_of(self.prior?, table?)?;
+            if unwalked {
+                return Some(Values { values: vec![Type::default(), Type::default()], rest: Type::NIL })
+            }
+            // Nothing yet from a table made in the files that nothing's been
+            // seen stored in (see `settled`)
+            let contents = match self.contents_of_any(self.prior?, &tables) {
+                Some(contents) => contents,
+                None if !tables.is_empty() && !self.settled => {
+                    self.provisional.set(true);
+                    Entries { keys: Type::default(), values: Type::default() }
+                }
+                None => return None,
+            };
             return Some(Values { values: vec![contents.keys | Type::NIL, contents.values | Type::NIL], rest: Type::NIL })
         }
         // Fields set this way can't be named, or come from where the
@@ -6040,33 +6403,67 @@ impl<'a> Walker<'a> {
         if key.set.contains(TypeSet::STRING) {
             self.open(base);
         }
-        let Some(at) = base.named.identity() else { return };
         let value = value.without(TypeSet::NIL);
         if value.set == TypeSet::NEVER {
             return
         }
-        self.apply(Write::Entry(at, key.without(TypeSet::NIL), value));
+        // Whichever table it is gets it
+        for at in base.named.identities() {
+            self.apply(Write::Entry(at, key.without(TypeSet::NIL), value));
+        }
     }
 
     /// The type of `t[key]`, from what the previous walk saw stored. It may
     /// not be there, so it can be nil
     fn index_read(&self, base: Type, key: Type) -> Type {
-        let Some(at) = base.named.identity() else { return Type::UNKNOWN };
+        // Nothing yet on the first walk, even for a table that isn't known
+        // yet, as it may be one read from a field, nor from what nothing's
+        // known of yet
         let Some(prior) = self.prior else { return Type::default() };
-        self.note(Read::Entries(at));
-        self.note(Read::Fields(at));
-        let entries = self.entries_of(prior, at);
-        let mut found = entries.map(|e| e.values);
-        // A string key could be any of the named fields
-        if key.set.contains(TypeSet::STRING) {
-            for value in self.field_values_of(prior, at) {
-                *found.get_or_insert_default() |= value;
+        if base.set == TypeSet::NEVER {
+            return Type::default()
+        }
+        let tables = base.named.identities();
+        if tables.is_empty() {
+            return Type::UNKNOWN
+        }
+        let mut found: Option<Type> = None;
+        // Whichever table it is: what any of them holds
+        for at in tables {
+            self.note(Read::Entries(at));
+            self.note(Read::Fields(at));
+            if let Some(entries) = self.entries_of(prior, at) {
+                *found.get_or_insert_default() |= entries.values;
+            }
+            // A string key could be any of the named fields
+            if key.set.contains(TypeSet::STRING) {
+                for value in self.field_values_of(prior, at) {
+                    *found.get_or_insert_default() |= value;
+                }
             }
         }
+        // Nothing seen stored in it: nothing yet, and once walks settle,
+        // unknown rather than nil (see `settled`)
         match found {
             Some(values) if values.set != TypeSet::NEVER => values | Type::NIL,
-            _ => Type::UNKNOWN,
+            _ if self.settled => Type::UNKNOWN,
+            _ => {
+                self.provisional.set(true);
+                Type::default()
+            }
         }
+    }
+
+    /// What any of `tables` holds beyond its named fields (see `entries_of`)
+    fn entries_of_any(&self, prior: &Analysis, tables: &[TableId]) -> Option<Entries> {
+        tables.iter().filter_map(|&at| self.entries_of(prior, at))
+            .reduce(|a, b| Entries { keys: a.keys | b.keys, values: a.values | b.values })
+    }
+
+    /// Every key and value any of `tables` holds (see `contents_of`)
+    fn contents_of_any(&self, prior: &Analysis, tables: &[TableId]) -> Option<Entries> {
+        tables.iter().filter_map(|&at| self.contents_of(prior, at))
+            .reduce(|a, b| Entries { keys: a.keys | b.keys, values: a.values | b.values })
     }
 
     /// What a table holds beyond its named fields: here, and from a dependency
@@ -6111,17 +6508,33 @@ impl<'a> Walker<'a> {
         if !ipairs && !pairs {
             return
         }
-        let (Some(prior), Some(at)) = (self.prior, arguments.get(0).named.identity()) else { return };
-        self.note(Read::Entries(at));
-        self.note(Read::Fields(at));
+        // On the first walk, nothing yet: what the loop gives grows from
+        // there, as a field read's does
+        let Some(prior) = self.prior else {
+            let nothing = Values { values: vec![Type::default(), Type::default()], rest: Type::NIL };
+            self.iterated.insert(self.location(call.syntax().text_range().start()), nothing);
+            return
+        };
+        // Whichever table it is, of several
+        let tables = arguments.get(0).named.identities();
+        for &at in &tables {
+            self.note(Read::Entries(at));
+            self.note(Read::Fields(at));
+        }
         let contents = if ipairs {
             // Only the entries under number keys are visited
-            self.entries_of(prior, at)
+            self.entries_of_any(prior, &tables)
                 .filter(|e| e.keys.set.contains(TypeSet::NUMBER))
                 .map(|e| (Type::of(TypeSet::NUMBER), e.values))
         } else {
-            self.contents_of(prior, at).map(|e| (e.keys, e.values))
+            self.contents_of_any(prior, &tables).map(|e| (e.keys, e.values))
         };
+        // Over a table made in the files that nothing's been seen stored in,
+        // nothing yet (see `settled`)
+        let contents = contents.or_else(|| (!tables.is_empty() && !self.settled).then(|| {
+            self.provisional.set(true);
+            (Type::default(), Type::default())
+        }));
         if let Some((key, value)) = contents {
             let values = Values { values: vec![key, value], rest: Type::NIL };
             self.iterated.insert(self.location(call.syntax().text_range().start()), values);
@@ -6421,6 +6834,17 @@ fn always_returns(block: &Block) -> bool {
         }
         _ => false,
     }
+}
+
+/// How the definitions name a function defined with a name, like
+/// `Mixin.Method` for `function Mixin:Method()`, or `f` for `local function f()`
+fn function_path(def: &FunctionDefinition) -> Option<String> {
+    if let Some(name) = def.local_name() {
+        return Some(name.text().to_string())
+    }
+    let identifier = def.identifier()?;
+    let path: String = identifier.syntax().text().to_string().chars().filter(|c| !c.is_whitespace()).collect();
+    Some(path.replace(':', "."))
 }
 
 fn precedence(op: Operator) -> u8 {
@@ -7129,6 +7553,110 @@ mod tests {
     }
 
     #[test]
+    fn tables_a_field_is_reset_to() {
+        // A field given a new table again (emptied) is any of them: what's
+        // put in it is in whichever it is, so taking it back out gives that
+        let source = "local P = {} function P:Init() self.list = {} end
+            function P:Add() table.insert(self.list, true) self.list.count = 1 end
+            function P:Reset() self.list = {} end
+            function P:Take() local x, c = table.remove(self.list), self.list.count
+                for _, v in ipairs(self.list) do local each = v end end";
+        assert_eq!(library_types_of(source, "x")[0], "true?");
+        assert_eq!(library_types_of(source, "each")[0], "true");
+        assert_eq!(library_types_of(source, "c")[0], "number");
+    }
+
+    #[test]
+    fn loops_over_what_functions_return() {
+        // `return ipairs(self.list)`: a loop over a call gets what the list holds
+        let source = "local P = {} function P:Init() self.list = {} end
+            function P:Add() table.insert(self.list, 'a') end
+            function P:Enumerate() return ipairs(self.list) end
+            function P:Use() for i, v in self:Enumerate() do local index, each = i, v end end";
+        assert_eq!(library_types_of(source, "each")[0], "string");
+        assert_eq!(library_types_of(source, "index")[0], "number");
+    }
+
+    #[test]
+    fn table_create_makes_a_table() {
+        assert_eq!(library_types_of("local t = table.create(2) t[1] = 's' local x = t[1]", "x")[0], "string?");
+    }
+
+    #[test]
+    fn values_passed_round_a_loop_settle_from_what_they_are_given() {
+        // A pool's free frames: released into its list and acquired from it
+        // again, so what's acquired is only ever what was made
+        let pool = "local P = {} function P:Init() self.free = {} end
+            function P:Create() table.insert(self.free, CreateFrame('Button')) end
+            function P:Acquire() return table.remove(self.free) end
+            function P:Release(f) table.insert(self.free, f) end";
+        let source = format!("{pool} local a = P:Acquire() P:Release(a)");
+        assert_eq!(library_types_of(&source, "a")[0], "Button?");
+        // Through a map of what's in use, found through a parameter, whose
+        // type isn't known until a later walk
+        let source = format!("{pool} local G = {{}} function G:Pool() return self.pool end
+            local function Refresh(group)
+                local old = group.used group.used = {{}}
+                for _, f in pairs(old) do group:Pool():Release(f) end
+                local got = group:Pool():Acquire() group.used[1] = got
+            end
+            local g = {{ pool = P, used = {{}} }} setmetatable(g, {{ __index = G }}) Refresh(g)");
+        assert_eq!(library_types_of(&source, "got")[0], "Button?");
+        // Released where it isn't seen: anything may be put back
+        let source = format!("{pool} Pool = P");
+        assert_eq!(library_types_of(&source, "f")[0], "unknown");
+    }
+
+    #[test]
+    fn methods_of_tables_a_mixin_is_copied_into() {
+        // `self` in `S`'s methods is a frame that got `S` through `P`, so it
+        // has `P`'s methods too
+        let source = "S = {} function S:A() local b = self:B() return b end
+            P = CreateFromMixins(S) function P:B() return 1 end
+            local f = CreateFrame('Frame') Mixin(f, P) local x = f:A()";
+        assert_eq!(library_types_of(source, "b")[0], "number");
+        assert_eq!(library_types_of(source, "x")[0], "number");
+    }
+
+    #[test]
+    fn frames_of_the_kind_a_function_is_passed() {
+        let source = "local Make function Make(kind, parent) return CreateFrame(kind, nil, parent) end
+            local function Outer(kind) return Make(kind) end
+            local a, b, c, d = Make('Button'), Make('StatusBar'), Outer('Slider'), Make(GetKind())";
+        assert_eq!(library_types_of(source, "a")[0], "Button");
+        assert_eq!(library_types_of(source, "b")[0], "StatusBar");
+        assert_eq!(library_types_of(source, "c")[0], "Slider");
+        // Not a literal: any frame
+        assert_eq!(library_types_of(source, "d")[0], "Frame");
+    }
+
+    #[test]
+    fn returned_templates() {
+        let definitions = Arc::new(Definitions::from_json(r#"{
+            "types": {"Frame": {"base": "table", "method_tables": ["FrameAPI"]}, "Button": {"base": "table", "inherits": ["Frame"]}},
+            "method_tables": {"FrameAPI": {"functions": {"Show": {}}}},
+            "mixins": {"SlotMixin": {"functions": {"Glow": {"returns": ["number"]}}}},
+            "elements": {"Button": "Button", "Frame": "Frame"},
+            "templates": {"SlotT": {"type": "Button", "mixins": ["SlotMixin"]}},
+            "functions": {"CreateFrame": {"parameters": ["frameType: string"], "returns": ["Frame"]}},
+            "returned_templates": {"Provider.Acquire": {"Button": "SlotT"}, "Other.Acquire": {"Button": "NoSuchT"}}
+        }"#).unwrap());
+        let types_of = |source: &str, name: &str| describe_uses(&analyse_with(source, &definitions), name);
+        // Each object of that kind it returns is taken to be made with the template
+        let source = "Provider = {} function Provider:Acquire() return CreateFrame('Button') end
+            local f = Provider:Acquire() local g = f:Glow()";
+        assert_eq!(types_of(source, "g")[0], "number");
+        // Another kind it may return stays as it is, so may not have them
+        let source = "Provider = {} function Provider:Acquire(plain) if plain then return CreateFrame('Frame') end return CreateFrame('Button') end
+            local f = Provider:Acquire() local g = f:Glow()";
+        assert_eq!(types_of(source, "g")[0], "unknown");
+        // Not for another function, nor a template that isn't known
+        let source = "Other = {} function Other:Acquire() return CreateFrame('Button') end
+            local f = Other:Acquire() local g = f:Glow()";
+        assert_eq!(types_of(source, "g")[0], "unknown");
+    }
+
+    #[test]
     fn iterating_contents() {
         let source = "local t = { 'a' } for i, v in ipairs(t) do end";
         assert_eq!(library_types_of(source, "i")[0], "number");
@@ -7637,8 +8165,22 @@ mod tests {
             "PaintMixin": {"functions": {
                 "GetR": {"returns": ["unknown"], "returned_fields": [{"on": "self", "field": "r"}]},
                 "SetR": {"parameters": ["r"], "field_writes": [{"on": "self", "field": "r", "value": [0]}]}
-            }, "values": {"r": "unknown", "a": "unknown"}}
+            }, "values": {"r": "unknown", "a": "unknown"}},
+            "SOME_COLOR": {"functions": {
+                "GetR": {"returns": ["unknown"], "returned_fields": [{"on": "self", "field": "r"}]},
+                "GetLabel": {"returns": ["unknown"], "returned_fields": [{"on": "self", "field": "label"}]}
+            }, "values": {"r": "number"}}
         }}"#).unwrap())
+    }
+
+    #[test]
+    fn global_tables_return_their_fields() {
+        // A global table the definitions give: the field they give it, as
+        // for `NORMAL_FONT_COLOR:GetRGB()`, but not what any table's field
+        // of that name may be
+        let analysis = analyse_mixins(&["local t = {} t.label = 's' local r, label = SOME_COLOR:GetR(), SOME_COLOR:GetLabel()"]);
+        assert_eq!(types_in(&analysis, 0, "r"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "label"), ["unknown"]);
     }
 
     fn analyse_mixins(sources: &[&str]) -> Analysis {

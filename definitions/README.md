@@ -77,10 +77,19 @@ the script, and it reports any names they don't cover.
 edit it by hand either. Regenerate it with:
 
 ```sh
-wow_ls generate-templates ../wow-ui-source definitions/blizzard_templates.json
+wow_ls generate-templates ../wow-ui-source definitions/blizzard_templates.json GlobalColor.<version>.csv
 ```
 
 Generate `global_strings.json` first, as `KeyValue`s name global strings.
+
+The last argument is the client's GlobalColor table exported as CSV
+(`ID,LuaConstantName,Color`, as wago.tools gives it), for the global colors
+the client makes (`NORMAL_FONT_COLOR`, ...). Each is analysed as if
+`Blizzard_SharedXML` made it, straight after `ColorUtil.lua`, with
+`NAME = CreateColorFromHexString("aarrggbb")`, the hex digits from `Color` (a
+signed 32-bit ARGB number), so it's a color as that makes one, never nil, and
+`NAME_CODE = "|caarrggbb"`, its markup, as the client makes. Without it
+they're left out, and unknown.
 
 It reads `UI.xsd` for the type each XML element makes, every XML file a
 Blizzard addon's `.toc` loads (for the current game version), and wow_ls's own
@@ -118,3 +127,20 @@ global `CreateFrame`. It loads after `blizzard_api.json`, so an entry here also
 replaces the generated one. That fixes what the documentation has wrong: a frame's
 attributes hold any value, though it gives `GetAttribute` and `SetAttribute`
 a `cstring`.
+
+It also holds `returned_templates`: for functions of the Lua analysed (Blizzard's,
+while `generate-templates` runs, or an addon's), by path (`Mixin.Method` for
+`function Mixin:Method()`), the template each kind of object they return is
+made with, where the analysis can't tell, as when the templates are joined
+into a string at run time:
+
+```json
+"returned_templates": {
+  "AuraContainerCustomFrameProviderMixin.AcquireFrame": {"AuraButton": "CustomAuraButtonTemplate"}
+}
+```
+
+Each object of that kind the function returns is of the template's type, and
+may have members beyond it, as it may be made with more templates. Other
+objects it returns are left as they are. Templates are named, not typed, as
+they may be ones XML defines later.

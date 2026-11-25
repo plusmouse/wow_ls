@@ -110,10 +110,11 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         eprintln!("{} files{with}, {} bindings, {} references in {:?} ({} walks, {}% of function bodies replayed)", paths.len(), analysis.bindings.len(), analysis.references.len(), dur, analysis.walks, replayed);
         Ok(())
     } else if args.len() > 3 && args[1] == "generate-templates" {
-        // wow_ls generate-templates <wow-ui-source> <out.json>
+        // wow_ls generate-templates <wow-ui-source> <out.json> [GlobalColor.csv]
         let out = std::path::Path::new(&args[3]);
         let directory = definitions::locate(None).ok_or("no definitions directory found")?;
-        generate::templates(std::path::Path::new(&args[2]), &directory, out)?;
+        let colors = args.get(4).map(std::path::Path::new);
+        generate::templates(std::path::Path::new(&args[2]), &directory, out, colors)?;
         Ok(())
     } else if args.len() > 3 && args[1] == "generate-global-strings" {
         // wow_ls generate-global-strings <GlobalStrings.csv> <out.json>
