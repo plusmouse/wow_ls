@@ -6475,6 +6475,12 @@ impl<'a> Walker<'a> {
 
     /// What a table holds beyond its named fields: here, and from a dependency
     fn entries_of(&self, prior: &Analysis, at: TableId) -> Option<Entries> {
+        // A variable's stand-in for a table it doesn't know: what it's seen
+        // given is only some of what the table may hold
+        if at.slot & PSEUDO != 0 {
+            let anything = Type::UNKNOWN.without(TypeSet::NIL);
+            return Some(Entries { keys: anything, values: anything })
+        }
         match (prior.entries.get(&at), self.layer.entries.get(&at)) {
             (Some(a), Some(b)) => Some(Entries { keys: a.keys | b.keys, values: a.values | b.values }),
             (a, b) => a.or(b).copied(),
@@ -8014,6 +8020,13 @@ mod tests {
         assert_eq!(types_of("local _, ns = ...", "ns"), ["unknown"]);
         // Parameters too
         assert_eq!(types_of("local function f(opts) opts.size = 1 return opts.size end local a = f({})", "a"), ["number"]);
+        // What it's seen given under other keys is only some of what it holds
+        let source = "local s = f() s[5] = true local a = s[3] for _, v in pairs(s) do local b = v end local c = unpack(s)";
+        assert_eq!(types_of(source, "a"), ["unknown"]);
+        assert_eq!(types_of(source, "b"), ["unknown (not nil)"]);
+        assert_eq!(types_of(source, "c"), ["unknown"]);
+        let source = "local function P(s) if s[5] == nil then s[5] = s[1] == 1 end return s[5] end local function I(s, l) local W = s[3] return l / W end";
+        assert!(analyse(source).diagnostics.is_empty());
     }
 
     #[test]
