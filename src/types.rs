@@ -830,8 +830,25 @@ pub struct Entries {
 /// where it's true, and where it's false
 #[derive(Default)]
 struct Narrowing {
-    when_true: Vec<(BindingId, Type)>,
-    when_false: Vec<(BindingId, Type)>,
+    when_true: Vec<(Target, Type)>,
+    when_false: Vec<(Target, Type)>,
+}
+
+/// What a condition narrows: a local of the function being walked, or a
+/// field reached from one by names (`self.margin`, `info.a.b`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    Local(BindingId),
+    Field(BindingId, Vec<String>),
+}
+
+impl Narrowing {
+    /// Without the fields it narrows, for when something may change them
+    /// before the narrowing would apply
+    fn locals_only(self) -> Narrowing {
+        let locals = |narrowed: Vec<(Target, Type)>| narrowed.into_iter().filter(|(t, _)| matches!(t, Target::Local(_))).collect();
+        Narrowing { when_true: locals(self.when_true), when_false: locals(self.when_false) }
+    }
 }
 
 impl Narrowing {
@@ -842,14 +859,22 @@ impl Narrowing {
 
 /// Both of two sets of narrowed types holding: a local in both is the
 /// intersection
-fn both(mut a: Vec<(BindingId, Type)>, b: Vec<(BindingId, Type)>) -> Vec<(BindingId, Type)> {
-    for (id, ty) in b {
-        match a.iter_mut().find(|(other, _)| *other == id) {
+fn both(mut a: Vec<(Target, Type)>, b: Vec<(Target, Type)>) -> Vec<(Target, Type)> {
+    for (target, ty) in b {
+        match a.iter_mut().find(|(other, _)| *other == target) {
             Some((_, existing)) => *existing = intersect(*existing, ty.set),
-            None => a.push((id, ty)),
+            None => a.push((target, ty)),
         }
     }
     a
+}
+
+/// Whether evaluating `node` may call a function, which could change a
+/// table's fields. `type(x)`, the usual test, can't
+fn may_call(walker: &Walker, node: &SyntaxNode) -> bool {
+    node.descendants()
+        .filter_map(FunctionCall::cast)
+        .any(|call| !walker.calls_library_global(&call, "type"))
 }
 
 /// The part of `ty` that's in `set`. If none of it is, the analysis must have
@@ -870,6 +895,18 @@ enum Operation {
 }
 
 impl Operation {
+    /// The expressions it's made of
+    fn syntax_nodes(&self) -> Vec<SyntaxNode> {
+        match self {
+            Operation::Operand(e) => vec![e.syntax().clone()],
+            Operation::Binary(_, left, right) => {
+                let mut nodes = left.syntax_nodes();
+                nodes.extend(right.syntax_nodes());
+                nodes
+            }
+        }
+    }
+
     /// The code it covers
     fn range(&self) -> TextRange {
         match self {
@@ -2102,6 +2139,13 @@ struct Walker<'a> {
     function_scope: usize,
     /// Inside the right of an `and`/`or`, which might not run
     short_circuit_depth: usize,
+    /// Fields narrowed here (see `Target::Field`), by their local and names.
+    /// Any call or field write may change a field, through another name for
+    /// its table too, so either forgets them all, as entering a loop does
+    narrowed_fields: Vec<(BindingId, Vec<String>, Type)>,
+    /// Counts each time `narrowed_fields` is forgotten, so what's restored
+    /// after a branch isn't what the branch made stale
+    field_epoch: usize,
     /// Union of the arguments at every direct call of each function, except
     /// those in `pending_calls`
     call_arguments: HashMap<FunctionId, Values>,
@@ -2700,6 +2744,8 @@ impl<'a> Walker<'a> {
     /// variables from outside it, so this converges. Only the final pass's
     /// bindings and references are kept.
     fn loop_body(&mut self, mut body: impl FnMut(&mut Walker)) {
+        // A pass may change fields the next one reads
+        self.forget_fields();
         for pass in 1.. {
             let snapshot = self.snapshot();
             let log_start = self.loop_log.len();
@@ -2728,6 +2774,7 @@ impl<'a> Walker<'a> {
                 }
             }
             self.restore(&snapshot);
+            self.forget_fields();
         }
     }
 
@@ -2868,6 +2915,10 @@ impl<'a> Walker<'a> {
 
     /// A write of binding `id` at `token`
     fn write_binding(&mut self, token: &SyntaxToken, id: BindingId, types: Type) {
+        // Fields narrowed through it are another table's now
+        if self.narrowed_fields.iter().any(|(root, _, _)| *root == id) {
+            self.forget_fields();
+        }
         let binding = &mut self.bindings[id];
         binding.types |= types;
         binding.assigned = true;
@@ -2958,6 +3009,7 @@ impl<'a> Walker<'a> {
                         (None, None) => match field_access(target.syntax()) {
                             Some((base, field)) => {
                                 let base = self.expression(&base);
+                                self.forget_fields();
                                 self.field_write(base, field.text(), types);
                                 self.field_reference(target.syntax(), &field, base, types, true);
                             }
@@ -2965,7 +3017,8 @@ impl<'a> Walker<'a> {
                                 // `t[k] = v`
                                 Some((base, key)) => {
                                     let base = self.expression(&base);
-                                    match self.index_key(&key) {
+                                    let key = { let key = self.index_key(&key); self.forget_fields(); key };
+                                    match key {
                                         Key::Name(name, token) => {
                                             self.field_write(base, &name, types);
                                             if let Some(token) = token {
@@ -2986,8 +3039,8 @@ impl<'a> Walker<'a> {
                 // Past `assert(v)`, `v` is true: otherwise it raised an error
                 if self.calls_library_global(call, "assert") {
                     if let Some(condition) = call.arguments().first() {
-                        for (id, ty) in self.narrowing(condition).when_true {
-                            self.set_current(id, ty);
+                        for (target, ty) in self.narrowing(condition).when_true {
+                            self.narrow(&target, ty);
                         }
                     }
                 }
@@ -3013,13 +3066,18 @@ impl<'a> Walker<'a> {
             }),
             Statement::If(s) => {
                 // Each branch runs only if the conditions before it were false
-                let mut earlier_false: Vec<(BindingId, Type)> = Vec::new();
+                let mut earlier_false: Vec<(Target, Type)> = Vec::new();
                 // Without an `else`, code after an `if` whose branches all
                 // return runs only when every condition was false
                 let mut all_return = s.else_branch().is_none();
                 for (i, branch) in s.if_branches().iter().enumerate() {
                     let block = branch.block();
                     all_return &= block.as_ref().is_some_and(always_returns);
+                    // An `elseif` condition that may call a function may change
+                    // the fields the conditions before it proved things of
+                    if branch.expression().is_some_and(|condition| may_call(self, condition.syntax())) {
+                        earlier_false.retain(|(target, _)| matches!(target, Target::Local(_)));
+                    }
                     let proved = self.with_narrowing(&earlier_false.clone(), |w| {
                         let condition = branch.expression()?;
                         // An `elseif` condition only runs if the ones before failed
@@ -3039,8 +3097,8 @@ impl<'a> Walker<'a> {
                     self.with_narrowing(&earlier_false.clone(), |w| w.block(branch.block(), true));
                 }
                 if all_return {
-                    for (id, ty) in earlier_false {
-                        self.set_current(id, ty);
+                    for (target, ty) in earlier_false {
+                        self.narrow(&target, ty);
                     }
                 }
             }
@@ -3135,6 +3193,7 @@ impl<'a> Walker<'a> {
                             let owner = self.function_name_owner(&identifier);
                             if let Some((owner, field)) = &owner {
                                 let function = Type::function(self.function_id(def));
+                                self.forget_fields();
                                 self.field_write(*owner, field.text(), function);
                                 self.field_reference(identifier.syntax(), field, *owner, function, true);
                             }
@@ -3631,6 +3690,9 @@ impl<'a> Walker<'a> {
         self.push_scope(true, def.syntax().text_range().end());
         let outer_function_scope = std::mem::replace(&mut self.function_scope, self.scopes.len() - 1);
         let outer_short_circuit = std::mem::take(&mut self.short_circuit_depth);
+        // Defining a function doesn't run it: what's narrowed around it holds
+        // on after it, and nothing narrowed there holds inside it
+        let outer_fields = (std::mem::take(&mut self.narrowed_fields), self.field_epoch);
         self.returns.push(None);
         self.calls.push(Vec::new());
         self.function_ranges.push((def.syntax().text_range(), self.function));
@@ -3680,6 +3742,7 @@ impl<'a> Walker<'a> {
         self.function = outer_function;
         self.function_scope = outer_function_scope;
         self.short_circuit_depth = outer_short_circuit;
+        (self.narrowed_fields, self.field_epoch) = outer_fields;
 
         let parameters = parameters.iter().zip(&parameter_bindings).map(|(token, binding)| Parameter {
             name: token.text().to_string(),
@@ -3890,6 +3953,7 @@ impl<'a> Walker<'a> {
                     Some((base, field)) => {
                         let base = self.expression(&base);
                         let types = self.field_read(base, field.text());
+                        let types = self.narrowed_field(expression).unwrap_or(types);
                         self.field_reference(identifier.syntax(), &field, base, types, false);
                         self.check_field(base, &field, field.text());
                         types
@@ -3937,6 +4001,15 @@ impl<'a> Walker<'a> {
     }
 
     fn function_call(&mut self, call: &FunctionCall) -> Values {
+        let values = self.call(call);
+        // The function may have changed any table's fields
+        if !self.calls_library_global(call, "type") {
+            self.forget_fields();
+        }
+        values
+    }
+
+    fn call(&mut self, call: &FunctionCall) -> Values {
         let is_method = call.method_name().is_some();
         // Where the callee's read was recorded, to note what this call returns
         let mut callee_read = None;
@@ -3949,9 +4022,7 @@ impl<'a> Walker<'a> {
                         reference.callee = true;
                         callee_read = Some(CalleeRead::Variable(self.references.len() - 1));
                     }
-                    if i.simple_name().is_some() {
-                        self.check_called_local(types);
-                    }
+                    self.check_called_variable(types);
                 }
                 Expression::Identifier(i) if !is_method && field_access(i.syntax()).is_some() => {
                     self.last_field_is_callee();
@@ -4022,7 +4093,13 @@ impl<'a> Walker<'a> {
                 _ => Values::unknown(),
             }
         };
-        let required: Vec<Option<Type>> = (0..arguments.len()).map(|i| function.mandated(i)).collect();
+        // The definitions' functions don't list `self`, as `:` passes it, but
+        // `s:format(x)` is `string.format(s, x)`: the string is its first
+        // parameter, so the arguments come after it
+        let string_receiver = is_method && !matches!(callee.function, FunctionRef::One(_))
+            && receiver.is_some_and(|r| self.definitions.member_source(r) != r);
+        let skipped = usize::from(string_receiver);
+        let required: Vec<Option<Type>> = (0..arguments.len()).map(|i| function.mandated(i + skipped)).collect();
         // Where the call passes a template, if it takes one
         let template = function.parameters.iter()
             .position(|p| p.name.to_ascii_lowercase().contains("template"));
@@ -4260,19 +4337,18 @@ impl<'a> Walker<'a> {
         self.diagnostics.push(Diagnostic { file: self.file, range, message });
     }
 
-    /// Reports calling a local variable (`n()`) whose value here can only be
-    /// one that can't be called, as for `check_called_field`. Not a parameter,
-    /// whose type is only what the calls the analysis sees pass, nor a global,
-    /// which code anywhere may set
-    fn check_called_local(&mut self, types: Type) {
+    /// Reports calling a variable (`n()`, or `_G.n()`) whose value here can
+    /// only be one that can't be called, as for `check_called_field`. A
+    /// parameter has a type only when every call to its function is seen (it's
+    /// unknown once the function escapes), and a global's is every value the
+    /// files give it. SavedVariables can't hold functions, and a global the
+    /// files don't set has its preset type
+    fn check_called_variable(&mut self, types: Type) {
         if self.prior.is_none() || !uncallable(types) {
             return
         }
         let Some(reference) = self.references.last() else { return };
         let binding = &self.bindings[reference.binding];
-        if binding.kind != BindingKind::Local {
-            return
-        }
         let message = format!("`{}` is {}, not a function", binding.name, self.definitions.type_text(types));
         let range = reference.range;
         self.diagnostics.push(Diagnostic { file: self.file, range, message });
@@ -5289,24 +5365,87 @@ impl<'a> Walker<'a> {
 
     /// Runs `f` with locals narrowed to the types given. Afterwards each is
     /// what it was before, with anything `f` assigned it, as if never narrowed
-    fn with_narrowing<R>(&mut self, narrowed: &[(BindingId, Type)], f: impl FnOnce(&mut Self) -> R) -> R {
-        let saved: Vec<(BindingId, Type)> = narrowed.iter().map(|&(id, _)| (id, self.current[id])).collect();
-        for &(id, ty) in narrowed {
-            self.set_current(id, ty);
+    fn with_narrowing<R>(&mut self, narrowed: &[(Target, Type)], f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved: Vec<(BindingId, Type)> = narrowed.iter()
+            .filter_map(|(target, _)| match target { Target::Local(id) => Some((*id, self.current[*id])), Target::Field(..) => None })
+            .collect();
+        let (saved_fields, epoch) = (self.narrowed_fields.clone(), self.field_epoch);
+        for (target, ty) in narrowed {
+            self.narrow(target, *ty);
         }
         let result = f(self);
         for (id, before) in saved {
             self.set_current(id, self.current[id] | before);
         }
+        // As before, unless `f` may have changed fields
+        if self.field_epoch == epoch {
+            self.narrowed_fields = saved_fields;
+        } else {
+            self.narrowed_fields.clear();
+        }
         result
+    }
+
+    /// Takes `target` to be of type `ty` from here
+    fn narrow(&mut self, target: &Target, ty: Type) {
+        match target {
+            Target::Local(id) => self.set_current(*id, ty),
+            Target::Field(root, path) => {
+                match self.narrowed_fields.iter_mut().find(|(r, p, _)| r == root && p == path) {
+                    Some((_, _, existing)) => *existing = ty,
+                    None => self.narrowed_fields.push((*root, path.clone(), ty)),
+                }
+            }
+        }
+    }
+
+    /// Something may have changed any table's fields: none stay narrowed
+    fn forget_fields(&mut self) {
+        self.narrowed_fields.clear();
+        self.field_epoch += 1;
+    }
+
+    /// `e` as a local of the current function and the field names from it,
+    /// for `x` (no names) or `x.a.b`
+    fn field_path(&self, e: &Expression) -> Option<(BindingId, Vec<String>)> {
+        let Expression::Identifier(identifier) = e else { return None };
+        if let Some(name) = identifier.simple_name() {
+            let id = self.local_binding(name.text())?;
+            return (self.bindings[id].function == self.function).then(|| (id, Vec::new()))
+        }
+        let (base, field) = field_access(identifier.syntax())?;
+        let (id, mut path) = self.field_path(&base)?;
+        path.push(field.text().to_string());
+        Some((id, path))
+    }
+
+    /// The narrowed type of the field `e` reads, if it's narrowed here
+    fn narrowed_field(&self, e: &Expression) -> Option<Type> {
+        if self.narrowed_fields.is_empty() {
+            return None
+        }
+        let (root, path) = self.field_path(e)?;
+        self.narrowed_fields.iter().find(|(r, p, _)| *r == root && *p == path).map(|(_, _, ty)| *ty)
     }
 
     /// A local of the current function named by `expression`, and its type
     /// here. Upvalues aren't narrowed, as a closure can run at any time
-    fn narrowable(&self, expression: &Expression) -> Option<(BindingId, Type)> {
-        let Expression::Identifier(identifier) = expression else { return None };
-        let id = self.local_binding(identifier.simple_name()?.text())?;
-        (self.bindings[id].function == self.function).then(|| (id, self.current[id]))
+    /// Or a field reached from one by names, while nothing changes it (see
+    /// `narrowed_fields`)
+    fn narrowable(&self, expression: &Expression) -> Option<(Target, Type)> {
+        let (root, path) = self.field_path(expression)?;
+        if path.is_empty() {
+            return Some((Target::Local(root), self.current[root]))
+        }
+        // Its type here: as narrowed, or read from what it's on
+        let mut ty = self.current[root];
+        for (i, name) in path.iter().enumerate() {
+            ty = match self.narrowed_fields.iter().find(|(r, p, _)| *r == root && p[..] == path[..=i]) {
+                Some((_, _, narrowed)) => *narrowed,
+                None => self.field_read(ty, name),
+            };
+        }
+        Some((Target::Field(root, path), ty))
     }
 
     /// What `condition` being true, or false, proves about the locals it tests
@@ -5321,7 +5460,7 @@ impl<'a> Walker<'a> {
             }
             Expression::BinaryExpression(b) => self.binary_tree(b).map(|tree| self.operation_narrowing(&tree)).unwrap_or_default(),
             _ => match self.narrowable(condition) {
-                Some((id, ty)) => Narrowing { when_true: vec![(id, ty.truthy())], when_false: vec![(id, ty.falsy())] },
+                Some((target, ty)) => Narrowing { when_true: vec![(target.clone(), ty.truthy())], when_false: vec![(target, ty.falsy())] },
                 None => Narrowing::default(),
             },
         }
@@ -5331,13 +5470,14 @@ impl<'a> Walker<'a> {
         match operation {
             Operation::Operand(e) => self.narrowing(e),
             // Both true; false says nothing about which wasn't
+            // What the left proves of fields doesn't hold past a call on the right
             Operation::Binary(Operator::And, left, right) => Narrowing {
-                when_true: both(self.operation_narrowing(left).when_true, self.operation_narrowing(right).when_true),
+                when_true: both(self.left_narrowing(left, right).when_true, self.operation_narrowing(right).when_true),
                 when_false: Vec::new(),
             },
             Operation::Binary(Operator::Or, left, right) => Narrowing {
                 when_true: Vec::new(),
-                when_false: both(self.operation_narrowing(left).when_false, self.operation_narrowing(right).when_false),
+                when_false: both(self.left_narrowing(left, right).when_false, self.operation_narrowing(right).when_false),
             },
             Operation::Binary(op @ (Operator::Equals | Operator::NotEquals), left, right) => {
                 let (Operation::Operand(left), Operation::Operand(right)) = (&**left, &**right) else { return Narrowing::default() };
@@ -5345,6 +5485,16 @@ impl<'a> Walker<'a> {
                 if *op == Operator::NotEquals { narrowing.negated() } else { narrowing }
             }
             _ => Narrowing::default(),
+        }
+    }
+
+    /// What the left of an `and`/`or` proves once its right has run: nothing of
+    /// fields when the right may call a function, which could change them
+    fn left_narrowing(&self, left: &Operation, right: &Operation) -> Narrowing {
+        let narrowing = self.operation_narrowing(left);
+        match right.syntax_nodes().iter().any(|node| may_call(self, node)) {
+            true => narrowing.locals_only(),
+            false => narrowing,
         }
     }
 
@@ -5365,8 +5515,8 @@ impl<'a> Walker<'a> {
     fn comparison(&self, tested: &Expression, against: &Expression) -> Option<Narrowing> {
         let Expression::Literal(literal) = against else { return None };
         if literal.is_nil() {
-            let (id, ty) = self.narrowable(tested)?;
-            return Some(Narrowing { when_true: vec![(id, Type::NIL)], when_false: vec![(id, ty.without(TypeSet::NIL))] })
+            let (target, ty) = self.narrowable(tested)?;
+            return Some(Narrowing { when_true: vec![(target.clone(), Type::NIL)], when_false: vec![(target, ty.without(TypeSet::NIL))] })
         }
         // `type(x)`, while `type` is the library's
         let Expression::FunctionCall(call) = tested else { return None };
@@ -5374,9 +5524,9 @@ impl<'a> Walker<'a> {
             return None
         }
         let [argument] = call.arguments().try_into().ok()?;
-        let (id, ty) = self.narrowable(&argument)?;
+        let (target, ty) = self.narrowable(&argument)?;
         let set = type_name_set(string_field_name(&literal.get_string()?)?)?;
-        Some(Narrowing { when_true: vec![(id, intersect(ty, set))], when_false: vec![(id, ty.without(set))] })
+        Some(Narrowing { when_true: vec![(target.clone(), intersect(ty, set))], when_false: vec![(target, ty.without(set))] })
     }
 }
 
@@ -5576,6 +5726,46 @@ mod tests {
         assert!(warnings("local v = x and 1 or 'a' if type(v) == 'number' then local c = v < 2 end").is_empty());
         // `==` never raises an error
         assert!(warnings("local c = 1 == 'a' local d = true ~= {}").is_empty());
+    }
+
+    #[test]
+    fn narrowed_fields() {
+        let warnings = |source: &str| -> Vec<String> { analyse_with(source, &library()).diagnostics.iter().map(|d| d.message.clone()).collect() };
+        let types = |source: &str| -> Vec<String> {
+            let file = analyse_with(source, &library());
+            file.field_references.iter().filter(|f| !f.write && f.name() == "m").map(|f| file.describe(f.types)).collect()
+        };
+        // A number or function, as `ScrollUtil.lua`'s `areaMargin`
+        let margin = "local T = {} function T:Set(m) self.m = m end T:Set(5) T:Set(function() end)\n";
+        assert_eq!(types(&format!("{margin}function T:Get() if type(self.m) == 'number' then return self.m end return self.m end")), ["number|function()", "number", "function()"]);
+        // Only a number reaches it: past the check, nothing does
+        let number = "local T = {} function T:Set(m) self.m = m end function T:Reset() end T:Set(5)\n";
+        assert!(warnings(&format!("{number}function T:Get(x) if type(self.m) == 'number' then return self.m end return self.m(x) end")).is_empty());
+        assert!(warnings(&format!("{number}function T:Get(x) if type(self.m) ~= 'function' then return 0 end return self.m(x) end")).is_empty());
+        assert!(warnings(&format!("{number}function T:Get(x) if type(self.m) == 'function' then return self.m(x) end end")).is_empty());
+        assert!(warnings(&format!("{number}function T:Get(x) return type(self.m) == 'function' and self.m(x) end")).is_empty());
+        assert!(warnings(&format!("{number}function T:Get(x) assert(type(self.m) == 'function') return self.m(x) end")).is_empty());
+        // Nested fields, and through a local that isn't `self`
+        assert!(warnings("local t = {a = {m = 1}} if type(t.a.m) == 'function' then t.a.m() end").is_empty());
+        // Unnarrowed, it's reported
+        assert_eq!(warnings(&format!("{number}function T:Get(x) return self.m(x) end")), ["`m` is number, not a function"]);
+        // A call or a field write may change it, so it's not narrowed past one
+        let changed = |between: &str| warnings(&format!("{number}function T:Get(x) if type(self.m) == 'function' then {between} return self.m(x) end end"));
+        assert_eq!(changed("self:Reset()"), ["`m` is number, not a function"]);
+        assert_eq!(changed("self.other = 1"), ["`m` is number, not a function"]);
+        assert_eq!(changed("local o = self o.k = 1"), ["`m` is number, not a function"]);
+        assert_eq!(changed("self = T"), ["`m` is number, not a function"]);
+        assert!(changed("local y = x + 1").is_empty());
+        assert_eq!(warnings(&format!("{number}function T:Get(x) return type(self.m) == 'function' and self:Reset() and self.m(x) end")), ["`m` is number, not a function"]);
+        assert_eq!(warnings(&format!("{number}function T:Get(x) if type(self.m) ~= 'function' then return elseif self:Reset() then return end return self.m(x) end")), ["`m` is number, not a function"]);
+        // Nor into a loop, whose earlier passes may change it, nor a function
+        // (and after them, past the loop and the call)
+        assert_eq!(changed("for i = 1, 2 do self.m(i) end"), ["`m` is number, not a function"; 2]);
+        assert_eq!(changed("local function f() self.m(x) end f()"), ["`m` is number, not a function"; 2]);
+        // Defining a function doesn't run it, so the narrowing holds past one
+        assert!(changed("local function f() end").is_empty());
+        // Nor past the branch that narrowed it
+        assert_eq!(warnings(&format!("{number}function T:Get(x) if type(self.m) == 'function' then end return self.m(x) end")), ["`m` is number, not a function"]);
     }
 
     #[test]
@@ -5821,7 +6011,8 @@ mod tests {
             "max": {"parameters": ["x: number", "...: number"], "returns": ["number"]},
             "strlen": {"parameters": ["s: string"], "returns": ["number"]}
         }, "tables": {
-            "string": {"functions": {"format": {"parameters": ["format: string", "..."], "returns": ["string"]}}},
+            "string": {"functions": {"format": {"parameters": ["format: string", "..."], "returns": ["string"]},
+                "rep": {"parameters": ["s: string", "n: number"], "returns": ["string"]}}},
             "a": {"tables": {"b": {"functions": {"c": {"returns": ["table"]}}}}}
         }}"#).unwrap())
     }
@@ -5915,6 +6106,9 @@ mod tests {
     #[test]
     fn mandated_parameters() {
         assert_eq!(builtin_types_of("local function f(x) return floor(x) end", "x"), ["number", "number"]);
+        // A string's method takes the string first, so `x` isn't the format
+        assert_eq!(builtin_types_of("local function f(x) return ('%d'):format(x) end f(1)", "x"), ["number", "number"]);
+        assert_eq!(builtin_types_of("local function f(x) return ('a'):rep(x) end", "x"), ["number", "number"]);
         assert_eq!(builtin_types_of("local function f(s) return string.format(s) end", "s"), ["string", "string"]);
         // Varargs can require a type too
         assert_eq!(builtin_types_of("local function f(a, b) return max(a, b) end", "b"), ["number", "number"]);
@@ -6935,9 +7129,17 @@ mod tests {
         assert!(warnings("local f = 1 local function g() f() end f = print g()").is_empty());
         assert!(warnings("local t = setmetatable({}, {__call = print}) t()").is_empty());
         assert!(warnings("local f f()").is_empty());
-        // Not a parameter or a global
-        assert!(warnings("local function g(cb) cb() end g(1)").is_empty());
-        assert!(warnings("G = 1 G()").is_empty());
+        // A parameter, when every call is seen passing one
+        assert_eq!(warnings("local function g(cb) cb() end g(1) g('a')"), ["`cb` is number|string, not a function"]);
+        assert!(warnings("local function g(cb) cb() end g(1) g(print)").is_empty());
+        // Not once the function escapes, so other code may call it
+        assert!(warnings("local function g(cb) cb() end g(1) Register(g)").is_empty());
+        assert!(warnings("T = {} function T.g(cb) cb() end T.g(1) local h = T.g").is_empty());
+        // A global, by every value the files give it
+        assert_eq!(warnings("G = 1 G()"), ["`G` is number, not a function"]);
+        assert_eq!(warnings("G = 1 _G.G()"), ["`G` is number, not a function"]);
+        assert!(warnings("G = 1 local function f() G() end G = print f()").is_empty());
+        assert!(warnings("Unset()").is_empty());
     }
 
     #[test]

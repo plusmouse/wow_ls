@@ -11,6 +11,11 @@
       "GetNextActive": {"parameters": ["current"], "returns": ["unknown"]},
       "IsActive": {"parameters": ["object"], "returns": ["boolean"]},
       "GetNumActive": {"returns": ["number"]}
+    }},
+    "SimpleFrameAPI": {"functions": {
+      "GetAttribute": {"parameters": ["attributeName: string"], "returns": ["unknown"]},
+      "SetAttribute": {"parameters": ["attributeName: string", "value"], "returns": []},
+      "SetAttributeNoHandler": {"parameters": ["attributeName: string", "value"], "returns": []}
     }}
   },
   "values": {

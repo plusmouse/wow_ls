@@ -199,10 +199,17 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
     let mut mixins = Map::new();
     for name in &mixin_names {
         match generator.mixin(name) {
-            Some((functions, false)) => { mixins.insert(name.clone(), json!({ "functions": functions })); }
-            Some((functions, true)) => {
-                report.open_mixins.push(name.clone());
-                mixins.insert(name.clone(), json!({ "open": true, "functions": functions }));
+            Some((functions, values, open)) => {
+                let mut mixin = Map::new();
+                if open {
+                    report.open_mixins.push(name.clone());
+                    mixin.insert("open".into(), json!(true));
+                }
+                mixin.insert("functions".into(), Value::Object(functions));
+                if !values.is_empty() {
+                    mixin.insert("values".into(), Value::Object(values));
+                }
+                mixins.insert(name.clone(), Value::Object(mixin));
             }
             None => { report.missing_mixins.insert(name.clone(), 0); }
         }
@@ -392,19 +399,27 @@ fn layout(generated: &str, sections: &[(&str, &Map<String, Value>, Style)]) -> S
                 text += &format!("{separator}\n    {}: {}", string(key), tree(value, 2));
                 continue
             }
-            match (*style == Style::Functions, value.get("functions").and_then(Value::as_object)) {
-                (true, Some(functions)) if !functions.is_empty() => {
-                    // Its other keys, like `"open": true`, first
+            let listed = |section: &str| value.get(section).and_then(Value::as_object).filter(|entries| !entries.is_empty());
+            match (*style == Style::Functions, listed("functions").or(listed("values"))) {
+                (true, Some(_)) => {
+                    // Its other keys, like `"open": true`, first, then a line
+                    // per function and per value
                     let others: String = value.as_object().into_iter().flatten()
-                        .filter(|(k, _)| *k != "functions")
+                        .filter(|(k, _)| *k != "functions" && *k != "values")
                         .map(|(k, v)| format!("{}: {v}, ", string(k)))
                         .collect();
-                    text += &format!("{separator}\n    {}: {{{others}\"functions\": {{", string(key));
-                    for (j, (function, signature)) in functions.iter().enumerate() {
-                        let separator = if j == 0 { "" } else { "," };
-                        text += &format!("{separator}\n        {}: {signature}", string(function));
-                    }
-                    text += "\n    }}";
+                    text += &format!("{separator}\n    {}: {{{others}", string(key));
+                    let sections: Vec<String> = ["functions", "values"].iter()
+                        .filter_map(|section| Some((section, value.get(*section)?.as_object()?)))
+                        .map(|(section, entries)| {
+                            let lines: Vec<String> = entries.iter()
+                                .map(|(name, entry)| format!("\n        {}: {entry}", string(name)))
+                                .collect();
+                            format!("{}: {{{}\n    }}", string(section), lines.join(","))
+                        })
+                        .collect();
+                    text += &sections.join(", ");
+                    text += "}";
                 }
                 _ => text += &format!("{separator}\n    {}: {value}", string(key)),
             }
@@ -487,16 +502,25 @@ impl Generator<'_> {
     }
 
     /// The functions of the global table `name`, as its file and the mixins
-    /// mixed into it define them, and whether it may have others: when it or
-    /// one mixed into it holds functions under computed keys, which can be
-    /// methods (`handler[accessor] = function(self) ... end`)
-    fn mixin(&self, name: &str) -> Option<(Map<String, Value>, bool)> {
+    /// mixed into it define them, the fields that may hold one but may hold
+    /// something else too (`unknown`, or a function or number), with their
+    /// types, and whether it may have others: when it or one mixed into it
+    /// holds functions under computed keys, which can be methods
+    /// (`handler[accessor] = function(self) ... end`)
+    fn mixin(&self, name: &str) -> Option<(Map<String, Value>, Map<String, Value>, bool)> {
         let table = self.layer.globals.get(name)?.named.identity()?;
         let mut fields = HashMap::new();
         let open = self.table_fields(table, &mut fields, 0);
         let mut functions: BTreeMap<String, Value> = BTreeMap::new();
+        let mut values: BTreeMap<String, Value> = BTreeMap::new();
         for (field, ty) in fields {
             if !ty.set.contains(TypeSet::FUNCTION) {
+                continue
+            }
+            // A field of a type that isn't known (`self.count = count`) isn't
+            // a method, though it might hold one
+            if ty.set != TypeSet::FUNCTION {
+                values.insert(field, json!(self.type_text(ty)));
                 continue
             }
             // One the analysis can't pin down, like a wrapped function
@@ -507,7 +531,7 @@ impl Generator<'_> {
             };
             functions.insert(field, signature.unwrap_or_else(|| json!({"parameters": ["..."], "returns": ["unknown"], "rest": "unknown"})));
         }
-        Some((functions.into_iter().collect(), open))
+        Some((functions.into_iter().collect(), values.into_iter().collect(), open))
     }
 
     /// A table's fields: those of its mixins, in the order they were mixed
@@ -672,6 +696,12 @@ mod tests {
         let mixins = json!({"M": {"open": true, "functions": {"F": {}, "G": {"returns": ["number"]}}}, "Empty": {"functions": {}}});
         let text = layout("here", &[("types", types.as_object().unwrap(), Style::Line), ("mixins", mixins.as_object().unwrap(), Style::Functions)]);
         assert_eq!(text, "{\n  \"generated\": \"here\",\n  \"types\": {\n    \"A\": {\"base\":\"table\"},\n    \"B\": {\"base\":\"table\"}\n  },\n  \"mixins\": {\n    \"Empty\": {\"functions\":{}},\n    \"M\": {\"open\": true, \"functions\": {\n        \"F\": {},\n        \"G\": {\"returns\":[\"number\"]}\n    }}\n  }\n}\n");
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["mixins"], mixins);
+        // Values a line each too
+        let mixins = json!({"M": {"functions": {"F": {}}, "values": {"n": "unknown", "m": "number|function"}}});
+        let text = layout("here", &[("mixins", mixins.as_object().unwrap(), Style::Functions)]);
+        assert_eq!(text, "{\n  \"generated\": \"here\",\n  \"mixins\": {\n    \"M\": {\"functions\": {\n        \"F\": {}\n    }, \"values\": {\n        \"m\": \"number|function\",\n        \"n\": \"unknown\"\n    }}\n  }\n}\n");
         let parsed: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["mixins"], mixins);
         // Tables a line per member, nested ones indented

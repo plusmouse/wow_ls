@@ -71,6 +71,9 @@
 //!   after its method tables, so a method table's method wins. A type listing
 //!   them has a known set of methods too. A mixin with `"open": true` may have
 //!   methods beyond those listed, so a template using it doesn't.
+//! * Method tables and mixins can also list `values`, fields that aren't
+//!   methods, with their types, like a mixin's `self.count` of a type that
+//!   isn't known.
 //!
 //! Every `.json` file in the directory is loaded, in filename order, and a later
 //! file's definition of a name replaces an earlier one. Tables are merged member
@@ -1019,6 +1022,14 @@ impl Definitions {
                         methods.insert(name.clone(), Type::builtin(id));
                     }
                 }
+                // Fields that aren't methods, with their types
+                if let Some(values) = object(definition, "values")? {
+                    for (name, ty) in values {
+                        let ty = ty.as_str().ok_or_else(|| format!("{table}.{name}: a value's type should be a string"))?;
+                        let ty = self.parse_type(ty).map_err(|e| format!("{table}.{name}: {e}"))?;
+                        methods.insert(name.clone(), ty);
+                    }
+                }
                 if key == "mixins" && definition.get("open").and_then(Value::as_bool) == Some(true) {
                     self.open_mixins.insert(table.clone());
                 }
@@ -1326,6 +1337,13 @@ mod tests {
         assert_eq!(d.field(info, "n"), Some(Type::of(TypeSet::NUMBER)));
         assert_eq!(d.type_text(d.field(info, "frame").unwrap()), "Frame|nil");
         assert!(Definitions::from_json(r#"{"types": {"Info": {"base": "table", "values": {"n": "nubmer"}}}}"#).is_err());
+        // A mixin's values are fields of what lists it, beside its methods
+        let d = Definitions::from_json(r#"{"types": {"F": {"base": "table", "mixins": ["M"]}},
+            "mixins": {"M": {"functions": {"Go": {}}, "values": {"count": "unknown"}}}}"#).unwrap();
+        let f = Type::named(d.named_type_id("F").unwrap(), TypeSet::TABLE);
+        assert_eq!(d.field(f, "count"), Some(Type::UNKNOWN));
+        assert!(d.field(f, "Go").is_some_and(|go| go.set == TypeSet::FUNCTION));
+        assert!(Definitions::from_json(r#"{"mixins": {"M": {"values": {"n": 1}}}}"#).is_err());
         assert!(Definitions::from_json(r#"{"types": {"E": {"base": "number"}}}"#).is_ok());
         assert!(Definitions::from_json(r#"{"types": {"table": {"base": "table"}}}"#).is_err());
         assert!(Definitions::from_json(r#"{"functions": {"f": {"returns": ["Missing"]}}}"#).is_err());

@@ -51,8 +51,8 @@ from the code itself, with no annotations needed.
     could be called (`` `stackCount` is number, not a function ``), when the
     field is one the WoW API declares or one a table made in the code is
     given, not when its type is a guess from fields of that name elsewhere.
-    Likewise for a local variable holding one where it's called (not a
-    parameter, whose type is only what the calls seen pass)
+    Likewise for a variable holding one where it's called: a local, a
+    parameter of a function whose every call is seen, or a global
   - operators on values that raise an error whatever they hold: arithmetic
     or `..` on a boolean or function (``Can't concatenate a boolean``), `#`
     of a number, boolean or function, and `<` and the like on two kinds of

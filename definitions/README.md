@@ -40,7 +40,9 @@ filename order; a later file's entry for a name replaces an earlier one.
   each with a type: `"values": { "Immediate": "Enum.StatusBarInterpolation" }`.
 - A table with `"open": true` may have functions beyond those listed (under
   computed keys), so what mixes it in isn't checked for missing methods.
-- `mixins` holds Lua mixins, each with its `functions` like a table's. A type
+- `mixins` holds Lua mixins, each with its `functions` like a table's, and
+  `values`: fields it sets that may hold a function but aren't sure to (of a
+  type that isn't known), with their types. A type
   can list `"mixins": ["ItemButtonMixin"]` to have their methods, after those
   of its `method_tables` and before inherited ones.
 - `types` declares named types: tables or userdata shown by their own name
@@ -113,4 +115,6 @@ Tags that aren't Lua names (`8.0_WARFRONTS_...`) are left out, as only
 
 `wow.json` is for WoW API functions the documentation doesn't cover, like the
 global `CreateFrame`. It loads after `blizzard_api.json`, so an entry here also
-replaces the generated one.
+replaces the generated one. That fixes what the documentation has wrong: a frame's
+attributes hold any value, though it gives `GetAttribute` and `SetAttribute`
+a `cstring`.
