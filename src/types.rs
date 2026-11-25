@@ -1016,6 +1016,14 @@ fn add_sites(to: &mut Vec<Site>, sites: &[Site]) {
     }
 }
 
+/// Something code assigns that other files see: a global, or a field of a
+/// table (see `Analysis::writes`)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Written {
+    Global(String),
+    Field(TableId, String),
+}
+
 /// What the addons an addon depends on make visible to it: their globals,
 /// functions and tables, from their own analyses. A dependent reads them but
 /// can't change them, so only an addon itself types its API, however many
@@ -2058,6 +2066,25 @@ impl Analysis {
     /// `addonTable.hiddenTable`
     pub fn field_path(&self, field: &FieldReference) -> String {
         field.path(&self.roots)
+    }
+
+    /// What each file assigns that other files can see: globals, and fields
+    /// of tables when it's known which table. In no particular order, with
+    /// repeats
+    pub fn writes(&self) -> Vec<(FileId, Written)> {
+        let mut writes = Vec::new();
+        for r in self.references.iter().filter(|r| r.write) {
+            let binding = self.binding(r);
+            if binding.kind == BindingKind::Global {
+                writes.push((r.file, Written::Global(binding.name.to_string())));
+            }
+        }
+        for f in self.field_references.iter().filter(|f| f.write) {
+            if let Some(at) = f.table {
+                writes.push((f.file, Written::Field(at, f.name().to_string())));
+            }
+        }
+        writes
     }
 
     /// The function a value is, if it's exactly one known function

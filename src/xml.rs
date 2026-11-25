@@ -67,6 +67,26 @@ pub fn read(path: &std::path::Path) -> std::io::Result<String> {
     })
 }
 
+/// The names `document` gives what it defines (templates, frames, fonts...),
+/// each with whether it's a global: one not in a template. Not those made from
+/// their parent's (`$parent...`), which are different in each
+pub fn defined_names(document: &roxmltree::Document) -> Vec<(String, bool)> {
+    fn visit(node: roxmltree::Node, in_template: bool, names: &mut Vec<(String, bool)>) {
+        for child in node.children().filter(|n| n.is_element()) {
+            let in_template = in_template || child.attribute("virtual").is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
+            if let Some(name) = child.attribute("name").map(str::trim).filter(|n| !n.is_empty()) {
+                if !name.to_ascii_lowercase().contains("$parent") {
+                    names.push((name.to_string(), !in_template));
+                }
+            }
+            visit(child, in_template, names);
+        }
+    }
+    let mut names = Vec::new();
+    visit(document.root_element(), false, &mut names);
+    names
+}
+
 /// The files `document` loads, in order
 pub fn loads(document: &roxmltree::Document) -> Vec<Load> {
     document.descendants()

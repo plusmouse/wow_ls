@@ -36,6 +36,18 @@
 //! `[ExcludeLoadGameType ...]` match `mainline` and `standard`. Lines with
 //! other variables, like `[TextLocale]`, are skipped. Other conditions are
 //! ignored, so their files load.
+//!
+//! The files other versions load are added too, where they'd load, so their
+//! code is checked and what they define is seen: for a `[Family]` or `[Game]`
+//! line, those for other values, like `Classic/A.lua` for `[Family]/A.lua`,
+//! and the files of lines whose conditions leave them out. Each comes with
+//! what it loads, if it's XML (see `Variant`). One is left out if it clashes
+//! with the current version's files, or with one before it that's kept: the
+//! game never loads them together, and their types would mix. XML clashes by
+//! naming what's named in other XML, when the `.toc` is read. Lua clashes by
+//! assigning a global or field the others assign (or those of the addons they
+//! depend on), or one their XML names, when the addon is analysed; its XML's
+//! templates and frames are still known then, as definitions come first.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,7 +56,7 @@ use std::sync::Arc;
 use crate::definitions::Definitions;
 use crate::syntax::SyntaxNode;
 use crate::syntax::syntax::Generator;
-use crate::types::{Analysis, Handler, Layer, SourceFile};
+use crate::types::{Analysis, FileId, Handler, HashSet, Layer, SourceFile, Written};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Addon {
@@ -57,18 +69,57 @@ pub struct Addon {
     /// The addons it needs or uses if they're there, which load before it, by
     /// name as written
     pub dependencies: Vec<String>,
+    /// What only other game versions load, whose files are in `files` and
+    /// `xml`, in load order, analysed only if they don't clash with the rest
+    pub variants: Vec<Variant>,
+}
+
+/// A file only other game versions load, with what it loads if it's XML and
+/// the current version doesn't: kept or left out together
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Variant {
+    /// The Lua files, in load order
+    pub files: Vec<PathBuf>,
+    /// The XML files, in load order
+    pub xml: Vec<PathBuf>,
 }
 
 impl Addon {
     pub fn load(toc: &Path) -> std::io::Result<Addon> {
         let text = std::fs::read_to_string(toc)?;
         let directory = toc.parent().unwrap_or(Path::new(""));
-        let (mut files, mut xml) = (Vec::new(), Vec::new());
-        for file in toc_files(&text) {
-            add_file(normalise(&directory.join(file)), &mut files, &mut xml);
+        let entries = toc_entries(&text);
+        // What the current version loads, which no variant brings
+        let (mut current_files, mut current_xml) = (Vec::new(), Vec::new());
+        for entry in entries.iter().filter(|entry| entry.loads) {
+            add_file(normalise(&directory.join(&entry.file)), &mut current_files, &mut current_xml);
+        }
+        let mut named: HashSet<String> = current_xml.iter().flat_map(|path| xml_names(path)).map(|(name, _)| name).collect();
+        let (mut files, mut xml, mut variants) = (Vec::new(), Vec::new(), Vec::new());
+        for entry in &entries {
+            if entry.loads {
+                add_file(normalise(&directory.join(&entry.file)), &mut files, &mut xml);
+            }
+            for path in other_versions(directory, entry) {
+                let mut variant = Variant::default();
+                add_file(normalise(&path), &mut variant.files, &mut variant.xml);
+                variant.files.retain(|f| !current_files.contains(f) && !files.contains(f));
+                variant.xml.retain(|f| !current_xml.contains(f) && !xml.contains(f));
+                if variant.files.is_empty() && variant.xml.is_empty() {
+                    continue
+                }
+                let names: Vec<String> = variant.xml.iter().flat_map(|path| xml_names(path)).map(|(name, _)| name).collect();
+                if names.iter().any(|name| named.contains(name)) {
+                    continue
+                }
+                named.extend(names);
+                files.extend(variant.files.iter().cloned());
+                xml.extend(variant.xml.iter().cloned());
+                variants.push(variant);
+            }
         }
         let name = directory.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        Ok(Addon { name, toc: normalise(toc), files, xml, dependencies: toc_dependencies(&text) })
+        Ok(Addon { name, toc: normalise(toc), files, xml, dependencies: toc_dependencies(&text), variants })
     }
 
     /// The addons this one names as dependencies that can be found: among
@@ -202,8 +253,9 @@ fn analyse_visiting(addon: &Addon, known: &[Addon], open: &HashMap<PathBuf, Stri
         }
     }
     visiting.pop();
-    let (analysis, paths, scripts) = addon.analyse(Arc::new(layer), open, definitions);
-    for path in &paths {
+    let (analysis, paths, scripts) = analyse_without_clashes(addon, Arc::new(layer), open, definitions);
+    // Those left out too, as a change may stop them clashing
+    for path in paths.iter().chain(addon.variants.iter().flat_map(|v| &v.files)) {
         if !involves.contains(path) {
             involves.push(path.clone());
         }
@@ -211,6 +263,87 @@ fn analyse_visiting(addon: &Addon, known: &[Addon], open: &HashMap<PathBuf, Stri
     let analysed = Arc::new(Analysed { addon: addon.clone(), analysis, paths, scripts, involves, layer: Default::default() });
     cache.insert(addon.toc.clone(), analysed.clone());
     analysed
+}
+
+/// `addon.analyse`, leaving out the files other game versions load that
+/// clash with the rest (see `clashing_variants`). Those clashing in one
+/// analysis are left out of the next until none do
+fn analyse_without_clashes(addon: &Addon, layer: Arc<Layer>, open: &HashMap<PathBuf, String>, definitions: &Arc<Definitions>) -> (Analysis, Vec<PathBuf>, Vec<PathBuf>) {
+    let mut kept = addon.clone();
+    loop {
+        let (analysis, paths, scripts) = kept.analyse(layer.clone(), open, definitions);
+        let clashing = clashing_variants(&analysis, &paths, &scripts, &kept);
+        if clashing.is_empty() {
+            return (analysis, paths, scripts)
+        }
+        for variant in clashing.iter().map(|&i| &kept.variants[i]) {
+            kept.files.retain(|f| !variant.files.contains(f));
+            kept.xml.retain(|f| !variant.xml.contains(f));
+        }
+        kept.variants = std::mem::take(&mut kept.variants).into_iter().enumerate()
+            .filter(|(index, _)| !clashing.contains(index))
+            .map(|(_, variant)| variant)
+            .collect();
+    }
+}
+
+/// Of `addon`'s variants, by position, those that assign a global or a field
+/// of a table that the rest of its files (`paths`, then the handlers of its
+/// XML, `scripts`) assign, or that the addons depended on do, or that a
+/// variant before them that doesn't clash does. Its XML's frames count as
+/// assigning their globals
+fn clashing_variants(analysis: &Analysis, paths: &[PathBuf], scripts: &[PathBuf], addon: &Addon) -> Vec<usize> {
+    if addon.variants.is_empty() {
+        return Vec::new()
+    }
+    let in_xml = |script: &PathBuf, xml: &PathBuf| script.to_string_lossy().rsplit_once('#').is_some_and(|(path, _)| Path::new(path) == xml);
+    let variant_of = |file: FileId| {
+        let index = file.0 as usize;
+        match paths.get(index) {
+            Some(path) => addon.variants.iter().position(|v| v.files.contains(path)),
+            None => {
+                let script = scripts.get(index - paths.len())?;
+                addon.variants.iter().position(|v| v.xml.iter().any(|xml| in_xml(script, xml)))
+            }
+        }
+    };
+    let mut taken: HashSet<Written> = HashSet::default();
+    let mut by_variant: Vec<Vec<Written>> = vec![Vec::new(); addon.variants.len()];
+    for (file, written) in analysis.writes() {
+        match variant_of(file) {
+            Some(variant) => by_variant[variant].push(written),
+            None => { taken.insert(written); }
+        }
+    }
+    for xml in &addon.xml {
+        let globals = xml_names(xml).into_iter().filter(|&(_, global)| global).map(|(name, _)| Written::Global(name));
+        match addon.variants.iter().position(|v| v.xml.contains(xml)) {
+            Some(variant) => by_variant[variant].extend(globals),
+            None => taken.extend(globals),
+        }
+    }
+    let layer = &analysis.layer;
+    taken.extend(layer.globals.keys().map(|name| Written::Global(name.clone())));
+    for (&at, fields) in &layer.field_sites {
+        taken.extend(fields.keys().map(|name| Written::Field(at, name.clone())));
+    }
+    let mut clashing = Vec::new();
+    for (index, writes) in by_variant.into_iter().enumerate() {
+        if writes.iter().any(|w| taken.contains(w)) {
+            clashing.push(index);
+        } else {
+            taken.extend(writes);
+        }
+    }
+    clashing
+}
+
+/// The names an XML file gives what it defines, with whether each is a
+/// global (see `xml::defined_names`). None if it can't be read
+fn xml_names(path: &Path) -> Vec<(String, bool)> {
+    let Ok(text) = crate::xml::read(path) else { return Vec::new() };
+    let Ok(document) = crate::xml::parse(&text) else { return Vec::new() };
+    crate::xml::defined_names(&document)
 }
 
 /// An XML file that doesn't parse: where (a byte offset into its text), and why
@@ -340,28 +473,100 @@ pub fn is_xml(path: &Path) -> bool {
 /// The Lua and XML files a `.toc` lists that load in the current game version,
 /// as written (relative to its folder)
 pub fn toc_files(text: &str) -> Vec<PathBuf> {
-    let mut files = Vec::new();
+    toc_entries(text).into_iter().filter(|entry| entry.loads).map(|entry| entry.file).collect()
+}
+
+/// A Lua or XML file a `.toc` lists
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TocEntry {
+    /// As written (relative to the `.toc`'s folder), as the current game
+    /// version reads it
+    pub file: PathBuf,
+    /// For one under `[Family]` or `[Game]`, as written with them left in, to
+    /// find the files other versions load in its place by
+    pub template: Option<PathBuf>,
+    /// Whether its conditions let it load in the current version
+    pub loads: bool,
+}
+
+/// The Lua and XML files a `.toc` lists, in order
+pub fn toc_entries(text: &str) -> Vec<TocEntry> {
+    let mut entries = Vec::new();
     for line in text.lines() {
         let line = line.trim_start_matches('\u{feff}').trim();
         if line.is_empty() || line.starts_with('#') {
             continue
         }
-        let line = line.replace("[Family]", "Mainline").replace("[Game]", "Standard");
         // Loading conditions after the path, like `File.lua [AllowLoadGameType mainline]`
         let split = line.char_indices()
             .find(|&(i, c)| c == '[' && line[..i].ends_with(char::is_whitespace))
             .map_or(line.len(), |(i, _)| i);
-        let (entry, conditions) = (line[..split].trim(), &line[split..]);
-        if !conditions.split('[').all(loads_here) {
-            continue
-        }
+        let (written, conditions) = (line[..split].trim(), &line[split..]);
+        let loads = conditions.split('[').all(loads_here);
+        let entry = written.replace("[Family]", "Mainline").replace("[Game]", "Standard");
         let lower = entry.to_ascii_lowercase();
         if entry.contains('[') || !(lower.ends_with(".lua") || lower.ends_with(".xml")) {
             continue
         }
-        files.push(PathBuf::from(entry.replace('\\', "/")));
+        let template = (entry != written).then(|| PathBuf::from(written.replace('\\', "/")));
+        entries.push(TocEntry { file: PathBuf::from(entry.replace('\\', "/")), template, loads });
     }
-    files
+    entries
+}
+
+/// The files there are that other game versions load for a `.toc` entry (in
+/// `directory`'s `.toc`) and the current version doesn't: for one under
+/// `[Family]` or `[Game]`, those for other values, and for one whose
+/// conditions leave it out, its own
+fn other_versions(directory: &Path, entry: &TocEntry) -> Vec<PathBuf> {
+    let current = ignoring_case(directory.join(&entry.file));
+    match &entry.template {
+        Some(template) => variant_files(directory, template).into_iter()
+            .filter(|path| !entry.loads || path.to_string_lossy().to_lowercase() != current.to_string_lossy().to_lowercase())
+            .collect(),
+        None if !entry.loads && current.is_file() => vec![current],
+        None => Vec::new(),
+    }
+}
+
+/// The Lua and XML files there are for a `.toc` entry under `[Family]` or
+/// `[Game]` (`template`, relative to `directory`) with the variables standing
+/// for any name, as `Classic/A.lua` and `Mainline/A.lua` are for
+/// `[Family]/A.lua`, ignoring case as the game does. Sorted by name
+fn variant_files(directory: &Path, template: &Path) -> Vec<PathBuf> {
+    let mut found = vec![directory.to_path_buf()];
+    for component in template.components() {
+        let part = component.as_os_str().to_string_lossy();
+        if !part.contains("[Family]") && !part.contains("[Game]") {
+            found = found.into_iter().map(|path| ignoring_case(path.join(&*part))).collect();
+            continue
+        }
+        let pieces: Vec<String> = part.replace("[Family]", "\0").replace("[Game]", "\0").to_lowercase().split('\0').map(str::to_string).collect();
+        let mut next = Vec::new();
+        for parent in found {
+            let mut names: Vec<String> = std::fs::read_dir(&parent).into_iter().flatten().flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| !name.starts_with('.') && matches_pieces(&pieces, &name.to_lowercase()))
+                .collect();
+            names.sort();
+            next.extend(names.iter().map(|name| parent.join(name)));
+        }
+        found = next;
+    }
+    found.retain(|path| path.is_file() && (is_xml(path) || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lua"))));
+    found
+}
+
+/// Whether `name` is `pieces` with something (at least a character) between
+/// each two
+fn matches_pieces(pieces: &[String], name: &str) -> bool {
+    let Some((first, rest)) = pieces.split_first() else { return name.is_empty() };
+    let Some(name) = name.strip_prefix(first.as_str()) else { return false };
+    if rest.is_empty() {
+        return name.is_empty()
+    }
+    name.char_indices().skip(1).map(|(i, _)| i).chain([name.len()]).filter(|&i| i > 0)
+        .any(|i| matches_pieces(rest, &name[i..]))
 }
 
 /// Whether a `.toc` loading condition, like `AllowLoadGameType mainline, classic]`
@@ -520,6 +725,77 @@ mod tests {
     }
 
     #[test]
+    fn adds_other_versions_files_that_dont_clash() {
+        let directory = std::env::temp_dir().join(format!("wow_ls_variants_{}", std::process::id())).join("Variants");
+        let write = |path: &str, text: &str| {
+            let path = directory.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("Variants.toc", "Core.lua\n[Family]\\Bags.lua\nLoot_[Game].lua\n[Family]\\Frames.xml\nClassicOnly.lua [AllowLoadGameType classic]\nClash.lua [ExcludeLoadGameType mainline]\nLater.lua\n");
+        write("Core.lua", "local _, ns = ... ns.Shared = {}");
+        write("Mainline/Bags.lua", "local _, ns = ... function ns.Shared.Open() end MainlineOnly = 1");
+        // Assigns what the mainline file does
+        write("Classic/Bags.lua", "local _, ns = ... function ns.Shared.Open() end");
+        // Assigns only its own
+        write("Vanilla/Bags.lua", "local _, ns = ... function ns.Shared.VanillaOpen() end VanillaOnly = 1");
+        write("Vanilla/Bags.xml", "<Ui/>");
+        // No mainline file (it is listed, but not read): the first kept, the one after assigning the same left out
+        write("Loot_Mists.lua", "LootHelper = 1 function GetLoot() return LootHelper end");
+        write("Loot_Wrath.lua", "LootHelper = 2");
+        write("Loot_.lua", "Empty = 1");
+        write("Mainline/Frames.xml", r#"<Ui><Script file="Frames.lua"/><Frame name="MainFrame"/><Frame name="Template" virtual="true"><Frames><Frame name="$parentChild"/></Frames></Frame></Ui>"#);
+        write("Mainline/Frames.lua", "");
+        // Names a template the mainline XML does: left out with its Lua
+        write("Classic/Frames.xml", r#"<Ui><Script file="ClassicFrames.lua"/><Frame name="Template" virtual="true"/></Ui>"#);
+        write("Classic/ClassicFrames.lua", "ClassicFrames = 1");
+        // Its own names, and a Lua file of its own: kept together. A child
+        // made from its parent's name isn't a clash
+        write("Vanilla/Frames.xml", r#"<Ui><Script file="VanillaFrames.lua"/><Include file="..\Mainline\Frames.xml"/><Frame name="VanillaFrame"><Frames><Frame name="$parentChild"/></Frames></Frame></Ui>"#);
+        write("Vanilla/VanillaFrames.lua", "VanillaFrames = VanillaFrame");
+        // Names a global the mainline Lua assigns, in a handler
+        write("Mists/Frames.xml", r#"<Ui><Script file="MistsFrames.lua"/><Frame name="MistsFrame"><Scripts><OnLoad>MainlineOnly = 2</OnLoad></Scripts></Frame></Ui>"#);
+        write("Mists/MistsFrames.lua", "MistsFrames = 1");
+        // Its frame is a global the mainline XML makes
+        write("Wrath/Frames.xml", r#"<Ui><Script file="WrathFrames.lua"/></Ui>"#);
+        write("Wrath/WrathFrames.lua", "MainFrame = 1");
+        // Lines the current version leaves out
+        write("ClassicOnly.lua", "ClassicOnly = 1");
+        write("Clash.lua", "VanillaOnly = 2");
+        write("Later.lua", "local _, ns = ... ns.Shared.VanillaOpen()");
+        let addon = Addon::load(&directory.join("Variants.toc")).unwrap();
+        let relative = |paths: &[PathBuf]| -> Vec<String> {
+            let root = normalise(&directory);
+            paths.iter().map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().into_owned()).collect()
+        };
+        assert_eq!(relative(&addon.files), [
+            "Core.lua", "Mainline/Bags.lua", "Classic/Bags.lua", "Vanilla/Bags.lua", "Loot_Standard.lua", "Loot_Mists.lua", "Loot_Wrath.lua",
+            "Mainline/Frames.lua", "Mists/MistsFrames.lua", "Vanilla/VanillaFrames.lua", "Wrath/WrathFrames.lua", "ClassicOnly.lua", "Clash.lua", "Later.lua",
+        ]);
+        assert_eq!(relative(&addon.xml), ["Mainline/Frames.xml", "Mists/Frames.xml", "Vanilla/Frames.xml", "Wrath/Frames.xml"]);
+        let variants: Vec<Vec<String>> = addon.variants.iter().map(|v| [relative(&v.xml), relative(&v.files)].concat()).collect();
+        assert_eq!(variants, [
+            vec!["Classic/Bags.lua"], vec!["Vanilla/Bags.lua"], vec!["Loot_Mists.lua"], vec!["Loot_Wrath.lua"],
+            // Not the mainline XML the Vanilla one includes
+            vec!["Mists/Frames.xml", "Mists/MistsFrames.lua"], vec!["Vanilla/Frames.xml", "Vanilla/VanillaFrames.lua"], vec!["Wrath/Frames.xml", "Wrath/WrathFrames.lua"],
+            vec!["ClassicOnly.lua"], vec!["Clash.lua"],
+        ]);
+        let definitions = Arc::new(Definitions::from_json(r#"{"types": {"Frame": {"base": "table", "method_tables": ["FrameAPI"]}}, "method_tables": {"FrameAPI": {"functions": {"Show": {}}}}, "elements": {"Frame": "Frame"}}"#).unwrap());
+        let (definitions, errors) = with_xml(&definitions, &addon.xml, &HashMap::new(), &mut HashMap::new());
+        assert!(errors.is_empty());
+        let analysed = analyse_addon(&addon, &[], &HashMap::new(), &definitions, &mut HashMap::new());
+        assert_eq!(relative(&analysed.paths), ["Core.lua", "Mainline/Bags.lua", "Vanilla/Bags.lua", "Loot_Mists.lua", "Mainline/Frames.lua", "Vanilla/VanillaFrames.lua", "ClassicOnly.lua", "Later.lua"]);
+        // Not the handler of the XML left out
+        assert_eq!(analysed.scripts.len(), 0);
+        // A change to one left out may stop it clashing
+        assert!(analysed.involves.contains(&addon.variants[0].files[0]));
+        // What the ones kept make is seen by the rest
+        assert_eq!(assigned(&analysed, "VanillaOnly"), "number");
+        assert_eq!(assigned(&analysed, "VanillaFrames"), "Frame");
+        std::fs::remove_dir_all(directory.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn reads_toc_dependencies() {
         let toc = "## Interface: 110000\n## OptionalDeps: Syndicator, Masque\n## RequiredDeps: LibA\n## Dependencies: LibB, liba\n## DepsExtra: LibC\n## SavedVariables: X\nCore.lua\n";
         assert_eq!(toc_dependencies(toc), ["Syndicator", "Masque", "LibA", "LibB", "LibC"]);
@@ -536,6 +812,7 @@ mod tests {
             files: Vec::new(),
             xml: Vec::new(),
             dependencies: dependencies.iter().map(|d| d.to_string()).collect(),
+            variants: Vec::new(),
         };
         let known = [addon("Core", &[]), addon("Lib", &["Core"]), addon("Main", &["Lib", "core", "Missing", "Main", "Lib"])];
         let names: Vec<String> = known[2].direct_dependencies(&known).into_iter().map(|a| a.name).collect();
@@ -707,7 +984,7 @@ mod tests {
   </Button>
 </Ui>"#.to_string());
         open.insert(lua.clone(), "M = {} function M:Get() return self end C = {} function C:Get() return self end".to_string());
-        let addon = Addon { name: "Inline".into(), toc: "/nowhere/Inline/Inline.toc".into(), files: vec![lua.clone()], xml: vec![xml.clone()], dependencies: Vec::new() };
+        let addon = Addon { name: "Inline".into(), toc: "/nowhere/Inline/Inline.toc".into(), files: vec![lua.clone()], xml: vec![xml.clone()], dependencies: Vec::new(), variants: Vec::new() };
         let (definitions, errors) = with_xml(&definitions, std::slice::from_ref(&xml), &open, &mut HashMap::new());
         assert!(errors.is_empty());
         let analysed = analyse_addon(&addon, &[], &open, &definitions, &mut HashMap::new());

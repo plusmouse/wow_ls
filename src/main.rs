@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
                 println!("error {}:{}:{} {}", error.path.display(), line.0 + 1, column + 1, error.message);
             }
             analysed = project::analyse_addon(&addon, &[], &Default::default(), &definitions, &mut Default::default());
-            dependency_files = analysed.involves.len() - analysed.paths.len();
+            dependency_files = analysed.involves.iter().filter(|p| !addon.files.contains(p)).count();
             (&analysed.analysis, analysed.paths.clone())
         } else {
             let s = std::fs::read_to_string(target)?;
