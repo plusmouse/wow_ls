@@ -398,7 +398,63 @@ impl Definitions {
         }
         definitions.compose()?;
         definitions.add_templates(files);
+        definitions.add_mixin_types();
         Ok(definitions)
+    }
+
+    /// For each function returning a new table with only globals mixed in
+    /// (see `FreshObject`), the table's type: one for each list of globals,
+    /// with their members, the last listed winning as `Mixin` does. Named by
+    /// the globals (`ColorMixin`, `A & B`), each table one of that type, so
+    /// any number of them together keep what they have, as frames do
+    fn add_mixin_types(&mut self) {
+        let mut made: HashMap<Vec<String>, NamedId> = HashMap::default();
+        for index in 0..self.functions.len() {
+            for slot in 0..self.functions[index].fresh_returns.len() {
+                let Some(fresh) = &self.functions[index].fresh_returns[slot] else { continue };
+                if fresh.mixin_globals.is_empty() || !fresh.mixed_parameters.is_empty() {
+                    continue
+                }
+                let Some(&returned) = self.functions[index].returns.values.get(slot) else { continue };
+                // Only a plain table: not one already of a type
+                if returned.named.named_id().is_some() || !returned.set.contains(TypeSet::TABLE) {
+                    continue
+                }
+                let globals = fresh.mixin_globals.clone();
+                let id = match made.get(&globals) {
+                    Some(&id) => id,
+                    None => {
+                        let Some(id) = self.mixin_type(&globals) else { continue };
+                        made.insert(globals, id);
+                        id
+                    }
+                };
+                let set = returned.set;
+                self.functions[index].returns.values[slot] = Type { named: NamedRef::One(id), ..Type::of(set) };
+            }
+        }
+    }
+
+    /// A type with the members of the global tables `globals`, the last
+    /// winning. Its methods are known unless one of them may have more. None
+    /// if one isn't a table the definitions give
+    fn mixin_type(&mut self, globals: &[String]) -> Option<NamedId> {
+        let mut fields: HashMap<String, Type> = HashMap::default();
+        let mut open = false;
+        for global in globals {
+            let table = self.global(global)?.named.named_id()?;
+            let named = &self.types[table as usize];
+            if !named.namespace {
+                return None
+            }
+            open |= self.open_tables.contains(&table);
+            fields.extend(named.fields.iter().map(|(name, &ty)| (name.clone(), ty)));
+        }
+        let id = self.types.len() as NamedId;
+        self.types.push(NamedType {
+            name: globals.join(" & "), base: TypeSet::TABLE, fields, inherits: Vec::new(), has_methods: !open, namespace: false,
+        });
+        Some(id)
     }
 
     /// A type for each template of `templates` (of its own name) and named

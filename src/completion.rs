@@ -451,6 +451,15 @@ mod tests {
     }
 
     #[test]
+    fn methods_of_tables_blizzards_functions_make() {
+        // Each `CreateColor` call a new table with `ColorMixin`: any of them
+        // has its methods, however many
+        let colors: Vec<String> = (0..9).map(|i| format!("[{i}] = CreateColor({i}/255, 1, 1)")).collect();
+        let c = complete_at(&format!("local qualityColors = {{ {} }}\nlocal a = qualityColors[1]\na:GetRG|", colors.join(", ")));
+        assert!(names_of(&c).contains(&"GetRGB"), "{:?}", names_of(&c));
+    }
+
+    #[test]
     fn nothing_in_strings_comments_or_after_concat_dots() {
         assert!(complete_at("local s = \"a.|\"").candidates.is_empty());
         assert!(complete_at("-- t.|").candidates.is_empty());

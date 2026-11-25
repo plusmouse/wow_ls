@@ -260,6 +260,41 @@ const PSEUDO: u32 = 1 << 30;
 /// that table is, so it's the same on every walk
 const COPY: u32 = 1 << 29;
 
+/// Added to the slot of a table one of the definitions' functions returns new
+/// at a call (see `FreshObject`), with the function's id above `FAMILY_SHIFT`
+/// and the return's slot below. Every table that function makes at that
+/// return is of one family, which stands for any of them (see `family`)
+const FAMILY_MEMBER: u32 = 1 << 28;
+const FAMILY_SHIFT: u32 = 8;
+/// The most functions of the definitions whose tables have a family
+const MOST_FAMILIES: u32 = 1 << 20;
+
+/// The pseudo file of families' identities: past any file's and those of
+/// dependencies (`LAYER_FILES`), and before those of namespaces
+const FAMILIES: FileId = FileId(u32::MAX - (1 << 20));
+
+/// The identity of a new table the definitions' function `function` returns
+/// at a call at `at`, in return position `slot`, if it can have one
+fn family_member(at: Location, function: BuiltinId, slot: usize) -> Option<Location> {
+    let function = u32::try_from(function).ok().filter(|&f| f < MOST_FAMILIES)?;
+    let slot = u32::try_from(slot).ok().filter(|&s| s + 1 < 1 << FAMILY_SHIFT)?;
+    Some(Location { slot: FAMILY_MEMBER | function << FAMILY_SHIFT | (slot + 1), ..at })
+}
+
+/// For a table one of the definitions' functions made, or that function's
+/// family itself, the family: one identity for every table it makes there,
+/// which a union of several of them is, holding what each was given. Other
+/// tables have none
+fn family(at: Location) -> Option<Location> {
+    if at.file == FAMILIES {
+        return Some(at)
+    }
+    if at.slot & (POOL_OBJECT | PSEUDO | COPY) != 0 || at.slot & FAMILY_MEMBER == 0 {
+        return None
+    }
+    Some(Location { file: FAMILIES, offset: TextSize::new(0), slot: at.slot })
+}
+
 /// Which function a value is, when it can be one
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum FunctionRef {
@@ -371,6 +406,8 @@ impl NamedRef {
         match (self, other) {
             (NamedRef::None, x) | (x, NamedRef::None) => x,
             (a, b) if a == b => a,
+            // Tables of one family: its identity
+            (a, b) if a.in_family().is_some() && a.in_family() == b.in_family() => a.in_family().unwrap(),
             (a, b) => match (a.objects(), b.objects()) {
                 (Some(mut all), Some(more)) => {
                     all.extend(more);
@@ -378,6 +415,18 @@ impl NamedRef {
                 }
                 _ => NamedRef::Unknown,
             },
+        }
+    }
+
+    /// For a table or object of a family (see `family`), the family's, as
+    /// it's shown when it may be any of them
+    fn in_family(self) -> Option<NamedRef> {
+        match self {
+            NamedRef::Table(at) => Some(NamedRef::Table(family(at)?)),
+            // Whether one may have members beyond its type's isn't up to the
+            // call that made it
+            NamedRef::Instance { named, at, extended } => Some(NamedRef::Instance { named, at: family(at)?, extended }),
+            _ => None,
         }
     }
 
@@ -400,6 +449,15 @@ impl NamedRef {
     /// same type of unknown object, is joined, as is any number past
     /// `MOST_OBJECTS`, to the closest type they all are
     fn several(mut objects: Vec<NamedRef>) -> NamedRef {
+        // Several of a family are its identity
+        let families: Vec<Option<NamedRef>> = objects.iter().map(|o| o.in_family()).collect();
+        for (i, object) in objects.iter_mut().enumerate() {
+            if let Some(family) = families[i] {
+                if families.iter().enumerate().any(|(j, f)| j != i && *f == Some(family)) {
+                    *object = family;
+                }
+            }
+        }
         objects.sort();
         let mut joined: Vec<NamedRef> = Vec::with_capacity(objects.len());
         for object in objects {
@@ -3525,8 +3583,23 @@ impl<'a> Walker<'a> {
         self.record_write(write);
     }
 
-    /// What a write changes, without noting it for the bodies being walked
+    /// What a write changes, without noting it for the bodies being walked.
+    /// What a table of a family is given, the family is too
     fn effect(&mut self, write: &Write) {
+        let family_write = match write {
+            Write::Field(at, name, value) => family(*at).filter(|f| f != at).map(|f| vec![Write::Field(f, name.clone(), *value)]),
+            Write::Entry(at, key, value) => family(*at).filter(|f| f != at).map(|f| vec![Write::Entry(f, *key, *value)]),
+            Write::MixinAdded(at, mixin) => family(*at).filter(|f| f != at).map(|f| vec![Write::MixinAdded(f, *mixin)]),
+            Write::MixinsReplaced(at, mixins) => family(*at).filter(|f| f != at).map(|f| mixins.iter().map(|&m| Write::MixinAdded(f, m)).collect()),
+            _ => None,
+        };
+        for write in family_write.into_iter().flatten() {
+            self.effect_here(&write);
+        }
+        self.effect_here(write);
+    }
+
+    fn effect_here(&mut self, write: &Write) {
         /// The entry for `name`, copying the name only when it's new
         fn named<'m, V: Default>(map: &'m mut HashMap<String, V>, name: &str) -> &'m mut V {
             if !map.contains_key(name) {
@@ -4266,7 +4339,7 @@ impl<'a> Walker<'a> {
                 let mut returns = self.returns_of(id);
                 for (slot, fresh) in fresh_returns.iter().enumerate() {
                     if let (Some(fresh), Some(&value)) = (fresh, returns.values.get(slot)) {
-                        returns.values[slot] = self.fresh_object(call, slot, value, fresh, &parameter_types, &arguments, offset);
+                        returns.values[slot] = self.fresh_object(call, slot, value, fresh, &parameter_types, &arguments, offset, None);
                     }
                 }
                 returns
@@ -4280,10 +4353,11 @@ impl<'a> Walker<'a> {
                 .unwrap_or_else(|| {
                     // A definition's function returning a new table at each
                     // call, with arguments mixed in
+                    let builtin = match callee.function { FunctionRef::Builtin(id) => Some(id), _ => None };
                     let mut returns = documented.clone();
                     for (slot, fresh) in fresh_returns.iter().enumerate() {
                         if let (Some(fresh), Some(&value)) = (fresh, returns.values.get(slot)) {
-                            returns.values[slot] = self.fresh_object(call, slot, value, fresh, &argument_types, &arguments, 0);
+                            returns.values[slot] = self.fresh_object(call, slot, value, fresh, &argument_types, &arguments, 0, builtin);
                         }
                     }
                     returns
@@ -5049,8 +5123,12 @@ impl<'a> Walker<'a> {
 
     /// `expressions` are the call's arguments, each `offset` from the
     /// parameter it fills (see `pending_call`)
-    fn fresh_object(&mut self, call: &FunctionCall, slot: usize, value: Type, fresh: &FreshObject, arguments: &Values, expressions: &[Expression], offset: isize) -> Type {
-        let at = Location { slot: slot as u32 + 1, ..self.location(call.syntax().text_range().start()) };
+    /// `function` is the definitions' function called, if it's one, whose
+    /// tables are of a family (see `family`)
+    fn fresh_object(&mut self, call: &FunctionCall, slot: usize, value: Type, fresh: &FreshObject, arguments: &Values, expressions: &[Expression], offset: isize, function: Option<BuiltinId>) -> Type {
+        let here = self.location(call.syntax().text_range().start());
+        let at = function.and_then(|function| family_member(here, function, slot))
+            .unwrap_or(Location { slot: slot as u32 + 1, ..here });
         // Passing on a parameter of the function calling, so each call to that
         // mixes in what it passes, as for `CreateFromMixins(parameter)`
         let caller = self.function_ranges.last().map(|&(_, function)| function);
@@ -5065,11 +5143,20 @@ impl<'a> Walker<'a> {
             NamedRef::Instance { named, extended, .. } => NamedRef::Instance { named, at, extended },
             // A definition's `table`
             NamedRef::None | NamedRef::Unknown if value.set.contains(TypeSet::TABLE) && fresh.made.is_none() => NamedRef::Table(at),
+            // A definition's table of the type its mixins make (see
+            // `Definitions::add_mixin_types`): one of that type
+            NamedRef::One(named) if fresh.made.is_none() => {
+                let extended = !self.definitions.named_type(named).is_some_and(|t| t.has_methods);
+                NamedRef::Instance { named, at, extended }
+            }
             other => return Type { named: other, ..value },
         };
         // What the function made, for the fields it set there
         let mut mixins: Vec<Type> = value.named.identity().map(|_| value).into_iter().collect();
-        mixins.extend(fresh.mixin_globals.iter().filter_map(|name| self.definitions.global(name)));
+        // Unless the type it is has them (see `Definitions::add_mixin_types`)
+        if !matches!(named, NamedRef::Instance { .. }) {
+            mixins.extend(fresh.mixin_globals.iter().filter_map(|name| self.definitions.global(name)));
+        }
         mixins.extend(fresh.mixed_parameters.iter().map(|&i| arguments.get(i)));
         for mixin in &mixins {
             self.record_mixed_into(*mixin, named);
@@ -7144,6 +7231,28 @@ mod tests {
             local function Insert(on, ...) local first = ... if first == nil then return end on:Insert(first) Insert(on, select(2, ...)) end
             Insert(A, 1, 2)"]);
         assert!(analysis.walks < 10);
+    }
+
+    #[test]
+    fn tables_of_a_family() {
+        // Any number of the tables a definition's function makes, together,
+        // are of its family: its mixins' type, with what any was given
+        let footers: Vec<String> = (0..12).map(|_| "CreateFooter()".to_string()).collect();
+        let analysis = analyse_mixins(&[&format!("local all = {{ {} }} all[2].label = 's'
+            local any = all[1] local done, label = any:Finalize(), any.label
+            local one = CreateFooter() one.own = 1 local own, other = one.own, CreateFooter().own", footers.join(", "))]);
+        assert_eq!(types_in(&analysis, 0, "any")[0], "FooterMixin?");
+        assert_eq!(types_in(&analysis, 0, "done"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "label"), ["string"]);
+        // Each still has its own fields
+        assert_eq!(types_in(&analysis, 0, "own"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "other"), ["unknown"]);
+        // Mixing in what it's passed: each call's own, any of them all of them
+        let analysis = analyse_mixins(&["local A = {} function A:Name() return 's' end local B = {} function B:Size() return 1 end
+            local all = { CreateAndInitFromMixin(A), CreateAndInitFromMixin(B) } local any = all[1]
+            local name, size, a = any:Name(), any:Size(), CreateAndInitFromMixin(A).Size"]);
+        assert_eq!(types_in(&analysis, 0, "name"), ["string"]);
+        assert_eq!(types_in(&analysis, 0, "size"), ["number"]);
     }
 
     #[test]
