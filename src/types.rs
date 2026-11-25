@@ -653,20 +653,51 @@ pub struct FunctionInfo {
     pub returns: Values,
     /// For each return value that's a table or object the function makes, so
     /// each call returns a new one: the one made in the function (whose fields
-    /// and parent each call's gets), and the parameters it mixes in
+    /// and parent each call's gets), and the parameters it mixes in. For a
+    /// function of the definitions, they're the call's arguments by position
     pub fresh_returns: Vec<Option<FreshObject>>,
     /// The functions whose results its body uses, by calling them, so calls
     /// that come back round to it are known to be recursive
     pub calls: Vec<FunctionId>,
+    /// The methods it calls whose function depends on its arguments, for each
+    /// call to it to call with its own
+    pub forwarded_calls: Vec<ForwardedCall>,
+}
+
+/// A method a function calls on what a parameter is, or on a table it makes
+/// with parameters mixed in, as `CreateAndInitFromMixin(mixin, ...)` calls
+/// `Init` on its new table: which function that is is up to each call's
+/// arguments, so each call to the function calls it, with its own
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ForwardedCall {
+    /// The parameters whose arguments may hold the method, the last first
+    pub on: Vec<usize>,
+    pub method: String,
+    pub arguments: Vec<Forwarded>,
+}
+
+/// An argument of a `ForwardedCall`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Forwarded {
+    /// What the function was passed for a parameter, by position
+    Parameter(usize),
+    /// Its `...`: what it was passed beyond its parameters. Only last
+    Rest,
+    Value(Type),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FreshObject {
-    pub made: TableId,
+    /// The table or object it makes, if it's made in the files analysed or
+    /// those of their dependencies (not for a function of the definitions)
+    pub made: Option<TableId>,
     pub mixed_parameters: Vec<usize>,
     /// When it's a pool, the parameters mixed into its objects (by its init
     /// or reset function)
     pub pool_mixed_parameters: Option<Vec<usize>>,
+    /// For a function of the definitions, the globals mixed in besides the
+    /// parameters, by name. One made in the files has them through `made`
+    pub mixin_globals: Vec<String>,
 }
 
 /// What calling a function reads of it: all but what it calls, which
@@ -680,6 +711,7 @@ impl PartialEq for Signature<'_> {
         a.method == b.method && a.varargs == b.varargs && a.returns == b.returns && a.fresh_returns == b.fresh_returns
             && a.parameters.len() == b.parameters.len()
             && a.parameters.iter().zip(&b.parameters).all(|(a, b)| a.name == b.name && a.mandated == b.mandated)
+            && a.forwarded_calls == b.forwarded_calls
     }
 }
 
@@ -787,6 +819,10 @@ pub struct FieldReference {
     /// For a callee, what this call returns when that's more than the function
     /// says (a pool's `Acquire` giving the pool's object)
     pub call_returns: Option<Values>,
+    /// For a method a `ForwardedCall` stands for, the function calling it,
+    /// each of whose calls resolves it: not a read of a function it can't
+    /// tell, if every call to that is seen
+    pub forwarded: Option<FunctionId>,
 }
 
 impl FieldReference {
@@ -1278,10 +1314,17 @@ fn renumber_function(info: &FunctionInfo, file: &impl Fn(FileId) -> FileId) -> F
         varargs: info.varargs.as_ref().map(parameter),
         returns: renumber_values(&info.returns, file),
         fresh_returns: info.fresh_returns.iter().map(|fresh| fresh.as_ref().map(|fresh| FreshObject {
-            made: renumber(fresh.made, file),
+            made: fresh.made.map(|made| renumber(made, file)),
             ..fresh.clone()
         })).collect(),
         calls: info.calls.iter().map(|&id| renumber(id, file)).collect(),
+        forwarded_calls: info.forwarded_calls.iter().map(|call| ForwardedCall {
+            arguments: call.arguments.iter().map(|&argument| match argument {
+                Forwarded::Value(ty) => Forwarded::Value(renumber_type(ty, file)),
+                other => other,
+            }).collect(),
+            ..call.clone()
+        }).collect(),
     }
 }
 
@@ -2229,6 +2272,13 @@ struct Walker<'a> {
     /// Per function being walked: what each return position returns new, so
     /// far (None once returns disagree)
     fresh: Vec<Option<Vec<Option<FreshObject>>>>,
+    /// Per function being walked: the tables and objects it has stored in a
+    /// variable outside it (an upvalue or a global), which it may return
+    /// again from another call, as a cache is, so aren't new each call
+    kept_outside: Vec<HashSet<TableId>>,
+    /// Per function being walked: the methods it calls that `ForwardedCall`s
+    /// stand for
+    forwarded: Vec<Vec<ForwardedCall>>,
     /// Which parameter of its function each parameter binding is
     parameter_index: HashMap<BindingId, usize>,
     /// For tables and objects made in a function: which of its parameters
@@ -2580,30 +2630,14 @@ impl<'a> Walker<'a> {
 
     /// Each parameter's type for the next walk: what the body requires, else the
     /// arguments from every call when every call is visible, else unknown
-    fn settle_parameter_types(&mut self) {
-        let mut only_called = vec![true; self.bindings.len()];
-        for reference in &self.references {
-            if !reference.write && !reference.callee {
-                only_called[reference.binding] = false;
-            }
-        }
-        // Functions read from a field other than to call them, and field names
-        // read where it isn't known which function they hold
-        let mut escaped = HashSet::default();
-        let mut unresolved = HashSet::default();
-        for field in self.field_references.iter().filter(|f| !f.write) {
-            match field.types.function {
-                FunctionRef::One(function) if !field.callee => { escaped.insert(function); }
-                FunctionRef::Unknown => { unresolved.insert(field.name()); }
-                _ => {}
-            }
-        }
-        let mut all_seen: HashMap<FunctionId, bool> = HashMap::default();
+    /// For each function, whether every call to it is one the walk saw: it
+    /// was assigned straight to a variable (local or global) only ever called,
+    /// which never holds another function, and any field it was stored in is
+    /// only ever called, with no reads of a field by that name that could be
+    /// it (`unresolved`)
+    fn all_calls_seen(&self, only_called: &[bool], escaped: &HashSet<FunctionId>, unresolved: &HashSet<&str>) -> HashMap<FunctionId, bool> {
+        let mut all_seen = HashMap::default();
         for id in self.functions.keys() {
-            // Every call to it is one we saw: it was assigned straight to a
-            // variable (local or global) only ever called, which never holds
-            // another function, and any field it was stored in is only ever
-            // called, with no reads of a field by that name that could be it
             let in_variable = self.assigned_to.get(id).map(|&b| {
                 let binding = &self.bindings[b];
                 binding.types.function == FunctionRef::One(*id) && only_called[b]
@@ -2616,6 +2650,47 @@ impl<'a> Walker<'a> {
                 (variable, fields) => variable.unwrap_or(true) && fields.unwrap_or(true),
             };
             all_seen.insert(*id, all_calls_seen);
+        }
+        all_seen
+    }
+
+    fn settle_parameter_types(&mut self) {
+        let mut only_called = vec![true; self.bindings.len()];
+        for reference in &self.references {
+            if !reference.write && !reference.callee {
+                only_called[reference.binding] = false;
+            }
+        }
+        // Functions read from a field other than to call them, and field names
+        // read where it isn't known which function they hold
+        let mut escaped = HashSet::default();
+        let mut unresolved = HashSet::default();
+        // Methods `ForwardedCall`s stand for: resolved by each call to the
+        // function calling them, if every one is seen
+        let mut forwarded: Vec<(&str, FunctionId)> = Vec::new();
+        for field in self.field_references.iter().filter(|f| !f.write) {
+            match (field.types.function, field.forwarded) {
+                (FunctionRef::One(function), _) if !field.callee => { escaped.insert(function); }
+                (FunctionRef::Unknown, Some(caller)) => forwarded.push((field.name(), caller)),
+                (FunctionRef::Unknown, None) => { unresolved.insert(field.name()); }
+                _ => {}
+            }
+        }
+        // Which functions have every call seen depends on which field names
+        // are read unresolved, which in turn depends on that: until it
+        // settles, which it does, as it only ever loses functions
+        let mut all_seen;
+        loop {
+            all_seen = self.all_calls_seen(&only_called, &escaped, &unresolved);
+            let before = unresolved.len();
+            for &(name, caller) in &forwarded {
+                if !all_seen.get(&caller).copied().unwrap_or(false) {
+                    unresolved.insert(name);
+                }
+            }
+            if unresolved.len() == before {
+                break
+            }
         }
         let definitions = &self.definitions;
         // A table or object made in the files that meets the requirement is
@@ -2946,6 +3021,13 @@ impl<'a> Walker<'a> {
         if self.narrowed_fields.iter().any(|(root, _, _)| *root == id) {
             self.forget_fields();
         }
+        // Kept where another call can return it again
+        if self.bindings[id].function != self.function || self.bindings[id].kind == BindingKind::Global {
+            let kept: Vec<TableId> = types.named.identity().into_iter().chain(self.several_objects(types)).collect();
+            for function in &mut self.kept_outside {
+                function.extend(kept.iter().copied());
+            }
+        }
         let binding = &mut self.bindings[id];
         binding.types |= types;
         binding.assigned = true;
@@ -3253,11 +3335,12 @@ impl<'a> Walker<'a> {
                 if !self.fresh.is_empty() {
                     let made: Vec<Option<FreshObject>> = values.values.iter()
                         .map(|value| {
-                            let made = value.named.identity().filter(|&at| self.made_here(at))?;
+                            let made = value.named.identity()
+                                .filter(|&at| self.made_here(at) && !self.kept_outside.last().is_some_and(|kept| kept.contains(&at)))?;
                             let mixed_parameters = self.parameter_mixins.get(&made).cloned().unwrap_or_default();
                             let pool_mixed_parameters = { self.note(Read::PoolObject(made)); self.pool_objects.get(&made) }.and_then(|object| object.named.identity())
                                 .map(|object| self.parameter_mixins.get(&object).cloned().unwrap_or_default());
-                            Some(FreshObject { made, mixed_parameters, pool_mixed_parameters })
+                            Some(FreshObject { made: Some(made), mixed_parameters, pool_mixed_parameters, mixin_globals: Vec::new() })
                         })
                         .collect();
                     if let Some(fresh) = self.fresh.last_mut() {
@@ -3332,7 +3415,7 @@ impl<'a> Walker<'a> {
     /// entry. `base` is what the field is on
     fn field_reference(&mut self, access: &SyntaxNode, name: &SyntaxToken, base: Type, types: Type, write: bool) {
         let table = base.named.identity();
-        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: crate::syntax::SyntaxNodePtr::new(access), token: name.green().to_owned(), types, table, base: base.named, write, callee: false, call_returns: None });
+        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: crate::syntax::SyntaxNodePtr::new(access), token: name.green().to_owned(), types, table, base: base.named, write, callee: false, call_returns: None, forwarded: None });
     }
 
     /// The field read just recorded is the function being called
@@ -3726,6 +3809,8 @@ impl<'a> Walker<'a> {
         self.function_ids.push(id);
         self.function_numbers.insert(self.function, id);
         self.fresh.push(None);
+        self.kept_outside.push(HashSet::default());
+        self.forwarded.push(Vec::new());
         if let Some(self_type) = self_type {
             let depth = self.scopes.len() - 1;
             // Implicit, so it's declared by the method's name: `b` in `function a:b()`
@@ -3759,6 +3844,8 @@ impl<'a> Walker<'a> {
         self.function_ranges.pop();
         self.function_ids.pop();
         let fresh_returns = self.fresh.pop().flatten().unwrap_or_default();
+        self.kept_outside.pop();
+        let forwarded_calls = self.forwarded.pop().unwrap_or_default();
         let returns = match returned {
             Some(returns) if block.as_ref().is_some_and(always_returns) => returns,
             // Reaching `end` returns nothing
@@ -3779,7 +3866,7 @@ impl<'a> Walker<'a> {
         }).collect();
         let varargs = params.is_some_and(|p| p.ellipsis())
             .then(|| Parameter { name: "...".to_string(), types: Type::UNKNOWN, mandated: None });
-        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls }));
+        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls }));
     }
 
     fn prior_parameter_types(&self, id: FunctionId, index: usize) -> Type {
@@ -4078,11 +4165,25 @@ impl<'a> Walker<'a> {
         });
         let receiver = if is_method { callee } else { None };
         // `a:m()` calls field `m` of `a`
+        // `p:m()` on a parameter, or on a table made here with parameters
+        // mixed in: the parameters that may hold `m`, for a `ForwardedCall`
+        let mut forward_on = None;
         let callee = match (callee, call.method_name()) {
             (Some(base), Some(method)) => {
                 let types = self.field_read(base, method.text());
+                // Only for a function of the files, or one it can't tell: not
+                // a WoW object's method, whose definition is known
+                if matches!(types.function, FunctionRef::One(_) | FunctionRef::Unknown) {
+                    forward_on = self.forwardable_receiver(call.callee().as_ref(), base);
+                }
                 self.field_reference(call.syntax(), &method, base, types, false);
                 self.last_field_is_callee();
+                if forward_on.is_some() {
+                    let function = self.function_ids.last().copied();
+                    if let Some(field) = self.field_references.last_mut() {
+                        field.forwarded = function;
+                    }
+                }
                 callee_read = Some(CalleeRead::Field(self.field_references.len() - 1));
                 self.check_called_field(base.named, method.text(), method.text_range(), types);
                 self.check_method(base, &method);
@@ -4092,6 +4193,10 @@ impl<'a> Walker<'a> {
         };
         let arguments = call.arguments();
         let argument_types = self.expression_values(&arguments);
+        if let (Some(on), Some(method)) = (forward_on, call.method_name()) {
+            let forwarded = self.forwarded_arguments(&arguments, &argument_types);
+            self.add_forwarded(ForwardedCall { on, method: method.text().to_string(), arguments: forwarded });
+        }
         if let Some(callee) = callee {
             self.table_library_call(call, callee, arguments.len(), &argument_types);
         }
@@ -4132,7 +4237,15 @@ impl<'a> Walker<'a> {
             .position(|p| p.name.to_ascii_lowercase().contains("template"));
         let documented = function.returns.clone();
         let fresh_returns = function.fresh_returns.clone();
+        let forwarded_calls = function.forwarded_calls.clone();
+        let named_parameters = function.parameters.len();
         let callee_method = function.method;
+        // How far each argument is from the parameter it fills (see `pending_call`)
+        let offset: isize = match (callee_method, is_method) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        };
         // What the function's own parameters get: `self` is separate for a
         // method, whether it's passed with `:` or explicitly
         let parameter_types = match (function.method, is_method) {
@@ -4153,7 +4266,7 @@ impl<'a> Walker<'a> {
                 let mut returns = self.returns_of(id);
                 for (slot, fresh) in fresh_returns.iter().enumerate() {
                     if let (Some(fresh), Some(&value)) = (fresh, returns.values.get(slot)) {
-                        returns.values[slot] = self.fresh_object(call, slot, value, fresh, &parameter_types);
+                        returns.values[slot] = self.fresh_object(call, slot, value, fresh, &parameter_types, &arguments, offset);
                     }
                 }
                 returns
@@ -4164,8 +4277,24 @@ impl<'a> Walker<'a> {
                 .or_else(|| self.create_pool(call, callee, &arguments, &argument_types))
                 .or_else(|| self.mix(call, callee, &arguments, &argument_types))
                 .or_else(|| self.copy_table(call, callee, &arguments, &argument_types))
-                .unwrap_or_else(|| documented.clone()),
+                .unwrap_or_else(|| {
+                    // A definition's function returning a new table at each
+                    // call, with arguments mixed in
+                    let mut returns = documented.clone();
+                    for (slot, fresh) in fresh_returns.iter().enumerate() {
+                        if let (Some(fresh), Some(&value)) = (fresh, returns.values.get(slot)) {
+                            returns.values[slot] = self.fresh_object(call, slot, value, fresh, &argument_types, &arguments, 0);
+                        }
+                    }
+                    returns
+                }),
         };
+        // What the function calls on what this call passes it. A definition's
+        // function has its arguments by position
+        let passed = if matches!(callee.function, FunctionRef::One(_)) { (&parameter_types, offset) } else { (&argument_types, 0) };
+        for forwarded in &forwarded_calls {
+            self.forward_call(forwarded, passed.0, named_parameters, &arguments, passed.1);
+        }
         if let (Some(receiver), Some(method)) = (receiver, call.method_name()) {
             returns = self.object_method(call, receiver, method.text(), arguments.first(), template.and_then(|i| arguments.get(i)), &argument_types, returns);
         }
@@ -4745,15 +4874,17 @@ impl<'a> Walker<'a> {
         self.prior.is_some_and(|prior| prior.mixed_into.contains_key(&at)) || self.layer.mixed_into.contains_key(&at)
     }
 
-    /// Whether a table or object was made by the function being walked
+    /// Whether a table or object was made by the function being walked: there,
+    /// or new from a call there. Not a pool's object or a copy's table
     fn made_here(&self, at: TableId) -> bool {
-        at.slot & !PSEUDO == 0 && at.file == self.file && self.function_ranges.last().is_some_and(|(range, _)| range.contains(at.offset))
+        at.slot & (POOL_OBJECT | COPY) == 0 && at.file == self.file && self.function_ranges.last().is_some_and(|(range, _)| range.contains(at.offset))
     }
 
-    /// The innermost function being walked that made a table or object (or a
-    /// pool whose object it is), as its number in the walk
+    /// The innermost function being walked that made a table or object (there,
+    /// or new from a call there), or a pool whose object it is, as its number
+    /// in the walk
     fn maker(&self, at: TableId) -> Option<usize> {
-        if at.file != self.file || at.slot & !(POOL_OBJECT | PSEUDO) != 0 {
+        if at.file != self.file || at.slot & COPY != 0 {
             return None
         }
         self.function_ranges.iter().rev().find(|(range, _)| range.contains(at.offset)).map(|&(_, function)| function)
@@ -4814,25 +4945,142 @@ impl<'a> Walker<'a> {
     /// A function's new object, for one call: a new identity at the call, with
     /// the object the function made mixed in (for the fields it set there)
     /// along with that call's arguments for the parameters it mixed in
-    fn fresh_object(&mut self, call: &FunctionCall, slot: usize, value: Type, fresh: &FreshObject, arguments: &Values) -> Type {
+    /// For `receiver:m()` in a function, with `receiver` of type `base`: the
+    /// parameters whose arguments may hold `m`, if it's one of its parameters,
+    /// or a table it made with parameters mixed in
+    fn forwardable_receiver(&self, receiver: Option<&Expression>, base: Type) -> Option<Vec<usize>> {
+        if self.function == MAIN_CHUNK {
+            return None
+        }
+        let caller = self.function_ranges.last().map(|&(_, function)| function)?;
+        if let Some((_, index)) = receiver.and_then(|r| self.parameter_read(r)).filter(|&(function, _)| function == caller) {
+            return Some(vec![index])
+        }
+        let at = base.named.identity().filter(|&at| self.made_here(at))?;
+        let mixed = self.parameter_mixins.get(&at).filter(|mixed| !mixed.is_empty())?;
+        Some(mixed.clone())
+    }
+
+    /// Notes that the function being walked makes `call` for each call to it,
+    /// once: a recursive function passing its parameter on to itself makes
+    /// the call it already makes, which would otherwise be added again each
+    /// walk, never settling
+    fn add_forwarded(&mut self, call: ForwardedCall) {
+        if let Some(calls) = self.forwarded.last_mut() {
+            if !calls.contains(&call) {
+                calls.push(call);
+            }
+        }
+    }
+
+    /// The arguments of a call a `ForwardedCall` stands for: the function's
+    /// parameters passed on, its `...`, and other values
+    fn forwarded_arguments(&self, expressions: &[Expression], values: &Values) -> Vec<Forwarded> {
+        let caller = self.function_ranges.last().map(|&(_, function)| function);
+        let mut forwarded = Vec::new();
+        for (i, expression) in expressions.iter().enumerate() {
+            if i + 1 == expressions.len() && matches!(expression, Expression::VarArgs(_)) {
+                forwarded.push(Forwarded::Rest);
+                break
+            }
+            match self.parameter_read(expression).filter(|&(function, _)| Some(function) == caller) {
+                Some((_, index)) => forwarded.push(Forwarded::Parameter(index)),
+                None => forwarded.push(Forwarded::Value(values.get(i))),
+            }
+        }
+        forwarded
+    }
+
+    /// The call `forwarded` stands for, made by a call passing `passed` (by
+    /// the callee's parameter positions, of which `named` are named), with
+    /// argument `expressions` each `offset` from the parameter they fill. It
+    /// calls the method of the first argument holding it, as known, and is
+    /// passed on in turn when that argument is a parameter of the function
+    /// calling, which then makes the call for each of its own calls
+    fn forward_call(&mut self, forwarded: &ForwardedCall, passed: &Values, named: usize, expressions: &[Expression], offset: isize) {
+        let argument = |position: usize| -> Vec<Type> {
+            match forwarded.arguments.get(position) {
+                Some(&Forwarded::Parameter(i)) => vec![passed.get(i)],
+                Some(&Forwarded::Value(ty)) => vec![ty],
+                Some(Forwarded::Rest) => passed.values.iter().skip(named).copied().collect(),
+                None => Vec::new(),
+            }
+        };
+        let mut values: Vec<Type> = (0..forwarded.arguments.len()).flat_map(argument).collect();
+        let rest = if forwarded.arguments.last() == Some(&Forwarded::Rest) { passed.rest } else { Type::NIL };
+        let expression = |position: usize| usize::try_from(position as isize - offset).ok().and_then(|i| expressions.get(i));
+        // Passed on by the function calling
+        if self.function != MAIN_CHUNK {
+            let caller = self.function_ranges.last().map(|&(_, function)| function);
+            let on: Vec<usize> = forwarded.on.iter()
+                .filter_map(|&p| expression(p).and_then(|e| self.parameter_read(e)).filter(|&(function, _)| Some(function) == caller).map(|(_, index)| index))
+                .collect();
+            if !on.is_empty() {
+                // In the caller's terms: its parameters, its `...` when passed
+                // as the last argument, or values
+                let is_varargs = |position: usize| position as isize - offset == expressions.len() as isize - 1
+                    && expression(position).is_some_and(|e| matches!(e, Expression::VarArgs(_)));
+                let arguments = forwarded.arguments.iter().flat_map(|&argument| match argument {
+                    Forwarded::Parameter(i) => vec![match expression(i).and_then(|e| self.parameter_read(e)).filter(|&(function, _)| Some(function) == caller) {
+                        Some((_, index)) => Forwarded::Parameter(index),
+                        None if is_varargs(i) => Forwarded::Rest,
+                        None => Forwarded::Value(passed.get(i)),
+                    }],
+                    Forwarded::Rest if is_varargs(named) => vec![Forwarded::Rest],
+                    Forwarded::Rest => passed.values.iter().skip(named).map(|&ty| Forwarded::Value(ty)).collect(),
+                    value => vec![value],
+                }).collect();
+                self.add_forwarded(ForwardedCall { on, method: forwarded.method.clone(), arguments });
+            }
+        }
+        let Some((receiver, id)) = forwarded.on.iter().rev().find_map(|&p| {
+            let receiver = passed.get(p);
+            match self.field_read(receiver, &forwarded.method).function {
+                FunctionRef::One(id) => Some((receiver, id)),
+                _ => None,
+            }
+        }) else { return };
+        // Called with `:`, so `self` is separate unless the function takes it
+        if self.known_function(FunctionRef::One(id)).is_some_and(|info| !info.method) {
+            values.insert(0, receiver);
+        }
+        self.apply(Write::CallArguments(id, Values { values, rest }));
+    }
+
+    /// `expressions` are the call's arguments, each `offset` from the
+    /// parameter it fills (see `pending_call`)
+    fn fresh_object(&mut self, call: &FunctionCall, slot: usize, value: Type, fresh: &FreshObject, arguments: &Values, expressions: &[Expression], offset: isize) -> Type {
         let at = Location { slot: slot as u32 + 1, ..self.location(call.syntax().text_range().start()) };
+        // Passing on a parameter of the function calling, so each call to that
+        // mixes in what it passes, as for `CreateFromMixins(parameter)`
+        let caller = self.function_ranges.last().map(|&(_, function)| function);
+        for &position in &fresh.mixed_parameters {
+            let Some(expression) = usize::try_from(position as isize - offset).ok().and_then(|i| expressions.get(i)) else { continue };
+            if let Some((_, index)) = self.parameter_read(expression).filter(|&(function, _)| Some(function) == caller) {
+                self.apply(Write::ParameterMixin(at, index));
+            }
+        }
         let named = match value.named {
             NamedRef::Table(_) => NamedRef::Table(at),
             NamedRef::Instance { named, extended, .. } => NamedRef::Instance { named, at, extended },
+            // A definition's `table`
+            NamedRef::None | NamedRef::Unknown if value.set.contains(TypeSet::TABLE) && fresh.made.is_none() => NamedRef::Table(at),
             other => return Type { named: other, ..value },
         };
-        let mut mixins = vec![value];
+        // What the function made, for the fields it set there
+        let mut mixins: Vec<Type> = value.named.identity().map(|_| value).into_iter().collect();
+        mixins.extend(fresh.mixin_globals.iter().filter_map(|name| self.definitions.global(name)));
         mixins.extend(fresh.mixed_parameters.iter().map(|&i| arguments.get(i)));
         for mixin in &mixins {
             self.record_mixed_into(*mixin, named);
         }
         self.apply(Write::MixinsReplaced(at, mixins));
-        if let Some(parent) = self.known_parent(fresh.made) {
+        if let Some(parent) = fresh.made.and_then(|made| self.known_parent(made)) {
             self.apply(Write::Parent(at, parent));
         }
         // A pool: its objects are new for the call too, with the call's
         // arguments for the parameters its init or reset function mixed in
-        if let (Some(mixed), Some(inner)) = (&fresh.pool_mixed_parameters, self.pool_object(fresh.made)) {
+        if let (Some(mixed), Some(inner)) = (&fresh.pool_mixed_parameters, fresh.made.and_then(|made| self.pool_object(made))) {
             let object_at = Location { slot: at.slot | POOL_OBJECT, ..at };
             let object = match inner.named {
                 NamedRef::Instance { named, extended, .. } => Type { named: NamedRef::Instance { named, at: object_at, extended }, ..inner },
@@ -6833,7 +7081,11 @@ mod tests {
     fn mixin_definitions() -> Arc<Definitions> {
         Arc::new(Definitions::from_json(r#"{"functions": {
             "CreateFromMixins": {"parameters": ["..."], "returns": ["unknown"]},
-            "Mixin": {"parameters": ["object", "..."], "returns": ["unknown"]}
+            "Mixin": {"parameters": ["object", "..."], "returns": ["unknown"]},
+            "CreateAndInitFromMixin": {"parameters": ["mixin", "..."], "returns": ["table"], "fresh_returns": [{"parameters": [0]}], "method_calls": [{"on": [0], "method": "Init", "arguments": ["..."]}]},
+            "CreateFooter": {"parameters": ["parent"], "returns": ["table"], "fresh_returns": [{"mixins": ["FooterMixin"]}]}
+        }, "tables": {
+            "FooterMixin": {"functions": {"Finalize": {"returns": ["number"]}}}
         }}"#).unwrap())
     }
 
@@ -6862,6 +7114,75 @@ mod tests {
         // Through an alias too
         let analysis = analyse_mixins(&["local Create = CreateFromMixins local A = { x = 1 } local y = Create(A).x"]);
         assert_eq!(types_in(&analysis, 0, "y"), ["number"]);
+    }
+
+    #[test]
+    fn methods_called_on_what_a_function_is_passed() {
+        // A definition's: `CreateAndInitFromMixin` calls `Init` on its new table
+        let analysis = analyse_mixins(&["local M = {} function M:Init(x, y) self.x = x end
+            local o = CreateAndInitFromMixin(M, 1, 's') local v = o.x"]);
+        assert_eq!(types_in(&analysis, 0, "x"), ["number", "number"]);
+        assert_eq!(types_in(&analysis, 0, "y"), ["string"]);
+        assert_eq!(types_in(&analysis, 0, "v"), ["number"]);
+        // The files' own, on a parameter or a table made with one mixed in,
+        // through a function passing its parameters on, each call with its
+        // own mixin: neither `Init` gets the other's arguments
+        let analysis = analyse_mixins(&["local A = {} function A:Init(a) end local B = {} function B:Init(b) end
+            local function Make(mixin, ...) local o = CreateFromMixins(mixin) o:Init(...) return o end
+            local function Start(mixin, value) mixin:Init(value) end
+            local function MakeAgain(mixin, ...) return Make(mixin, ...) end
+            Make(A, 1) MakeAgain(B, 's') Start(A, 2)"]);
+        assert_eq!(types_in(&analysis, 0, "a"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "b"), ["string"]);
+        // Called in a function whose calls aren't all seen, as a callback
+        // handed to something else is: that may call it with anything
+        let analysis = analyse_mixins(&["local M = {} function M:Set(v) end M:Set(1)
+            register(function(button, value) button:Set(value) end)"]);
+        assert_eq!(types_in(&analysis, 0, "v"), ["unknown"]);
+        // Passing it on to itself, as Blizzard's `VariadicInsert` does, settles
+        let analysis = analyse_mixins(&["local A = {} function A:Insert(a) end
+            local function Insert(on, ...) local first = ... if first == nil then return end on:Insert(first) Insert(on, select(2, ...)) end
+            Insert(A, 1, 2)"]);
+        assert!(analysis.walks < 10);
+    }
+
+    #[test]
+    fn cached_tables_are_not_new_each_call() {
+        // Kept in an upvalue or a global, so later calls return the same one
+        let analysis = analyse_mixins(&["local cached local function Get() if not cached then cached = {} end return cached end
+            local function GetMade() if not Cached then Cached = CreateAndInitFromMixin({}) end return Cached end
+            Get().x = 1 GetMade().y = 1 local x, y = Get().x, GetMade().y"]);
+        assert_eq!(types_in(&analysis, 0, "x"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "y"), ["number"]);
+    }
+
+    #[test]
+    fn definitions_making_tables_with_mixins() {
+        // As generated from Blizzard's `CreateAndInitFromMixin`: each call a
+        // new table, with what it's passed mixed in
+        let analysis = analyse_mixins(&["local A = { x = 1 } function A:Name() return 's' end local B = { x = 's' }
+            local a, b = CreateAndInitFromMixin(A, 1), CreateAndInitFromMixin(B)
+            local ax, name, bx = a.x, a:Name(), b.x"]);
+        assert_eq!(types_in(&analysis, 0, "ax"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "name"), ["string"]);
+        assert_eq!(types_in(&analysis, 0, "bx"), ["string"]);
+        // As `GamepadSharedUtility.CreatePromptedBindingFooter` is: with a
+        // global of the definitions mixed in, and fields of its own
+        let analysis = analyse_mixins(&["local f = CreateFooter() f.x = 1 local done, x, other = f:Finalize(), f.x, CreateFooter().x"]);
+        assert_eq!(types_in(&analysis, 0, "done"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "x"), ["number"]);
+        // Another call's table doesn't have them
+        assert_eq!(types_in(&analysis, 0, "other"), ["unknown"]);
+        // Functions of the files returning what such a function does: new at
+        // each call too, with what they pass on mixed in
+        let analysis = analyse_mixins(&["local A = {} function A:Name() return 's' end local B = {} function B:Size() return 1 end
+            local function Make(mixin) return CreateAndInitFromMixin(mixin) end
+            local function MakeA() return CreateAndInitFromMixin(A) end
+            local function MakeAgain(mixin) return Make(mixin) end
+            local a, b, c = MakeA():Name(), Make(B):Size(), MakeAgain(A):Name()"]);
+        assert_eq!(types_in(&analysis, 0, "a"), ["string"]);
+        assert_eq!(types_in(&analysis, 0, "b"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "c"), ["string"]);
     }
 
     #[test]

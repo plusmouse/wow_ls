@@ -1162,7 +1162,57 @@ impl Definitions {
             Some(Value::String(t)) => self.parse_type(t)?,
             Some(_) => return Err("`rest` should be a string".to_string()),
         };
-        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns: Vec::new(), calls: Vec::new() })
+        // For each return, `null`, or that each call returns a new table with
+        // the arguments at `parameters` (by position) and the globals named
+        // in `mixins` mixed in
+        let fresh_returns = match definition.get("fresh_returns") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items.iter()
+                .map(|item| -> Result<_, String> {
+                    if item.is_null() {
+                        return Ok(None)
+                    }
+                    let list = |key: &str| match item.get(key) {
+                        None => Ok(Vec::new()),
+                        Some(Value::Array(list)) => Ok(list.clone()),
+                        Some(_) => Err(format!("`fresh_returns` `{key}` should be an array")),
+                    };
+                    let mixed_parameters = list("parameters")?.iter()
+                        .map(|p| p.as_u64().map(|p| p as usize).ok_or_else(|| "`fresh_returns` parameters should be numbers".to_string()))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let mixin_globals = list("mixins")?.iter()
+                        .map(|m| m.as_str().map(str::to_string).ok_or_else(|| "`fresh_returns` mixins should be names".to_string()))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Some(crate::types::FreshObject { made: None, mixed_parameters, pool_mixed_parameters: None, mixin_globals }))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => return Err("`fresh_returns` should be an array".to_string()),
+        };
+        // Methods it calls on what it's passed: `on` the arguments at those
+        // positions (the last holding it), passing it the arguments at the
+        // positions given, `...` for those beyond its parameters, or types
+        let forwarded_calls = match definition.get("method_calls") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items.iter().map(|item| -> Result<_, String> {
+                let on = item.get("on").and_then(Value::as_array).ok_or("`method_calls` needs `on`")?.iter()
+                    .map(|p| p.as_u64().map(|p| p as usize).ok_or_else(|| "`on` should hold numbers".to_string()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let method = item.get("method").and_then(Value::as_str).ok_or("`method_calls` needs `method`")?.to_string();
+                let arguments = match item.get("arguments") {
+                    None => Vec::new(),
+                    Some(Value::Array(arguments)) => arguments.iter().map(|argument| match argument {
+                        Value::Number(n) => n.as_u64().map(|p| crate::types::Forwarded::Parameter(p as usize)).ok_or_else(|| "a position should be a whole number".to_string()),
+                        Value::String(s) if s == "..." => Ok(crate::types::Forwarded::Rest),
+                        Value::String(s) => self.parse_type(s).map(crate::types::Forwarded::Value),
+                        _ => Err("an argument should be a position, `...` or a type".to_string()),
+                    }).collect::<Result<Vec<_>, _>>()?,
+                    Some(_) => return Err("`arguments` should be an array".to_string()),
+                };
+                Ok(crate::types::ForwardedCall { on, method, arguments })
+            }).collect::<Result<Vec<_>, _>>()?,
+            Some(_) => return Err("`method_calls` should be an array".to_string()),
+        };
+        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns, calls: Vec::new(), forwarded_calls })
     }
 
     /// `"name"` or `"name: type"`

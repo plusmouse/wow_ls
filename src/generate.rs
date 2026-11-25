@@ -636,7 +636,8 @@ impl Generator<'_> {
     fn signature(&self, info: &FunctionInfo) -> Value {
         let mut parameters: Vec<String> = info.parameters.iter().map(|p| p.name.clone()).collect();
         // `function M.F(self, x)`, called as a method like the rest
-        if !info.method && parameters.first().is_some_and(|p| p == "self") {
+        let skipped = !info.method && parameters.first().is_some_and(|p| p == "self");
+        if skipped {
             parameters.remove(0);
         }
         if info.varargs.is_some() {
@@ -653,7 +654,84 @@ impl Generator<'_> {
         if info.returns.rest.set != TypeSet::NIL && info.returns.rest.set != TypeSet::NEVER {
             function.insert("rest".into(), json!(self.type_text(info.returns.rest)));
         }
+        // New plain tables each call, with mixins: parameters, by the
+        // positions of the parameters written, and globals. Not a pool's,
+        // whose objects aren't written
+        let fresh: Vec<Value> = info.fresh_returns.iter().zip(&info.returns.values)
+            .map(|(fresh, &value)| {
+                let Some(fresh) = fresh.as_ref().filter(|f| f.pool_mixed_parameters.is_none()) else { return Value::Null };
+                let Some(made) = fresh.made.filter(|_| self.type_text(value) == "table") else { return Value::Null };
+                let Some(positions) = fresh.mixed_parameters.iter().map(|&p| p.checked_sub(usize::from(skipped))).collect::<Option<Vec<usize>>>() else { return Value::Null };
+                let mut mixins = Vec::new();
+                if !self.global_mixins(made, &mut mixins, 0) {
+                    return Value::Null
+                }
+                let mut entry = Map::new();
+                if !positions.is_empty() {
+                    entry.insert("parameters".into(), json!(positions));
+                }
+                if !mixins.is_empty() {
+                    entry.insert("mixins".into(), json!(mixins));
+                }
+                if entry.is_empty() { Value::Null } else { Value::Object(entry) }
+            })
+            .collect();
+        if fresh.iter().any(|f| !f.is_null()) {
+            function.insert("fresh_returns".into(), Value::Array(fresh));
+        }
+        // Methods it calls on what it's passed, by the positions of the
+        // parameters written
+        let position = |p: usize| p.checked_sub(usize::from(skipped));
+        let method_calls: Vec<Value> = info.forwarded_calls.iter()
+            .filter_map(|call| {
+                let on: Vec<usize> = call.on.iter().map(|&p| position(p)).collect::<Option<_>>()?;
+                let arguments: Vec<Value> = call.arguments.iter()
+                    .map(|&argument| match argument {
+                        crate::types::Forwarded::Parameter(p) => position(p).map(|p| json!(p)),
+                        crate::types::Forwarded::Rest => Some(json!("...")),
+                        crate::types::Forwarded::Value(ty) => Some(json!(self.type_text(ty))),
+                    })
+                    .collect::<Option<_>>()?;
+                Some(json!({"on": on, "method": call.method, "arguments": arguments}))
+            })
+            .collect();
+        if !method_calls.is_empty() {
+            function.insert("method_calls".into(), Value::Array(method_calls));
+        }
         Value::Object(function)
+    }
+
+    /// The globals mixed into `table`, made in Blizzard's Lua, by name: its
+    /// mixins that are global tables, and theirs, through tables it's made
+    /// from (another function's new table at a call). Not the mixins that
+    /// are the parameters of the function making a table, which are each
+    /// call's own. False if it has fields of its own, or a mixin does that's
+    /// no global, which a name can't give, or it has a mixin that's no table
+    /// made in Blizzard's Lua, which can't be named: left out, its methods
+    /// would be reported missing
+    fn global_mixins(&self, table: crate::types::TableId, names: &mut Vec<String>, depth: usize) -> bool {
+        if depth > 8 || self.layer.fields.get(&table).is_some_and(|fields| !fields.is_empty()) {
+            return false
+        }
+        // The types of the parameters mixed in by the function that makes it
+        let parameters: Vec<Type> = self.layer.functions.values()
+            .flat_map(|info| info.fresh_returns.iter().flatten().filter(|f| f.made == Some(table)).flat_map(|f| f.mixed_parameters.iter().filter_map(|&p| info.parameters.get(p).map(|p| p.types))))
+            .collect();
+        for &mixin in self.layer.mixins.get(&table).into_iter().flatten() {
+            if parameters.contains(&mixin) {
+                continue
+            }
+            let Some(at) = mixin.named.identity() else { return false };
+            let global = self.layer.globals.iter()
+                .filter(|(name, ty)| ty.named.identity() == Some(at) && is_name(name))
+                .map(|(name, _)| name)
+                .min();
+            match global {
+                Some(name) => if !names.contains(name) { names.push(name.clone()) },
+                None => if !self.global_mixins(at, names, depth + 1) { return false },
+            }
+        }
+        true
     }
 
     fn type_text(&self, ty: Type) -> String {
