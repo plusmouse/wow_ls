@@ -758,8 +758,18 @@ impl Generator<'_> {
                     .filter(|write| write.on == crate::types::On::Returned(slot))
                     .map(|write| write.field.as_str())
                     .collect();
-                if !self.global_mixins(made, &given, &mut mixins, 0) {
+                let mut fields = BTreeMap::new();
+                if !self.global_mixins(made, &mut mixins, &mut fields, 0) {
                     return Value::Null
+                }
+                // The fields it has besides those each call gives it: given
+                // after it's made (`column.width = w` where columns are looped
+                // over), or by a mixin no name gives, so a call's has them too
+                let mut values = Map::new();
+                for (name, ty) in fields {
+                    if !given.contains(&name.as_str()) {
+                        values.insert(name, json!(self.type_text(ty)));
+                    }
                 }
                 let mut entry = Map::new();
                 if !positions.is_empty() {
@@ -767,6 +777,9 @@ impl Generator<'_> {
                 }
                 if !mixins.is_empty() {
                     entry.insert("mixins".into(), json!(mixins));
+                }
+                if !values.is_empty() {
+                    entry.insert("values".into(), Value::Object(values));
                 }
                 if entry.is_empty() { Value::Null } else { Value::Object(entry) }
             })
@@ -828,14 +841,17 @@ impl Generator<'_> {
     /// mixins that are global tables, and theirs, through tables it's made
     /// from (another function's new table at a call). Not the mixins that
     /// are the parameters of the function making a table, which are each
-    /// call's own. False if it has fields of its own but those `given` (by
-    /// each call, as `field_writes` say), or a mixin does that's no global,
-    /// which a name can't give, or it has a mixin that's no table made in
+    /// call's own. The fields of `table`, and of mixins that are no global
+    /// (any of several tables, or one made at a call), which a name can't
+    /// give, go in `fields`. False if it has a mixin that's no table made in
     /// Blizzard's Lua, which can't be named: left out, its methods would be
     /// reported missing
-    fn global_mixins(&self, table: crate::types::TableId, given: &[&str], names: &mut Vec<String>, depth: usize) -> bool {
-        if depth > 8 || self.layer.fields.get(&table).is_some_and(|fields| fields.keys().any(|name| !given.contains(&name.as_str()))) {
+    fn global_mixins(&self, table: crate::types::TableId, names: &mut Vec<String>, fields: &mut BTreeMap<String, Type>, depth: usize) -> bool {
+        if depth > 8 {
             return false
+        }
+        for (name, &ty) in self.layer.fields.get(&table).into_iter().flatten() {
+            *fields.entry(name.clone()).or_default() |= ty;
         }
         // The types of the parameters mixed in by the function that makes it
         let parameters: Vec<Type> = self.layer.functions.values()
@@ -845,14 +861,24 @@ impl Generator<'_> {
             if parameters.contains(&mixin) {
                 continue
             }
-            let Some(at) = mixin.named.identity() else { return false };
-            let global = self.layer.globals.iter()
-                .filter(|(name, ty)| ty.named.identity() == Some(at) && is_name(name))
-                .map(|(name, _)| name)
-                .min();
+            let tables = mixin.named.identities();
+            if tables.is_empty() {
+                return false
+            }
+            let global = match tables.as_slice() {
+                [at] => self.layer.globals.iter()
+                    .filter(|(name, ty)| ty.named.identity() == Some(*at) && is_name(name))
+                    .map(|(name, _)| name)
+                    .min(),
+                _ => None,
+            };
             match global {
                 Some(name) => if !names.contains(name) { names.push(name.clone()) },
-                None => if !self.global_mixins(at, &[], names, depth + 1) { return false },
+                None => for at in tables {
+                    if !self.global_mixins(at, names, fields, depth + 1) {
+                        return false
+                    }
+                },
             }
         }
         true

@@ -943,6 +943,10 @@ pub struct FreshObject {
     /// the parameter it's passed in: a call passing a literal kind
     /// (`"Button"`) gets a frame of that kind
     pub kind_parameter: Option<usize>,
+    /// For a function of the definitions, the fields the table is given
+    /// after it's made, as Blizzard's code sets them where it uses it: each
+    /// call's has them. One made in the files has them through `made`
+    pub fields: Vec<(String, Type)>,
 }
 
 /// What calling a function reads of it: all but what it calls, which
@@ -3740,7 +3744,7 @@ impl<'a> Walker<'a> {
                             let mixed_parameters = self.parameter_mixins.get(&made).cloned().unwrap_or_default();
                             let pool_mixed_parameters = { self.note(Read::PoolObject(made)); self.pool_objects.get(&made) }.and_then(|object| object.named.identity())
                                 .map(|object| self.parameter_mixins.get(&object).cloned().unwrap_or_default());
-                            Some(FreshObject { made: Some(made), mixed_parameters, pool_mixed_parameters, mixin_globals: Vec::new(), kind_parameter: self.kind_parameters.get(&made).copied() })
+                            Some(FreshObject { made: Some(made), mixed_parameters, pool_mixed_parameters, mixin_globals: Vec::new(), kind_parameter: self.kind_parameters.get(&made).copied(), fields: Vec::new() })
                         })
                         .collect();
                     if let Some(fresh) = self.fresh.last_mut() {
@@ -5952,6 +5956,9 @@ impl<'a> Walker<'a> {
             self.record_mixed_into(*mixin, named);
         }
         self.apply(Write::MixinsReplaced(at, mixins));
+        for (name, ty) in &fresh.fields {
+            self.apply(Write::Field(at, name.clone(), *ty));
+        }
         if let Some(parent) = fresh.made.and_then(|made| self.known_parent(made)) {
             self.apply(Write::Parent(at, parent));
         }
@@ -8158,6 +8165,7 @@ mod tests {
             "Mixin": {"parameters": ["object", "..."], "returns": ["unknown"]},
             "CreateAndInitFromMixin": {"parameters": ["mixin", "..."], "returns": ["table"], "fresh_returns": [{"parameters": [0]}], "method_calls": [{"on": [0], "method": "Init", "arguments": ["..."]}]},
             "CreateFooter": {"parameters": ["parent"], "returns": ["table"], "fresh_returns": [{"mixins": ["FooterMixin"]}]},
+            "CreateColumn": {"returns": ["table"], "fresh_returns": [{"mixins": ["FooterMixin"], "values": {"width": "number", "OnResize": "function"}}]},
             "MakePaint": {"parameters": ["r", "g", "a"], "returns": ["table"], "fresh_returns": [{"mixins": ["PaintMixin"]}],
                 "field_writes": [{"on": {"returned": 0}, "field": "r", "value": [0]}, {"on": {"returned": 0}, "field": "a", "value": [{"truthy": 2}, "number"]}]}
         }, "tables": {
@@ -8171,6 +8179,18 @@ mod tests {
                 "GetLabel": {"returns": ["unknown"], "returned_fields": [{"on": "self", "field": "label"}]}
             }, "values": {"r": "number"}}
         }}"#).unwrap())
+    }
+
+    #[test]
+    fn fields_given_after_tables_are_made() {
+        // As Blizzard's code gives a column a width where it loops over them:
+        // each call's has it, besides its mixins' methods
+        let analysis = analyse_mixins(&["local c = CreateColumn() local w, done = c.width, c:Finalize() c:OnResize()"]);
+        assert_eq!(types_in(&analysis, 0, "w"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "done"), ["number"]);
+        // A function it's given is a method it has
+        assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>());
+        assert!(!analyse_mixins(&["CreateColumn():Nope()"]).diagnostics.is_empty());
     }
 
     #[test]

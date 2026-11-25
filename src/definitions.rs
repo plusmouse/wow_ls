@@ -1258,7 +1258,8 @@ impl Definitions {
         };
         // For each return, `null`, or that each call returns a new table with
         // the arguments at `parameters` (by position) and the globals named
-        // in `mixins` mixed in
+        // in `mixins` mixed in, and the fields in `values`, which it's given
+        // after it's made
         let fresh_returns = match definition.get("fresh_returns") {
             None => Vec::new(),
             Some(Value::Array(items)) => items.iter()
@@ -1277,7 +1278,18 @@ impl Definitions {
                     let mixin_globals = list("mixins")?.iter()
                         .map(|m| m.as_str().map(str::to_string).ok_or_else(|| "`fresh_returns` mixins should be names".to_string()))
                         .collect::<Result<Vec<_>, _>>()?;
-                    Ok(Some(crate::types::FreshObject { made: None, mixed_parameters, pool_mixed_parameters: None, mixin_globals, kind_parameter: None }))
+                    // Fields it's given after it's made, with their types
+                    let fields = match item.get("values") {
+                        None => Vec::new(),
+                        Some(Value::Object(values)) => values.iter()
+                            .map(|(name, ty)| {
+                                let ty = ty.as_str().ok_or_else(|| format!("`fresh_returns` values: {name}'s type should be a string"))?;
+                                Ok((name.clone(), self.parse_type(ty)?))
+                            })
+                            .collect::<Result<Vec<_>, String>>()?,
+                        Some(_) => return Err("`fresh_returns` values should be an object".to_string()),
+                    };
+                    Ok(Some(crate::types::FreshObject { made: None, mixed_parameters, pool_mixed_parameters: None, mixin_globals, kind_parameter: None, fields }))
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             Some(_) => return Err("`fresh_returns` should be an array".to_string()),
