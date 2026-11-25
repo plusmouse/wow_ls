@@ -379,6 +379,36 @@ fn family(at: Location) -> Option<Location> {
     Some(Location { file: FAMILIES, offset: TextSize::new(0), slot: at.slot })
 }
 
+/// Added to the slot of a table written directly inside another table's
+/// constructor, as `{ A = {...}, B = {...} }`'s records are, with the
+/// outer `{`'s offset below it. Those of one constructor are its elements
+/// (see `elements_of`). Only for tables none of the flags above marks
+const ELEMENT: u32 = 1 << 27;
+/// The slot of the identity standing for every element of one constructor
+const ELEMENTS: u32 = ELEMENT | (ELEMENT - 1);
+/// The slot of the identity holding what's written through `ELEMENTS`'s,
+/// which each element may then have
+const THROUGH_ELEMENTS: u32 = ELEMENT | (ELEMENT - 2);
+
+/// For a table written directly inside a constructor, the identity of all
+/// that constructor's elements: one table for any of them, holding what
+/// each was given. A union of more tables than are kept apart is it, so
+/// a loop over a long list of records still sees their fields
+fn elements_of(at: Location) -> Option<Location> {
+    let flags = at.slot & (POOL_OBJECT | PSEUDO | COPY | FAMILY_MEMBER);
+    if flags != 0 || at.slot & ELEMENT == 0 || at.slot == ELEMENTS || at.slot == THROUGH_ELEMENTS {
+        return None
+    }
+    Some(Location { offset: TextSize::new(at.slot & (ELEMENT - 1)), slot: ELEMENTS, ..at })
+}
+
+/// For the identity of a constructor's elements, the one holding what's
+/// written through it (see `THROUGH_ELEMENTS`)
+fn through_elements(at: Location) -> Option<Location> {
+    (at.slot == ELEMENTS && at.slot & (POOL_OBJECT | PSEUDO | COPY | FAMILY_MEMBER) == 0)
+        .then_some(Location { slot: THROUGH_ELEMENTS, ..at })
+}
+
 /// Which function a value is, when it can be one
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum FunctionRef {
@@ -523,7 +553,9 @@ impl NamedRef {
     }
 
     /// Any of the tables `tables`: one, or several, each once. Those of one
-    /// family are its identity. Past `MOST_OBJECTS` none is known
+    /// family are its identity. Past `MOST_OBJECTS`, those written in one
+    /// constructor are its elements' (see `elements_of`), and past that
+    /// again none is known
     fn several_tables(tables: Vec<TableId>) -> NamedRef {
         let mut joined: Vec<NamedRef> = tables.iter()
             .map(|&at| match family(at) {
@@ -533,6 +565,17 @@ impl NamedRef {
             .collect();
         joined.sort();
         joined.dedup();
+        // Too many to keep apart: those written in one constructor are any
+        // of its elements
+        if joined.len() > MOST_OBJECTS {
+            for table in &mut joined {
+                if let Some(elements) = table.identity().and_then(elements_of) {
+                    *table = NamedRef::Table(elements);
+                }
+            }
+            joined.sort();
+            joined.dedup();
+        }
         match joined.len() {
             1 => return joined[0],
             n if n > MOST_OBJECTS => return NamedRef::Unknown,
@@ -870,6 +913,9 @@ pub struct FunctionInfo {
     /// call a loop knows that of, like `return ipairs(self.list)`: so
     /// `for _, v in object:Enumerate()` gets what the list holds
     pub iterated: Option<Values>,
+    /// For one of the definitions' that only some game clients have, which
+    /// (`Classic`, `Classic and Forever`), shown in its signature
+    pub only: Option<String>,
 }
 
 /// What a `FieldWrite` or `ReturnedField` is on
@@ -1332,6 +1378,8 @@ pub struct Layer {
     /// The table each table `CopyTable` made is a copy of
     pub copies: HashMap<TableId, TableId>,
     pub parents: HashMap<TableId, Type>,
+    /// What each callback registry's events pass (see `Analysis::triggered`)
+    pub triggered: HashMap<(TableId, u64), Values>,
     pub pool_objects: HashMap<TableId, Type>,
     pub table_names: HashMap<TableId, String>,
     /// Where each global is assigned
@@ -1422,6 +1470,12 @@ impl Layer {
         for (at, &ty) in &analysis.parents {
             *own.parents.entry(renumber(*at, &file)).or_default() |= renumber_type(ty, &file);
         }
+        for (&(at, event), values) in &analysis.triggered {
+            let values = renumber_values(values, &file);
+            own.triggered.entry((renumber(at, &file), event))
+                .and_modify(|all| *all = all.union(&values))
+                .or_insert(values);
+        }
         for (at, &ty) in &analysis.pool_objects {
             *own.pool_objects.entry(renumber(*at, &file)).or_default() |= renumber_type(ty, &file);
         }
@@ -1493,6 +1547,11 @@ impl Layer {
         }
         for (at, &ty) in &other.parents {
             *self.parents.entry(*at).or_default() |= ty;
+        }
+        for (key, values) in &other.triggered {
+            self.triggered.entry(*key)
+                .and_modify(|all| *all = all.union(values))
+                .or_insert_with(|| values.clone());
         }
         for (at, &ty) in &other.pool_objects {
             *self.pool_objects.entry(*at).or_default() |= ty;
@@ -1587,6 +1646,7 @@ fn renumber_function(info: &FunctionInfo, file: &impl Fn(FileId) -> FileId) -> F
         }).collect(),
         returned_fields: info.returned_fields.clone(),
         iterated: info.iterated.as_ref().map(|values| renumber_values(values, file)),
+        only: info.only.clone(),
     }
 }
 
@@ -1636,7 +1696,8 @@ pub struct SourceFile {
 #[derive(Debug, Clone)]
 pub struct Handler {
     pub self_type: Type,
-    pub parameters: Vec<String>,
+    /// Each with the type the game passes
+    pub parameters: Vec<(String, Type)>,
 }
 
 #[derive(Debug, Default)]
@@ -1686,6 +1747,10 @@ pub struct Analysis {
     /// (`CreateFrame`'s parent, or the receiver of `CreateTexture` and the like)
     /// and anything passed to its `SetParent`
     pub parents: HashMap<TableId, Type>,
+    /// For each callback registry made in the files (a table with
+    /// `CallbackRegistryMixin`) and event, by its name's hash, what its
+    /// `TriggerEvent` calls pass after the event's name
+    pub triggered: HashMap<(TableId, u64), Values>,
     /// The tables each table or object made in the files had mixed into it (by
     /// `Mixin` or `CreateFromMixins`), whose fields it has too
     pub mixins: HashMap<TableId, Vec<Type>>,
@@ -1919,6 +1984,11 @@ impl Analysis {
                 changed.insert(Read::Parent(at));
             }
         }
+        for (at, event) in keys(&self.triggered, &older.triggered) {
+            if self.triggered.get(&(at, event)) != older.triggered.get(&(at, event)) {
+                changed.insert(Read::Triggered(at, event));
+            }
+        }
         for at in keys(&self.pool_objects, &older.pool_objects) {
             if self.pool_objects.get(&at) != older.pool_objects.get(&at) {
                 changed.insert(Read::PoolObject(at));
@@ -1945,6 +2015,11 @@ impl Analysis {
         }
         for (at, &ty) in &other.parents {
             *self.parents.entry(*at).or_default() |= ty;
+        }
+        for (key, values) in &other.triggered {
+            self.triggered.entry(*key)
+                .and_modify(|all| *all = all.union(values))
+                .or_insert_with(|| values.clone());
         }
         for (at, mixins) in &other.mixins {
             let mine = self.mixins.entry(*at).or_default();
@@ -2041,6 +2116,7 @@ impl Analysis {
             function_fields,
             bindings,
             map(2, &self.parents),
+            map(12, &self.triggered),
             map(3, &self.mixins),
             map(4, &self.mixed_into),
             map(11, &self.mixin_copies),
@@ -2230,6 +2306,9 @@ impl Analysis {
         if !parts.is_empty() {
             signature += " -> ";
             signature += &parts.join(", ");
+        }
+        if let Some(only) = &function.only {
+            signature += &format!(" ({only} only)");
         }
         signature
     }
@@ -2470,6 +2549,9 @@ struct Scope {
     names: HashMap<String, BindingId>,
     /// Code in this scope might not run (or might run many times)
     conditional: bool,
+    /// A branch of an `if`, which joins what its branches leave (see
+    /// `Join`), so assignments in it replace what a variable held
+    joined: bool,
     /// Where the scope's code ends, after which its locals can't be seen
     end: TextSize,
 }
@@ -2524,6 +2606,11 @@ struct Walker<'a> {
     /// While walking a loop, each binding whose current type was set, with
     /// the type before, so a pass compares only what it changed
     loop_log: Vec<(BindingId, Type)>,
+    /// The `if` statements being walked, innermost last
+    joins: Vec<Join>,
+    /// Where the constructor is that the table constructor about to be
+    /// walked is written directly inside (see `ELEMENT`)
+    element_of: Option<TextSize>,
     /// Loops being walked, innermost last
     loop_depth: usize,
     references: Vec<Reference>,
@@ -2587,6 +2674,9 @@ struct Walker<'a> {
     iterated: HashMap<Location, Values>,
     /// Parents seen on this walk. Reads use the previous walk's, like fields
     parents: HashMap<TableId, Type>,
+    /// What callback registries' events passed on this walk (see
+    /// `Analysis::triggered`). Reads use the previous walk's
+    triggered: HashMap<(TableId, u64), Values>,
     /// The field names each function was stored under, in any table
     stored_in_fields: HashMap<FunctionId, HashSet<String>>,
     /// Mixins seen on this walk. Reads use the previous walk's, like fields
@@ -2681,6 +2771,8 @@ enum Write {
     AssignedTo(FunctionId, BindingId),
     ParameterMixin(TableId, usize),
     Parent(TableId, Type),
+    /// A callback registry's event, by its name's hash, triggered with these
+    Triggered(TableId, u64, Values),
     PoolObject(TableId, Type),
     Function(FunctionId, FunctionInfo),
     /// A variable declared outside the body was assigned this
@@ -2706,6 +2798,7 @@ enum Read {
     Mixins(TableId),
     MixedInto(TableId),
     Parent(TableId),
+    Triggered(TableId, u64),
     PoolObject(TableId),
     Varargs(FunctionId),
     /// Only the functions a function calls, which finding recursion reads
@@ -2810,10 +2903,11 @@ fn addon_namespace(addon: u32) -> TableId {
 
 /// The library functions calls are checked against, found once for each walk
 /// rather than at every call
-const BUILTIN_PATHS: [&str; 21] = [
+const BUILTIN_PATHS: [&str; 23] = [
     "assert", "getmetatable", "gmatch", "ipairs", "next", "pairs", "pcall", "rawget", "setmetatable", "unpack", "xpcall",
     "string.gmatch", "table.create", "table.insert", "table.remove", "tinsert", "tremove",
     "CreateFontStringPool", "CreateFramePool", "CreateObjectPool", "CreateTexturePool",
+    "CallbackRegistryMixin.RegisterCallback", "CallbackRegistryMixin.TriggerEvent",
 ];
 
 /// Passes after which a loop that still hasn't settled is widened: any variable
@@ -2866,9 +2960,8 @@ impl<'a> Walker<'a> {
     /// body (the file's top level) sees as the game's function's parameters
     fn declare_handler(&mut self, handler: &Handler, range: TextRange) {
         let depth = self.scopes.len() - 1;
-        let names = std::iter::once("self").chain(handler.parameters.iter().map(String::as_str));
-        for (i, name) in names.enumerate() {
-            let types = if i == 0 { handler.self_type } else { Type::UNKNOWN };
+        let parameters = std::iter::once(("self", handler.self_type)).chain(handler.parameters.iter().map(|(name, types)| (name.as_str(), *types)));
+        for (name, types) in parameters {
             let id = self.new_binding(name, BindingKind::Parameter, None, types, MAIN_CHUNK, depth);
             self.bindings[id].assigned = true;
             self.bindings[id].visible = Some(range);
@@ -2974,6 +3067,7 @@ impl<'a> Walker<'a> {
             walked: self.walked,
             pool_objects: self.pool_objects,
             parents: self.parents,
+            triggered: self.triggered,
             mixins: self.mixins,
             copies: self.copies,
             diagnostics: self.diagnostics,
@@ -3273,11 +3367,17 @@ impl<'a> Walker<'a> {
         if self.loop_depth > 0 && self.current[id] != types {
             self.loop_log.push((id, self.current[id]));
         }
+        // What it held before the `if` being walked changed it
+        if let Some(join) = self.joins.last_mut() {
+            if id < join.bindings && !join.before.contains_key(&id) {
+                join.before.insert(id, (self.current[id], join.fell_through));
+            }
+        }
         self.current[id] = types;
     }
 
     fn push_scope(&mut self, conditional: bool, end: TextSize) {
-        self.scopes.push(Scope { names: HashMap::default(), conditional, end });
+        self.scopes.push(Scope { names: HashMap::default(), conditional, joined: false, end });
     }
 
     fn pop_scope(&mut self) {
@@ -3338,10 +3438,26 @@ impl<'a> Walker<'a> {
             return id;
         }
         let id = self.new_binding(name, BindingKind::Global, None, Type::default(), MAIN_CHUNK, 0);
-        self.set_current(id, Type::UNKNOWN);
+        self.set_current(id, self.global_before_assigned(id));
         self.globals.insert(name.to_string(), id);
         self.globals_created.push(name.to_string());
         id
+    }
+
+    /// What global `id` holds before the files first assign it. One they
+    /// assign is theirs, so until they do it's nil, or what a dependency or
+    /// the game gives it, as `T = T or {}` and `if G == nil then G = 1 end`
+    /// expect. One they never assign is unknown (unless a preset applies,
+    /// see `builtin_global`). On the first walk which it is isn't known yet,
+    /// so it's nothing
+    fn global_before_assigned(&self, id: BindingId) -> Type {
+        let Some(prior) = self.prior else { return Type::default() };
+        self.note(Read::Binding(id));
+        let name = &self.bindings[id].name;
+        match prior.bindings.get(id).filter(|p| &p.name == name) {
+            Some(p) if p.assigned => self.preset_global(name).unwrap_or(Type::NIL),
+            _ => Type::UNKNOWN,
+        }
     }
 
     fn is_global(&self, name: &str) -> bool {
@@ -3420,7 +3536,8 @@ impl<'a> Walker<'a> {
         binding.types |= types;
         binding.assigned = true;
         binding.reassigned = true;
-        let innermost_conditional = self.scopes.iter().rposition(|s| s.conditional);
+        // An `if`'s branches don't count, as the `if` joins what each leaves
+        let innermost_conditional = self.scopes.iter().rposition(|s| s.conditional && !s.joined);
         let replaces = binding.function == self.function
             && innermost_conditional.is_none_or(|depth| binding.scope_depth >= depth);
         if replaces {
@@ -3570,35 +3687,88 @@ impl<'a> Walker<'a> {
                 // Without an `else`, code after an `if` whose branches all
                 // return runs only when every condition was false
                 let mut all_return = s.else_branch().is_none();
+                self.joins.push(Join { bindings: self.bindings.len(), ..Join::default() });
+                // What each variable holds at the end of the branches that go
+                // on past the `if`
+                let mut ends: HashMap<BindingId, Type> = HashMap::default();
                 for (i, branch) in s.if_branches().iter().enumerate() {
                     let block = branch.block();
-                    all_return &= block.as_ref().is_some_and(always_returns);
+                    let returns = block.as_ref().is_some_and(always_returns);
+                    all_return &= returns;
                     // An `elseif` condition that may call a function may change
                     // the fields the conditions before it proved things of
                     if branch.expression().is_some_and(|condition| may_call(self, condition.syntax())) {
                         earlier_false.retain(|(target, _)| matches!(target, Target::Local(_)));
                     }
-                    let proved = self.with_narrowing(&earlier_false.clone(), |w| {
+                    self.narrow_locals(&earlier_false);
+                    let proved = self.with_narrowing(&fields_only(&earlier_false), |w| {
                         let condition = branch.expression()?;
                         // An `elseif` condition only runs if the ones before failed
                         w.short_circuit_depth += usize::from(i > 0);
                         w.expression(&condition);
                         w.short_circuit_depth -= usize::from(i > 0);
+                        w.conditions_walked();
                         let proved = w.narrowing(&condition);
-                        w.with_narrowing(&both(earlier_false.clone(), proved.when_true.clone()), |w| w.block(block, true));
+                        let taken = both(earlier_false.clone(), proved.when_true.clone());
+                        w.narrow_locals(&taken);
+                        w.with_narrowing(&fields_only(&taken), |w| w.branch_block(block));
                         Some(proved)
                     });
                     match proved {
                         Some(proved) => earlier_false = both(earlier_false, proved.when_false),
-                        None => self.block(branch.block(), true),
+                        None => self.branch_block(branch.block()),
                     }
+                    self.end_branch(&mut ends, !returns);
                 }
                 if let Some(branch) = s.else_branch() {
-                    self.with_narrowing(&earlier_false.clone(), |w| w.block(branch.block(), true));
+                    let returns = branch.block().as_ref().is_some_and(always_returns);
+                    self.narrow_locals(&earlier_false);
+                    self.with_narrowing(&fields_only(&earlier_false), |w| w.branch_block(branch.block()));
+                    self.end_branch(&mut ends, !returns);
+                }
+                let join = self.joins.pop().unwrap_or_default();
+                // Code after it may also run with every condition false
+                let skipped = s.else_branch().is_none();
+                let mut ids: Vec<BindingId> = join.before.keys().copied().collect();
+                ids.extend(earlier_false.iter().filter_map(|(target, _)| match target {
+                    Target::Local(id) if *id < join.bindings && !join.before.contains_key(id) => Some(*id),
+                    _ => None,
+                }));
+                ids.sort();
+                ids.dedup();
+                // Changes the `if` made are changes the one around it made
+                if let Some(outer) = self.joins.last_mut() {
+                    for (&id, &(before, _)) in &join.before {
+                        if id < outer.bindings {
+                            outer.before.entry(id).or_insert((before, outer.fell_through));
+                        }
+                    }
+                }
+                for id in ids {
+                    let (before, fell_through) = join.before.get(&id).copied().unwrap_or((self.current[id], 0));
+                    // With every condition walked, as the code after it is
+                    // when none was true
+                    let conditioned = join.after_conditions.get(&id).copied().unwrap_or(before);
+                    let mut joined = ends.get(&id).copied().unwrap_or_default();
+                    // The branches that went on before it was changed left it as it was
+                    if fell_through > 0 {
+                        joined |= before;
+                    }
+                    if skipped {
+                        let narrowed = earlier_false.iter().find(|(target, _)| *target == Target::Local(id)).map(|(_, ty)| *ty);
+                        joined |= narrowed.unwrap_or(conditioned);
+                    }
+                    // Nothing goes on past it: nothing after it runs
+                    if join.fell_through == 0 && !skipped {
+                        joined = conditioned;
+                    }
+                    self.set_current(id, joined);
                 }
                 if all_return {
                     for (target, ty) in earlier_false {
-                        self.narrow(&target, ty);
+                        if let Target::Field(..) = target {
+                            self.narrow(&target, ty);
+                        }
                     }
                 }
             }
@@ -3895,7 +4065,9 @@ impl<'a> Walker<'a> {
             // In a mixin's methods, `self` is an object with the fields of
             // the tables the mixin was mixed into on its way to it
             NamedRef::Instance { at: id, .. } => self.own_field(prior, id, name, 0).or_else(|| self.copied_into_field(prior, id, name)),
-            NamedRef::One(_) | NamedRef::Extended(_) => None,
+            // A frame XML makes from a template has its Lua mixins' fields,
+            // as one `CreateFrame` makes does
+            NamedRef::One(id) | NamedRef::Extended(id) => self.lua_mixin_field(prior, id, name),
             NamedRef::Several(_) | NamedRef::Tables(_) => unreachable!("read from each object"),
             // Not a table we know, so nothing to go on
             NamedRef::None | NamedRef::Unknown => return Type::UNKNOWN,
@@ -3919,6 +4091,19 @@ impl<'a> Walker<'a> {
                 Type { named: found.named.loosened(), ..found }
             }
         }
+    }
+
+    /// Field `name` of the Lua mixins of named type `id`, the last given first,
+    /// as later ones overwrite earlier ones
+    fn lua_mixin_field(&self, prior: &Analysis, id: NamedId, name: &str) -> Option<Type> {
+        let names = self.definitions.lua_mixins(id);
+        if names.is_empty() {
+            return None
+        }
+        self.note(Read::LuaMixins);
+        names.iter().rev()
+            .filter_map(|mixin| prior.lua_mixins.get(mixin)?.named.identity())
+            .find_map(|at| self.own_field(prior, at, name, 0))
     }
 
     /// For mixin `mixin`, field `name` of the tables it was mixed into, and
@@ -3956,6 +4141,13 @@ impl<'a> Walker<'a> {
             (Some(a), Some(b)) => return Some(a | b),
             (Some(found), None) | (None, Some(found)) => return Some(found),
             (None, None) => {}
+        }
+        // One of a constructor's elements: what's written through any of them
+        if let Some(through) = elements_of(table).and_then(through_elements) {
+            self.note(Read::Field(through, name_key(name)));
+            if let Some(found) = prior.fields.get(&through).and_then(|fields| fields.get(name)) {
+                return Some(*found)
+            }
         }
         // Deep enough for any real chain of mixins, and stops a loop
         if depth > 16 {
@@ -4004,11 +4196,15 @@ impl<'a> Walker<'a> {
     /// What a write changes, without noting it for the bodies being walked.
     /// What a table of a family is given, the family is too
     fn effect(&mut self, write: &Write) {
+        // What a table of a family, or one of a constructor's elements, is
+        // given, the family or the elements are too
+        // and what's written through the elements' identity, each may have
+        let group = |at: &TableId| family(*at).filter(|f| f != at).or_else(|| elements_of(*at)).or_else(|| through_elements(*at));
         let family_write = match write {
-            Write::Field(at, name, value) => family(*at).filter(|f| f != at).map(|f| vec![Write::Field(f, name.clone(), *value)]),
-            Write::Entry(at, key, value) => family(*at).filter(|f| f != at).map(|f| vec![Write::Entry(f, *key, *value)]),
-            Write::MixinAdded(at, mixin) => family(*at).filter(|f| f != at).map(|f| vec![Write::MixinAdded(f, *mixin)]),
-            Write::MixinsReplaced(at, mixins) => family(*at).filter(|f| f != at).map(|f| mixins.iter().map(|&m| Write::MixinAdded(f, m)).collect()),
+            Write::Field(at, name, value) => group(at).map(|f| vec![Write::Field(f, name.clone(), *value)]),
+            Write::Entry(at, key, value) => group(at).map(|f| vec![Write::Entry(f, *key, *value)]),
+            Write::MixinAdded(at, mixin) => group(at).map(|f| vec![Write::MixinAdded(f, *mixin)]),
+            Write::MixinsReplaced(at, mixins) => group(at).map(|f| mixins.iter().map(|&m| Write::MixinAdded(f, m)).collect()),
             _ => None,
         };
         for write in family_write.into_iter().flatten() {
@@ -4073,6 +4269,11 @@ impl<'a> Walker<'a> {
                 }
             }
             Write::Parent(at, parent) => *self.parents.entry(*at).or_default() |= *parent,
+            Write::Triggered(at, event, values) => {
+                self.triggered.entry((*at, *event))
+                    .and_modify(|all| *all = all.union(values))
+                    .or_insert_with(|| values.clone());
+            }
             Write::PoolObject(at, object) => { self.pool_objects.insert(*at, *object); }
             Write::Function(id, info) => { self.functions.insert(*id, info.clone()); }
             Write::Binding(id, types) => {
@@ -4275,6 +4476,7 @@ impl<'a> Walker<'a> {
                         shared.entry(Read::Calls(*id)).or_default().push(Shared::Calls(&info.calls));
                     }
                     Write::Parent(at, _) => shared.entry(Read::Parent(*at)).or_default().push(Shared::Write(write)),
+                    Write::Triggered(at, event, _) => shared.entry(Read::Triggered(*at, *event)).or_default().push(Shared::Write(write)),
                     Write::PoolObject(at, _) => shared.entry(Read::PoolObject(*at)).or_default().push(Shared::Write(write)),
                     _ => {}
                 }
@@ -4392,7 +4594,7 @@ impl<'a> Walker<'a> {
         }).collect();
         let varargs = params.is_some_and(|p| p.ellipsis())
             .then(|| Parameter { name: "...".to_string(), types: Type::UNKNOWN, mandated: None });
-        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls, field_writes, returned_fields, iterated }));
+        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls, field_writes, returned_fields, iterated, only: None }));
     }
 
     /// `returns`, with the templates the definitions say objects the function
@@ -4900,6 +5102,12 @@ impl<'a> Walker<'a> {
                 continue
             }
             returns.values[slot] = narrowed_to(self.field_read(on, &field.field), value);
+        }
+        if let Some(receiver) = receiver.filter(|_| is_method) {
+            self.callback_registry(receiver, callee, &arguments, &argument_types);
+            if let Some(method) = call.method_name() {
+                self.script_handler(receiver, callee, method.text(), &arguments, &argument_types);
+            }
         }
         if let (Some(receiver), Some(method)) = (receiver, call.method_name()) {
             returns = self.object_method(call, receiver, method.text(), arguments.first(), template.and_then(|i| arguments.get(i)), &argument_types, returns);
@@ -5441,6 +5649,89 @@ impl<'a> Walker<'a> {
             Some(named) => Type { named: NamedRef::Instance { named, at, extended: true }, ..Type::of(TypeSet::TABLE) },
             None => Type::table(at),
         }
+    }
+
+    /// `registry:TriggerEvent("Name", ...)` and `registry:RegisterCallback("Name",
+    /// callback, owner, ...)` on a table made in the files with Blizzard's
+    /// `CallbackRegistryMixin`: each callback is called with its owner (a
+    /// number made for it when there's none), what was registered after the
+    /// owner, then what each `TriggerEvent` of that event passes
+    fn callback_registry(&mut self, receiver: Type, callee: Type, arguments: &[Expression], argument_types: &Values) {
+        let is = |w: &Walker, path: &str| callee.function != FunctionRef::None && w.builtin(path).is_some_and(|b| b.function == callee.function);
+        let (trigger, register) = (is(self, "CallbackRegistryMixin.TriggerEvent"), is(self, "CallbackRegistryMixin.RegisterCallback"));
+        if !trigger && !register {
+            return
+        }
+        let Some(at) = receiver.named.identity() else { return };
+        let Some(Expression::Literal(literal)) = arguments.first() else { return };
+        let Some(event) = literal.get_string() else { return };
+        let event = name_key(event.trim_matches(['"', '\'']));
+        let after = |from: usize| Values { values: argument_types.values.iter().skip(from).copied().collect(), rest: argument_types.rest };
+        if trigger {
+            self.apply(Write::Triggered(at, event, after(1)));
+            return
+        }
+        self.note(Read::Triggered(at, event));
+        let prior = self.prior.and_then(|prior| prior.triggered.get(&(at, event)));
+        let triggered = match (prior, self.layer.triggered.get(&(at, event))) {
+            (Some(a), Some(b)) => a.union(b),
+            (Some(found), None) | (None, Some(found)) => found.clone(),
+            // Never triggered, so never called
+            (None, None) => return,
+        };
+        let owner = match arguments.len() {
+            0..=2 => Type::of(TypeSet::NUMBER),
+            _ => {
+                let owner = argument_types.get(2);
+                match owner.set.contains(TypeSet::NIL) {
+                    true => owner.without(TypeSet::NIL) | Type::of(TypeSet::NUMBER),
+                    false => owner,
+                }
+            }
+        };
+        let mut values = vec![owner];
+        let extras = after(3);
+        // What was registered after the owner comes first, when how many
+        // there are is known
+        let rest = match arguments.len() > 3 && matches!(arguments.last(), Some(Expression::VarArgs(_) | Expression::FunctionCall(_))) {
+            true => {
+                values.extend(extras.values);
+                Type::UNKNOWN
+            }
+            false => {
+                values.extend(extras.values.iter().take(arguments.len().saturating_sub(3)).copied());
+                values.extend(triggered.values);
+                triggered.rest
+            }
+        };
+        // A method's parameters don't count `self`, which the owner is
+        let callback = argument_types.get(1);
+        if self.known_function(callback.function).is_some_and(|f| f.method) {
+            values.remove(0);
+        }
+        self.pass_to_callback(arguments.get(1), callback, Values { values, rest });
+    }
+
+    /// `frame:SetScript("OnEvent", handler)` or `HookScript`, with the game's
+    /// method: the game calls the handler with the frame, then the arguments
+    /// that kind of handler gets (see `xml::handler_parameters`)
+    fn script_handler(&mut self, receiver: Type, callee: Type, method: &str, arguments: &[Expression], argument_types: &Values) {
+        if !matches!(method, "SetScript" | "HookScript") || !matches!(callee.function, FunctionRef::Builtin(_)) {
+            return
+        }
+        let Some(Expression::Literal(literal)) = arguments.first() else { return };
+        let Some(script) = literal.get_string() else { return };
+        let script = script.trim_matches(['"', '\'']);
+        let mut values = vec![receiver];
+        values.extend(crate::xml::handler_parameters(script).iter().map(|&(_, types)| Type::of(types)));
+        // An event's payload, which isn't known
+        let rest = if script == "OnEvent" { Type::UNKNOWN } else { Type::NIL };
+        // A method's parameters don't count `self`, which the frame is
+        let handler = argument_types.get(1);
+        if self.known_function(handler.function).is_some_and(|f| f.method) {
+            values.remove(0);
+        }
+        self.pass_to_callback(arguments.get(1), handler, Values { values, rest });
     }
 
     /// A function given to a pool, which calls it with `arguments`. That call
@@ -6341,7 +6632,11 @@ impl<'a> Walker<'a> {
 
     /// A new table, with the types of its `name = value` fields recorded
     fn table_constructor(&mut self, node: &SyntaxNode) -> Type {
-        let table = Type::table(self.location(node.text_range().start()));
+        let mut at = self.location(node.text_range().start());
+        if let Some(outer) = self.element_of.take().filter(|&o| u32::from(o) < ELEMENT - 2) {
+            at.slot = ELEMENT | u32::from(outer);
+        }
+        let table = Type::table(at);
         let fields: Vec<SyntaxNode> = node.children().filter(|n| n.kind() == SyntaxKind::Field).collect();
         let last_field = fields.last().cloned();
         for field in fields {
@@ -6378,6 +6673,10 @@ impl<'a> Walker<'a> {
                         if in_brackets {
                             key = Some(self.index_key(&e));
                             continue
+                        }
+                        // A table written directly in this one is one of its elements
+                        if let Expression::TableConstructor(_) = e {
+                            self.element_of = Some(node.text_range().start());
                         }
                         let value = self.expression(&e);
                         match (keyed, &name, key.take()) {
@@ -6643,6 +6942,60 @@ impl<'a> Walker<'a> {
         result
     }
 
+    /// Narrows the locals among `narrowed` from here. Inside an `if`, which
+    /// joins what its branches leave, so they aren't put back after
+    fn narrow_locals(&mut self, narrowed: &[(Target, Type)]) {
+        for (target, ty) in narrowed {
+            if let Target::Local(_) = target {
+                self.narrow(target, *ty);
+            }
+        }
+    }
+
+    /// The condition of a branch of the `if` being walked has been: what it
+    /// did happens whichever branch is taken after it
+    fn conditions_walked(&mut self) {
+        let Some(join) = self.joins.last() else { return };
+        let changed: Vec<BindingId> = join.before.keys().copied().collect();
+        let held: Vec<(BindingId, Type)> = changed.into_iter().map(|id| (id, self.current[id])).collect();
+        if let Some(join) = self.joins.last_mut() {
+            join.after_conditions.extend(held);
+        }
+    }
+
+    /// A branch of an `if`
+    fn branch_block(&mut self, block: Option<Block>) {
+        if let Some(block) = block {
+            self.push_scope(true, block.syntax().text_range().end());
+            if let Some(scope) = self.scopes.last_mut() {
+                scope.joined = true;
+            }
+            self.statements(&block);
+            self.pop_scope();
+        }
+    }
+
+    /// The end of a branch of the `if` being walked: what it leaves, if it
+    /// goes on past the `if` (`goes_on`), joins `ends`, and the next branch
+    /// starts from what the `if` started with
+    fn end_branch(&mut self, ends: &mut HashMap<BindingId, Type>, goes_on: bool) {
+        let Some(join) = self.joins.last() else { return };
+        let before: Vec<(BindingId, Type)> = join.before.iter()
+            .map(|(&id, &(ty, _))| (id, join.after_conditions.get(&id).copied().unwrap_or(ty)))
+            .collect();
+        if goes_on {
+            for &(id, _) in &before {
+                *ends.entry(id).or_default() |= self.current[id];
+            }
+            if let Some(join) = self.joins.last_mut() {
+                join.fell_through += 1;
+            }
+        }
+        for (id, ty) in before {
+            self.set_current(id, ty);
+        }
+    }
+
     /// Takes `target` to be of type `ty` from here
     fn narrow(&mut self, target: &Target, ty: Type) {
         match target {
@@ -6667,7 +7020,13 @@ impl<'a> Walker<'a> {
     fn field_path(&self, e: &Expression) -> Option<(BindingId, Vec<String>)> {
         let Expression::Identifier(identifier) = e else { return None };
         if let Some(name) = identifier.simple_name() {
-            let id = self.local_binding(name.text())?;
+            // In the main chunk, a global is followed as it's assigned, as
+            // `if G == nil then G = {} end` needs, so it narrows like a local
+            let id = match self.local_binding(name.text()) {
+                Some(id) => id,
+                None if self.function == MAIN_CHUNK => *self.globals.get(name.text())?,
+                None => return None,
+            };
             return (self.bindings[id].function == self.function).then(|| (id, Vec::new()))
         }
         let (base, field) = field_access(identifier.syntax())?;
@@ -6691,11 +7050,13 @@ impl<'a> Walker<'a> {
     /// `narrowed_fields`)
     fn narrowable(&self, expression: &Expression) -> Option<(Target, Type)> {
         let (root, path) = self.field_path(expression)?;
+        // A global the files don't assign is its preset, as a read finds
+        let held = self.builtin_global(root).unwrap_or(self.current[root]);
         if path.is_empty() {
-            return Some((Target::Local(root), self.current[root]))
+            return Some((Target::Local(root), held))
         }
         // Its type here: as narrowed, or read from what it's on
-        let mut ty = self.current[root];
+        let mut ty = held;
         for (i, name) in path.iter().enumerate() {
             ty = match self.narrowed_fields.iter().find(|(r, p, _)| *r == root && p[..] == path[..=i]) {
                 Some((_, _, narrowed)) => *narrowed,
@@ -6847,6 +7208,25 @@ fn string_field_name(literal: &str) -> Option<&str> {
 
 /// Whether every path through the block ends in a `return`. Conservative:
 /// loops and `error()` calls count as possibly falling through
+/// An `if` statement being walked: what each older variable it changed held
+/// before, and how many of its branches had gone on past it by then
+#[derive(Default)]
+struct Join {
+    /// The bindings made before it, the only ones that matter after it
+    bindings: usize,
+    before: HashMap<BindingId, (Type, usize)>,
+    /// What each holds after the conditions walked so far, which run
+    /// whichever branch is taken, so each later branch starts from it
+    after_conditions: HashMap<BindingId, Type>,
+    /// Branches walked so far that go on past it
+    fell_through: usize,
+}
+
+/// The fields among narrowed targets
+fn fields_only(narrowed: &[(Target, Type)]) -> Vec<(Target, Type)> {
+    narrowed.iter().filter(|(target, _)| matches!(target, Target::Field(..))).cloned().collect()
+}
+
 fn always_returns(block: &Block) -> bool {
     match block.statements().last() {
         Some(Statement::Return(_)) => true,
@@ -7073,7 +7453,19 @@ mod tests {
     fn conditional_assignment_unions() {
         assert_eq!(types_of("local x = 1 if c then x = 's' end local y = x", "y"), ["number|string"]);
         assert_eq!(types_of("local x = 1 while c do x = 's' end local y = x", "y"), ["number|string"]);
-        assert_eq!(types_of("local x if c then x = 1 else x = 's' end local y = x", "y"), ["number|string|nil"]);
+        // Every branch assigning it replaces what it held
+        assert_eq!(types_of("local x if c then x = 1 else x = 's' end local y = x", "y"), ["number|string"]);
+        assert_eq!(types_of("local x if c then x = 1 elseif d then x = 's' end local y = x", "y"), ["number|string|nil"]);
+        // Within a branch, as anywhere, an assignment replaces it
+        assert_eq!(types_of("local x = 1 if c then x = 's' local y = x end", "y"), ["string"]);
+        // A branch that returns doesn't go on past the `if`
+        assert_eq!(types_of("local x = 1 if c then x = 's' return end local y = x", "y"), ["number"]);
+        // What a condition does happens whichever way it goes
+        let source = "local x = 1 local function g() x = 's' return true end";
+        assert_eq!(types_of(&format!("{source} if g() then end local y = x"), "y"), ["number|string"]);
+        assert_eq!(types_of(&format!("{source} if c then elseif g() then x = true end local y = x"), "y"), ["number|string|true"]);
+        // Nor what a loop's pass leaves, as it may run again
+        assert_eq!(types_of("local x = 1 while c do if d then x = 's' end end local y = x", "y"), ["number|string"]);
     }
 
     #[test]
@@ -7294,6 +7686,8 @@ mod tests {
         assert_eq!(builtin_types_of("local x = tostring(1)", "x"), ["string"]);
         assert_eq!(builtin_types_of("local x = tonumber('1')", "x"), ["number?"]);
         assert_eq!(builtin_types_of("local x = tostring", "x"), ["function(value) -> string"]);
+        // Narrowed through, in the main chunk as in a function
+        assert_eq!(builtin_types_of("local x = string.format and string.format('%d', 1)", "x"), ["string"]);
         assert_eq!(builtin_types_of("local x, y = select(2, 'a', 'b')", "x"), ["string"]);
         assert_eq!(builtin_types_of("local x, y = select(2, 'a', 'b')", "y"), ["nil"]);
         assert_eq!(builtin_types_of("local x, y = select(2, f())", "y"), ["unknown"]);
@@ -7329,8 +7723,9 @@ mod tests {
     #[test]
     fn files_can_replace_presets() {
         assert_eq!(builtin_types_of("function tostring() return 1 end local x = tostring()", "x"), ["number"]);
-        // Assigned further down still counts, via the second walk
-        assert_eq!(builtin_types_of("local x = tostring() tostring = nil", "x"), ["unknown"]);
+        // Until the files assign it, it's what the preset says
+        assert_eq!(builtin_types_of("local x = tostring() tostring = nil", "x"), ["string"]);
+        assert_eq!(builtin_types_of("tostring = nil local x = tostring", "x"), ["nil"]);
         assert_eq!(builtin_types_of("local function tostring() return {} end local x = tostring()", "x"), ["table"]);
         assert_eq!(builtin_types_of("string = {} local x = string.format()", "x"), ["unknown"]);
     }
@@ -7595,6 +7990,22 @@ mod tests {
     }
 
     #[test]
+    fn many_records_of_one_constructor() {
+        // More records than are kept apart: any of the constructor's
+        // elements, with each one's fields
+        let records: Vec<String> = (0..12).map(|i| format!("K{i} = {{ key = 'k{i}'{} }}", if i == 3 { ", refresh = 1" } else { "" })).collect();
+        let source = format!("local s = {{ {} }} for _, d in pairs(s) do local x, r = d.key, d.refresh d.seen = true end local z = s.K2.seen", records.join(", "));
+        assert_eq!(library_types_of(&source, "x")[0], "string");
+        assert_eq!(library_types_of(&source, "r")[0], "number");
+        // What's written through any of them, each may have
+        assert_eq!(library_types_of(&source, "z")[0], "true");
+        // Array items too, joined with others put in after
+        let items: Vec<&str> = (0..12).map(|_| "{ text = 's' }").collect();
+        let source = format!("local lines = {{ {} }} table.insert(lines, {{ text = 1 }}) for _, l in ipairs(lines) do local t = l.text end", items.join(", "));
+        assert_eq!(library_types_of(&source, "t")[0], "number|string");
+    }
+
+    #[test]
     fn loops_over_what_functions_return() {
         // `return ipairs(self.list)`: a loop over a call gets what the list holds
         let source = "local P = {} function P:Init() self.list = {} end
@@ -7819,9 +8230,12 @@ mod tests {
         // Unless every branch returns, and there's no else
         assert_eq!(library_types_of(&format!("{maybe} if not v then return end local x = v"), "x")[0], "number");
         assert_eq!(library_types_of(&format!("{maybe} if v == nil then return end local x = v"), "x")[0], "number");
-        assert_eq!(library_types_of(&format!("{maybe} if not v then return else end local x = v"), "x")[0], "number?");
-        // Assigned in a branch: that's kept as well
-        assert_eq!(library_types_of(&format!("{maybe} if v then v = 's' end local x = v"), "x")[0], "number|string|nil");
+        // Only the `else` goes on, where it's set
+        assert_eq!(library_types_of(&format!("{maybe} if not v then return else end local x = v"), "x")[0], "number");
+        // Without an `else`, going on with every condition false narrows too
+        assert_eq!(library_types_of(&format!("{maybe} if v == nil then v = 's' end local x = v"), "x")[0], "number|string");
+        // Assigned in a branch: that's kept as well, and otherwise it was false
+        assert_eq!(library_types_of(&format!("{maybe} if v then v = 's' end local x = v"), "x")[0], "string?");
         // `and` and `or`
         assert_eq!(library_types_of(&format!("{maybe} local x = v and v + 1"), "x")[0], "number?");
         assert_eq!(library_types_of(&format!("{maybe} if v and v > 0 then local x = v end"), "x")[0], "number");
@@ -8085,7 +8499,12 @@ mod tests {
         assert_eq!(types_in(&analysis, 1, "x"), ["number"]);
         // Files run in order, so a global set by a later file isn't set yet
         let analysis = analyse_files(&["local x = Late", "Late = 's'"], false);
-        assert_eq!(types_in(&analysis, 0, "x"), ["unknown"]);
+        assert_eq!(types_in(&analysis, 0, "x"), ["nil"]);
+        // So making it if it isn't there makes it
+        assert_eq!(types_of("T = T or {} local a = T", "a"), ["table"]);
+        assert_eq!(types_of("if G == nil then G = 's' end local a = G", "a"), ["string"]);
+        // One the files never set is whatever else set it
+        assert_eq!(types_of("local a = Unset", "a"), ["unknown"]);
         // But a function reading it can run later
         let analysis = analyse_files(&["function F() return Late end", "Late = 's' local x = F()"], false);
         assert_eq!(types_in(&analysis, 1, "x"), ["string"]);
@@ -8187,6 +8606,64 @@ mod tests {
         // Copied onto something else (a mixin), whose calls aren't known to be it
         let analysis = analyse_files(&["local M = {} function M:Init(x) end M:Init(1)", "local f = Mixin(CreateFrame('Frame'), M) f:Init('s')"], true);
         assert_eq!(types_in(&analysis, 0, "x"), ["unknown"]);
+    }
+
+    #[test]
+    fn script_handlers_set_in_lua() {
+        let source = "local f = CreateFrame('Button')
+            f:SetScript('OnEvent', function(self, eventName, a) local s, e, x = self, eventName, a end)
+            f:SetScript('OnClick', function(self, button, down) local b, d = button, down end)
+            local M = {} function M:OnUpdate(elapsed) local el = elapsed end
+            f:HookScript('OnUpdate', M.OnUpdate)
+            f:SetScript('OnUpdate', nil)";
+        // The frame, then what that kind of handler is passed
+        assert_eq!(widget_types_of(source, "s")[0], "Button");
+        assert_eq!(widget_types_of(source, "e")[0], "string");
+        // An event's payload isn't known
+        assert_eq!(widget_types_of(source, "x")[0], "unknown");
+        assert_eq!(widget_types_of(source, "b")[0], "string");
+        assert_eq!(widget_types_of(source, "d")[0], "boolean");
+        // A method's `self` is the frame, so its parameters start after
+        assert_eq!(widget_types_of(source, "el")[0], "number");
+    }
+
+    #[test]
+    fn functions_only_some_clients_have() {
+        let definitions = Arc::new(Definitions::from_json(r#"{"functions": {
+            "Engrave": {"parameters": ["slot: number"], "returns": ["boolean"], "only": ["Classic"]},
+            "Both": {"parameters": [], "returns": [], "only": ["Classic", "Forever"]}
+        }}"#).unwrap());
+        let analysis = analyse_with("local a, b = Engrave, Both local c = Engrave(1)", &definitions);
+        assert_eq!(describe_uses(&analysis, "a")[0], "function(slot: number) -> boolean (Classic only)");
+        assert_eq!(describe_uses(&analysis, "b")[0], "function() (Classic and Forever only)");
+        assert_eq!(describe_uses(&analysis, "c")[0], "boolean");
+    }
+
+    #[test]
+    fn callback_registry_callbacks() {
+        let definitions = Arc::new(Definitions::from_json(r#"{"functions": {
+            "CreateFromMixins": {"parameters": ["..."], "returns": ["unknown"]}
+        }, "tables": {"CallbackRegistryMixin": {"functions": {
+            "RegisterCallback": {"parameters": ["event", "func", "owner", "..."], "returns": ["unknown"]},
+            "TriggerEvent": {"parameters": ["event", "..."]}
+        }}}}"#).unwrap());
+        let source = "local R = CreateFromMixins(CallbackRegistryMixin)
+            R:RegisterCallback('X', function(o, v) local a, own = v, o end)
+            local M = {} function M:OnX(v) local b = v end
+            R:RegisterCallback('X', M.OnX, M)
+            R:RegisterCallback('X', function(o, extra, v) local c, e = v, extra end, M, 's')
+            R:RegisterCallback('Never', function(o, v) local d = v end)
+            R:TriggerEvent('X', 5)";
+        let analysis = analyse_with(source, &definitions);
+        // Each gets its owner (a number made for it without one), what was
+        // registered after the owner, then what the event passes
+        assert_eq!(describe_uses(&analysis, "a")[0], "number");
+        assert_eq!(describe_uses(&analysis, "own")[0], "number");
+        assert_eq!(describe_uses(&analysis, "b")[0], "number");
+        assert_eq!(describe_uses(&analysis, "c")[0], "number");
+        assert_eq!(describe_uses(&analysis, "e")[0], "string");
+        // Never triggered: nothing known
+        assert_eq!(describe_uses(&analysis, "d")[0], "unknown");
     }
 
     fn mixin_definitions() -> Arc<Definitions> {
@@ -8533,6 +9010,8 @@ mod tests {
             "method_tables": {
                 "RegionAPI": {"functions": {"SetPoint": {}, "Show": {}, "GetParent": {"returns": ["Region"]}, "SetParent": {"parameters": ["parent: Frame|nil"]}}},
                 "FrameAPI": {"functions": {
+                    "SetScript": {"parameters": ["scriptTypeName: string", "script: function|nil"]},
+                    "HookScript": {"parameters": ["scriptTypeName: string", "script: function"]},
                     "CreateTexture": {"returns": ["Texture"]},
                     "CreateFontString": {"parameters": ["name: string|nil", "templateName: string|nil"], "returns": ["Texture"]},
                     "GetChild": {"returns": ["Frame|nil"]},

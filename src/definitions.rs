@@ -1366,7 +1366,21 @@ impl Definitions {
             }).collect::<Result<Vec<_>, _>>()?,
             Some(_) => return Err("`returned_fields` should be an array".to_string()),
         };
-        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns, calls: Vec::new(), forwarded_calls, field_writes, returned_fields, iterated: None })
+        // The game clients it's only in: "Classic", "Classic and Forever"
+        let only = match definition.get("only") {
+            None => None,
+            Some(Value::Array(items)) => {
+                let names = items.iter().map(|item| item.as_str().map(str::to_string).ok_or("`only` should list names"))
+                    .collect::<Result<Vec<_>, _>>()?;
+                match names.split_last() {
+                    None => None,
+                    Some((last, [])) => Some(last.clone()),
+                    Some((last, rest)) => Some(format!("{} and {last}", rest.join(", "))),
+                }
+            }
+            Some(_) => return Err("`only` should be an array".to_string()),
+        };
+        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns, calls: Vec::new(), forwarded_calls, field_writes, returned_fields, iterated: None, only })
     }
 
     /// `"name"` or `"name: type"`

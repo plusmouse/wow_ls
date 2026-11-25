@@ -159,8 +159,11 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path, colors
                     report.duplicates.push(name.clone());
                 }
             }
-            // An intrinsic is an element to use, not a frame
-            if !object.is_virtual && !object.intrinsic {
+            // An intrinsic is an element to use, not a frame. A named font is
+            // made even when it's virtual, as `GameFontHighlight` is, to be
+            // inherited from and used as it is
+            let font = kinds.of(&object.tag).is_some_and(|(ty, _)| ty == "Font");
+            if (!object.is_virtual || font) && !object.intrinsic {
                 let mut found = Vec::new();
                 xml::global_frames(&object, None, &mut found);
                 frames.extend(found);

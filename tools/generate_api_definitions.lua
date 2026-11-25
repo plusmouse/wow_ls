@@ -17,7 +17,14 @@
 -- (Interface/AddOns/Blizzard_APIDocumentationGenerated in wow-ui-source).
 --
 -- Usage:
---   lua5.1 tools/generate_api_definitions.lua definitions/blizzard_api.json Blizzard_APIDocumentationGenerated/*.lua
+--   lua5.1 tools/generate_api_definitions.lua definitions/blizzard_api.json Blizzard_APIDocumentationGenerated/*.lua \
+--     [--flavour Classic <classic documentation files...>] [--flavour Forever <...>]
+--
+-- The files before any `--flavour` are the mainline client's. Each flavour's
+-- add what the mainline's don't document: functions and methods, marked as
+-- only in those flavours (`"only": ["Classic"]`), and the structures and
+-- enumerations they use. A function documented by several flavours has their
+-- types joined. What the mainline documents is kept as it documents it.
 --
 -- The documentation files are Lua, so they're run with stub globals and the
 -- tables they register are converted. Type names are mapped by the tables
@@ -33,7 +40,7 @@
 
 local output_path = arg[1]
 if not output_path or #arg < 2 then
-	io.stderr:write("usage: lua5.1 generate_api_definitions.lua <output.json> <documentation files...>\n")
+	io.stderr:write("usage: lua5.1 generate_api_definitions.lua <output.json> <documentation files...> [--flavour <name> <documentation files...>]...\n")
 	os.exit(1)
 end
 
@@ -50,6 +57,8 @@ local LUA_TYPES = {
 		"number", "luaIndex", "fileID", "BigUInteger", "BigInteger", "time_t", "Seconds", "Milliseconds",
 		"FrameTime", "size", "normalizedValue", "SingleColorValue", "WOWMONEY", "uiFontHeight", "uiUnit", "SoundHandle",
 		"UnitCastBarID", "EncounterTimelineEventID", "VoiceChatID", "ClubMemberOpaqueId",
+		-- In the Classic and Forever documentation
+		"DurationSeconds", "DurationSecondsDouble", "DurationSecondsPrimitive", "DurationMillisecondsPrimitive",
 	},
 	boolean = { "bool" },
 	string = {
@@ -67,7 +76,7 @@ local LUA_TYPES = {
 		"ModelAsset", "FontAsset",
 	},
 	table = { "table" },
-	["function"] = { "LuaFunctionReference" },
+	["function"] = { "LuaFunctionReference", "luaFunction" },
 	unknown = { "any", "LuaValueReference", "LuaValueVariant", "LuaCurveEvaluatedResult" },
 }
 
@@ -141,15 +150,30 @@ stub = setmetatable({}, {
 	__unm = same, __pow = same, __concat = same,
 })
 
+-- Each document is marked with the flavour it's from: nil for the mainline's
 local documents = {}
+local flavour
 local environment = setmetatable({
-	APIDocumentation = { AddDocumentationTable = function(_, document) documents[#documents + 1] = document end },
+	APIDocumentation = { AddDocumentationTable = function(_, document)
+		document.flavour = flavour
+		documents[#documents + 1] = document
+	end },
 }, { __index = same })
 
-for i = 2, #arg do
-	local chunk = assert(loadfile(arg[i]))
-	setfenv(chunk, environment)
-	chunk()
+-- The flavours in the order given, for writing them in that order
+local flavours = {}
+local i = 2
+while i <= #arg do
+	if arg[i] == "--flavour" then
+		flavour = assert(arg[i + 1], "--flavour needs a name")
+		flavours[#flavours + 1] = flavour
+		i = i + 2
+	else
+		local chunk = assert(loadfile(arg[i]))
+		setfenv(chunk, environment)
+		chunk()
+		i = i + 1
+	end
 end
 
 ------------------------------------------------------------------------------
@@ -186,6 +210,11 @@ local structures = {}
 local enumerations, constants = {}, {}
 for _, document in ipairs(documents) do
 	for _, declaration in ipairs(document.Tables or {}) do
+		-- Another flavour's declaration of a name already declared: the
+		-- first is kept, the mainline's if it has one
+		if document.flavour and declared[declaration.Name] then
+			-- skipped
+		else
 		declared[declaration.Name] = declaration.Type
 		if declaration.Type == "Structure" then
 			add_named(declaration.Name, declaration.Name, "table")
@@ -199,6 +228,7 @@ for _, document in ipairs(documents) do
 			named_types[name] = "number"
 		elseif declaration.Type == "Constants" then
 			constants[declaration.Name] = declaration
+		end
 		end
 	end
 end
@@ -268,18 +298,80 @@ local function convert_function(documentation)
 	return { parameters = parameters, returns = returns, rest = rest }
 end
 
-local function add_function(namespace, name, documentation)
+-- Two flavours' types for one value: either, or unknown if either is
+local function join_types(a, b)
+	if a == b then return a end
+	if a == nil or b == nil then return join_types(a or b, "nil") end
+	if a == "unknown" or b == "unknown" then return "unknown" end
+	local parts, seen, has_nil = {}, {}, false
+	for _, text in ipairs({ a, b }) do
+		for part in text:gmatch("[^|]+") do
+			if part == "nil" then
+				has_nil = true
+			elseif not seen[part] then
+				seen[part] = true
+				parts[#parts + 1] = part
+			end
+		end
+	end
+	if has_nil then parts[#parts + 1] = "nil" end
+	return table.concat(parts, "|")
+end
+
+-- A parameter as written, `name: type` or `name`, split
+local function parameter_parts(text)
+	if text == nil then return nil, nil end
+	local name, types = text:match("^(.-): (.*)$")
+	if name then return name, types end
+	return text, "unknown"
+end
+
+-- Two flavours' documentation of one function as one: each parameter and
+-- return either's, and one only some document may be nil
+local function join_functions(a, b)
+	local parameters = {}
+	for i = 1, math.max(#a.parameters, #b.parameters) do
+		local name_a, types_a = parameter_parts(a.parameters[i])
+		local name_b, types_b = parameter_parts(b.parameters[i])
+		local types = join_types(types_a, types_b)
+		local name = name_a or name_b
+		parameters[i] = types == "unknown" and name or (name .. ": " .. types)
+	end
+	local returns = {}
+	for i = 1, math.max(#a.returns, #b.returns) do
+		returns[i] = join_types(a.returns[i], b.returns[i])
+	end
+	local rest = (a.rest or b.rest) and join_types(a.rest or "nil", b.rest or "nil") or nil
+	local only = {}
+	for flavour in pairs(a.only) do only[flavour] = true end
+	for flavour in pairs(b.only) do only[flavour] = true end
+	return { parameters = parameters, returns = returns, rest = rest, only = only }
+end
+
+-- Adds a function to `scope`. The mainline's is kept as it's documented; a
+-- flavour's is added only when the mainline doesn't document it, joined
+-- with any other flavour's
+local function add_to(scope, name, documentation, flavour, label)
+	local converted = convert_function(documentation)
+	local existing = scope[name]
+	if existing and not existing.only then
+		if not flavour then
+			skipped.duplicate = skipped.duplicate + 1
+			io.stderr:write(("note: %s is documented twice; keeping the first\n"):format(label))
+		end
+		return
+	end
+	if flavour then converted.only = { [flavour] = true } end
+	scope[name] = existing and join_functions(existing, converted) or converted
+end
+
+local function add_function(namespace, name, documentation, flavour)
 	local scope = functions
 	if namespace then
 		namespaces[namespace] = namespaces[namespace] or {}
 		scope = namespaces[namespace]
 	end
-	if scope[name] then
-		skipped.duplicate = skipped.duplicate + 1
-		io.stderr:write(("note: %s%s is documented twice; keeping the first\n"):format(namespace and (namespace .. ".") or "", name))
-		return
-	end
-	scope[name] = convert_function(documentation)
+	add_to(scope, name, documentation, flavour, (namespace and (namespace .. ".") or "") .. name)
 end
 
 for _, document in ipairs(documents) do
@@ -289,7 +381,11 @@ for _, document in ipairs(documents) do
 				-- Blizzard's own secure code only; addons can't call these
 				skipped.secure = skipped.secure + 1
 			else
-				add_function(document.Namespace, documentation.Name, documentation)
+				-- A function can name its own namespace, "" for none, as
+				-- InCombatLockdown is global though its system is C_RestrictedActions
+				local namespace = documentation.Namespace
+				if namespace == nil then namespace = document.Namespace end
+				add_function(namespace ~= "" and namespace or nil, documentation.Name, documentation, document.flavour)
 			end
 		end
 	end
@@ -299,11 +395,11 @@ end
 local method_tables = {}
 for _, document in ipairs(documents) do
 	if document.Type == "ScriptObject" then
-		if method_tables[document.Name] then error(document.Name .. " is documented twice") end
-		method_tables[document.Name] = {}
+		if method_tables[document.Name] and not document.flavour then error(document.Name .. " is documented twice") end
+		method_tables[document.Name] = method_tables[document.Name] or {}
 		for _, documentation in ipairs(document.Functions or {}) do
 			if document.Environment ~= "SecureOnly" then
-				method_tables[document.Name][documentation.Name] = convert_function(documentation)
+				add_to(method_tables[document.Name], documentation.Name, documentation, document.flavour, document.Name .. ":" .. documentation.Name)
 			end
 		end
 	end
@@ -340,6 +436,13 @@ local function function_lines(scope, indent)
 		local f = scope[name]
 		local entry = ("{\"parameters\": %s, \"returns\": %s"):format(json_array(f.parameters), json_array(f.returns))
 		if f.rest then entry = entry .. ", \"rest\": " .. json_string(f.rest) end
+		if f.only then
+			local only = {}
+			for _, flavour in ipairs(flavours) do
+				if f.only[flavour] then only[#only + 1] = flavour end
+			end
+			entry = entry .. ", \"only\": " .. json_array(only)
+		end
 		lines[#lines + 1] = ("%s%s: %s}"):format(indent, json_string(name), entry)
 	end
 	return table.concat(lines, ",\n")

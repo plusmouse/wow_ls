@@ -29,6 +29,8 @@ filename order; a later file's entry for a name replaces an earlier one.
   too. Names can't contain dots.
 - A table can be spread over several files; each member's last definition wins.
 - `"..."` as the last parameter means the function takes varargs.
+- `only` lists the game clients a function is only in (`["Classic"]`), when
+  the mainline client doesn't have it. Its signature ends `(Classic only)`.
 - `returns` lists a type per return value. `rest` is the type of every value
   after those, for functions that return a variable number (defaults to `nil`).
 - A parameter is `"name: type"`, or just `"name"` when it takes anything. One
@@ -65,11 +67,19 @@ option from the editor, the `WOW_LS_DEFINITIONS` environment variable, then a
 it by hand. Regenerate it with:
 
 ```sh
-lua5.1 tools/generate_api_definitions.lua definitions/blizzard_api.json Blizzard_APIDocumentationGenerated/*.lua
+lua5.1 tools/generate_api_definitions.lua definitions/blizzard_api.json Blizzard_APIDocumentationGenerated/*.lua \
+  --flavour Classic classic_era/Blizzard_APIDocumentationGenerated/*.lua classic/Blizzard_APIDocumentationGenerated/*.lua \
+  --flavour Forever forever/Blizzard_APIDocumentationGenerated/*.lua
 ```
 
 where `Blizzard_APIDocumentationGenerated` is
-`Interface/AddOns/Blizzard_APIDocumentationGenerated` from wow-ui-source. How
+`Interface/AddOns/Blizzard_APIDocumentationGenerated` from wow-ui-source's
+mainline branch (`ptr`), and the others are the same directory from its
+`classic_era`, `classic` and `forever` branches, extracted with, for example,
+`mkdir classic_era && git -C wow-ui-source archive classic_era Interface/AddOns/Blizzard_APIDocumentationGenerated | tar -x -C classic_era --strip-components=2`.
+What the mainline documents is kept as it is; each flavour adds the functions
+and methods it doesn't, marked `only`, and the structures and enumerations
+they use. How
 documentation type names map to wow_ls types is set by the tables at the top of
 the script, and it reports any names they don't cover.
 

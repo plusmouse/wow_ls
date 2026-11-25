@@ -191,7 +191,7 @@ impl Addon {
             let objects = crate::xml::objects(&document, &is_object);
             for script in crate::xml::inline_scripts(&objects, &text) {
                 let Some(self_type) = definitions.xml_object(script.object.as_deref(), &script.tag) else { continue };
-                let parameters = crate::xml::handler_parameters(&script.handler).iter().map(|p| p.to_string()).collect();
+                let parameters = crate::xml::handler_parameters(&script.handler).iter().map(|&(name, types)| (name.to_string(), crate::types::Type::of(types))).collect();
                 let root = SyntaxNode::new_root(Generator::new(&script.lua).process_all());
                 sources.push(SourceFile { root, addon: None, handler: Some(Handler { self_type, parameters }) });
                 scripts.push(PathBuf::from(format!("{}#{}", path.display(), script.start)));
@@ -1003,8 +1003,9 @@ mod tests {
         // `self` in each mixin's methods is the object the XML mixes it into
         let _made_with = crate::types::MadeWith::shown();
         assert_eq!(selves(), ["T & M", "Frame & C"]);
-        // The game's names for a handler's arguments are its parameters
-        assert_eq!(assigned(&analysed, "clicked"), "unknown");
+        // The game's names for a handler's arguments are its parameters, of
+        // the types it passes
+        assert_eq!(assigned(&analysed, "clicked"), "string");
         assert!(analysis.bindings.iter().any(|b| b.name.as_ref() == "button" && b.kind == crate::types::BindingKind::Parameter));
     }
 

@@ -291,6 +291,7 @@
     "EncounterTrackingInfo": {"base": "table", "values": {"encounterName": "string", "journalEncounterID": "number|nil", "journalInstanceID": "number|nil", "instanceName": "string", "subText": "string|nil", "difficultyID": "number|nil", "lfgDungeonID": "number|nil", "groupFinderActivityID": "number|nil"}},
     "EncounterUnitStatus": {"base": "table", "values": {"creatureID": "number", "creatureName": "string", "remainingHealthPercent": "number"}},
     "EncounterWarningInfo": {"base": "table", "values": {"text": "string", "casterGUID": "string", "casterName": "string", "targetGUID": "string", "targetName": "string", "iconFileID": "number", "tooltipSpellID": "number", "isDeadly": "boolean", "color": "colorRGBA", "duration": "number", "severity": "Enum.EncounterEventSeverity", "shouldPlaySound": "boolean", "shouldShowChatMessage": "boolean", "shouldShowWarning": "boolean"}},
+    "EngravingData": {"base": "table", "values": {"skillLineAbilityID": "number", "itemEnchantmentID": "number", "name": "string", "iconTexture": "number", "equipmentSlot": "Enum.InventoryType", "level": "number", "learnedAbilitySpellIDs": "table"}},
     "Enum.AbbreviationDataError": {"base": "number"},
     "Enum.AccountCurrencyTransferResult": {"base": "number"},
     "Enum.AccountData": {"base": "number"},
@@ -505,6 +506,7 @@
     "Enum.CurrencyFlagsB": {"base": "number"},
     "Enum.CurrencyGainFlags": {"base": "number"},
     "Enum.CurrencyNameStyle": {"base": "number"},
+    "Enum.CurrencySource": {"base": "number"},
     "Enum.CurrencyTokenCategoryFlags": {"base": "number"},
     "Enum.CurrencyType": {"base": "number"},
     "Enum.CurrencyWeeksFromStartOption": {"base": "number"},
@@ -921,6 +923,7 @@
     "Enum.RecipeRequirementType": {"base": "number"},
     "Enum.RecruitAFriendFailure": {"base": "number"},
     "Enum.RecruitAFriendRewardsVersion": {"base": "number"},
+    "Enum.ReforgeFailedReason": {"base": "number"},
     "Enum.RegisterAddonMessagePrefixResult": {"base": "number"},
     "Enum.RelativeContentDifficulty": {"base": "number"},
     "Enum.ReleaseType": {"base": "number"},
@@ -946,6 +949,7 @@
     "Enum.RoomConnectionType": {"base": "number"},
     "Enum.RuneforgePowerFilter": {"base": "number"},
     "Enum.RuneforgePowerState": {"base": "number"},
+    "Enum.ScalingArmorType": {"base": "number"},
     "Enum.ScreenLocationType": {"base": "number"},
     "Enum.ScreenshotSource": {"base": "number"},
     "Enum.ScribeClassID": {"base": "number"},
@@ -1373,6 +1377,7 @@
     "LuaDurationManualClock": {"base": "userdata"},
     "LuaDurationObject": {"base": "userdata"},
     "LuaLocaleContext": {"base": "userdata"},
+    "MailInfo": {"base": "table", "values": {"target": "string", "sendMoney": "number"}},
     "MailReceiveInfo": {"base": "table", "values": {"sender": "string", "money": "number"}},
     "MailSendInfo": {"base": "table", "values": {"target": "string", "sendMoney": "number"}},
     "MajorFactionData": {"base": "table", "values": {"name": "string", "description": "string", "highlights": "table", "factionID": "number", "expansionID": "number", "bountySetID": "number", "isUnlocked": "boolean", "useJourneyUnlockToast": "boolean", "hideRenownLevelUpToast": "boolean", "unlockDescription": "string|nil", "uiPriority": "number", "renownLevel": "number", "maxLevel": "number", "renownReputationEarned": "number", "renownLevelThreshold": "number", "textureKit": "string", "celebrationSoundKit": "number", "renownFanfareSoundKitID": "number", "factionFontColor": "DBColorExport|nil", "renownTrackLevelEffectID": "number|nil", "playerCompanionID": "number|nil"}},
@@ -1626,6 +1631,7 @@
     "TooltipDataArg": {"base": "table", "values": {"field": "string", "stringVal": "string|nil", "intVal": "number|nil", "floatVal": "number|nil", "boolVal": "boolean|nil", "colorVal": "colorRGB|nil", "guidVal": "string|nil"}},
     "TooltipItemComparisonInfo": {"base": "table", "values": {"method": "Enum.TooltipComparisonMethod|nil", "item": "TooltipComparisonItem", "additionalItems": "table"}},
     "TotemInfoScript": {"base": "table", "values": {"haveTotem": "boolean", "totemName": "string", "startTime": "number", "duration": "number", "icon": "number", "modRate": "number", "spellID": "number"}},
+    "TradeSkillReagentInfo": {"base": "table", "values": {"reagentName": "string|nil", "reagentFileID": "number|nil", "itemID": "number", "reagentCount": "number", "playerReagentCount": "number"}},
     "TradeSkillRecipeInfo": {"base": "table", "values": {"categoryID": "number", "name": "string", "relativeDifficulty": "Enum.TradeskillRelativeDifficulty|nil", "maxTrivialLevel": "number", "itemLevel": "number", "alternateVerb": "string|nil", "numSkillUps": "number", "canSkillUp": "boolean", "firstCraft": "boolean", "sourceType": "number|nil", "learned": "boolean", "disabled": "boolean", "favorite": "boolean", "supportsQualities": "boolean", "craftable": "boolean|nil", "disabledReason": "string|nil", "recipeID": "number", "skillLineAbilityID": "number", "previousRecipeID": "number|nil", "nextRecipeID": "number|nil", "icon": "number|nil", "hyperlink": "string|nil", "currentRecipeExperience": "number|nil", "nextLevelRecipeExperience": "number|nil", "unlockedRecipeLevel": "number|nil", "earnedExperience": "number|nil", "supportsCraftingStats": "boolean|nil", "hasSingleItemOutput": "boolean|nil", "qualityItemIDs": "table|nil", "qualityIlvlBonuses": "table|nil", "alwaysUsesLowestQuality": "boolean|nil", "maxQuality": "number|nil", "qualityIDs": "table|nil", "canCreateMultiple": "boolean|nil", "abilityVerb": "string|nil", "abilityAllVerb": "string|nil", "isRecraft": "boolean|nil", "isDummyRecipe": "boolean|nil", "isGatheringRecipe": "boolean|nil", "isEnchantingRecipe": "boolean|nil", "isSalvageRecipe": "boolean|nil"}},
     "TraitCondInfo": {"base": "table", "values": {"condID": "number", "ranksGranted": "number|nil", "isAlwaysMet": "boolean", "isMet": "boolean", "isGate": "boolean", "isSufficient": "boolean", "type": "number", "questID": "number|nil", "achievementID": "number|nil", "specSetID": "number|nil", "playerLevel": "number|nil", "traitCurrencyID": "number|nil", "spentAmountRequired": "number|nil", "tooltipFormat": "string|nil", "traitCondAccountElementID": "number|nil"}},
     "TraitConfigInfo": {"base": "table", "values": {"ID": "number", "type": "Enum.TraitConfigType", "name": "string", "treeIDs": "table", "usesSharedActionBars": "boolean"}},
@@ -1656,6 +1662,8 @@
     "TransmogOutfitOptionSheatheCategoryInfo": {"base": "table", "values": {"sheatheCategory": "Enum.TransmogOutfitSlotOptionSheatheCategory", "categoryName": "string"}},
     "TransmogOutfitSlotGroup": {"base": "table", "values": {"position": "Enum.TransmogOutfitSlotPosition", "appearanceSlotInfo": "table", "illusionSlotInfo": "table"}},
     "TransmogOutfitSlotInfo": {"base": "table", "values": {"slot": "Enum.TransmogOutfitSlot", "type": "Enum.TransmogType", "collectionType": "Enum.TransmogCollectionType", "slotName": "string", "isSecondary": "boolean"}},
+    "TransmogOutfitWeaponCollectionInfo": {"base": "table", "values": {"name": "string", "isWeapon": "boolean", "canHaveIllusions": "boolean"}},
+    "TransmogOutfitWeaponOptionInfo": {"base": "table", "values": {"weaponOption": "Enum.TransmogOutfitSlotOption", "name": "string", "enabled": "boolean"}},
     "TransmogSetInfo": {"base": "table", "values": {"setID": "number", "name": "string", "baseSetID": "number|nil", "description": "string|nil", "label": "string|nil", "expansionID": "number", "patchID": "number", "uiOrder": "number", "classMask": "number", "hiddenUntilCollected": "boolean", "requiredFaction": "string|nil", "collected": "boolean", "favorite": "boolean", "limitedTimeSet": "boolean", "validForCharacter": "boolean", "grantAsPrecedingVariant": "boolean"}},
     "TransmogSetItemInfo": {"base": "table", "values": {"itemID": "number", "itemModifiedAppearanceID": "number", "invSlot": "number", "invType": "string"}},
     "TransmogSetPrimaryAppearanceInfo": {"base": "table", "values": {"appearanceID": "number", "collected": "boolean"}},
@@ -1706,6 +1714,7 @@
     "UnitPowerBarInfo": {"base": "table", "values": {"ID": "number", "barType": "number", "minPower": "number", "startInset": "number", "endInset": "number", "smooth": "boolean", "hideFromOthers": "boolean", "showOnRaid": "boolean", "opaqueSpark": "boolean", "opaqueFlash": "boolean", "anchorTop": "boolean", "forcePercentage": "boolean", "sparkUnderFrame": "boolean", "flashAtMinPower": "boolean", "fractionalCounter": "boolean", "animateNumbers": "boolean", "attachTooltipToBar": "boolean"}},
     "UnitPowerBarWidgetVisualizationInfo": {"base": "table", "values": {"shownState": "Enum.WidgetShownState", "barMin": "number", "barMax": "number", "barValue": "number", "tooltip": "string", "barValueTextType": "Enum.StatusBarValueTextType", "overrideBarText": "string", "overrideBarTextShownType": "Enum.StatusBarOverrideBarTextShownType", "tooltipLoc": "Enum.UIWidgetTooltipLocation", "fillMotionType": "Enum.UIWidgetMotionType", "flashBlendModeType": "Enum.UIWidgetBlendModeType", "sparkBlendModeType": "Enum.UIWidgetBlendModeType", "flashMomentType": "Enum.WidgetUnitPowerBarFlashMomentType", "widgetSizeSetting": "number", "textureKit": "string", "frameTextureKit": "string", "hasTimer": "boolean", "orderIndex": "number", "widgetTag": "string", "inAnimType": "Enum.WidgetAnimationType", "outAnimType": "Enum.WidgetAnimationType", "widgetScale": "Enum.UIWidgetScale", "layoutDirection": "Enum.UIWidgetLayoutDirection", "modelSceneLayer": "Enum.UIWidgetModelSceneLayer", "scriptedAnimationEffectID": "number"}},
     "UnitPrivateAuraAnchorInfo": {"base": "table", "values": {"anchorID": "number", "unitToken": "string", "auraIndex": "number", "showCooldownFrame": "boolean|nil", "showCooldownEdge": "boolean|nil", "showCountdownNumbers": "boolean|nil", "showDispelIcon": "boolean|nil", "iconWidth": "number|nil", "iconHeight": "number|nil", "borderScale": "number|nil", "isContainer": "boolean|nil", "parent": "Frame"}},
+    "UnitPrivateAuraAppliedSoundInfo": {"base": "table", "values": {"unitToken": "string", "spellID": "number", "soundFileName": "string|nil", "soundFileID": "number|nil", "outputChannel": "string|nil"}},
     "UnlockedAzeriteEmpoweredItems": {"base": "table", "values": {"unlockedItem": "AzeriteEmpoweredItemLocation", "tierIndex": "number"}},
     "VectorGraphics": {"base": "table"},
     "VendorTrackingInfo": {"base": "table", "values": {"creatureName": "string", "zoneName": "string|nil", "currencyType": "number|nil", "cost": "number|nil"}},
@@ -1739,6 +1748,9 @@
     "ZoneEntry": {"base": "table", "values": {"state": "Enum.ZoneControlState", "activeState": "Enum.ZoneControlActiveState", "fillType": "Enum.ZoneControlFillType", "min": "number", "max": "number", "current": "number", "capturePoint": "number", "tooltip": "string"}},
     "colorRGB": {"base": "table"},
     "colorRGBA": {"base": "table"},
+    "dstReforgeStats": {"base": "table", "values": {"name": "string", "stat": "number", "statAddition": "number", "reforgeID": "number"}},
+    "reforgeStatsInfo": {"base": "table", "values": {"name": "string", "stat": "number", "statValue": "number"}},
+    "srcReforgeStats": {"base": "table", "values": {"name": "string", "stat": "number", "statReduction": "number"}},
     "uiBoundsRect": {"base": "table", "values": {"left": "number", "bottom": "number", "width": "number", "height": "number"}},
     "uiRect": {"base": "table"},
     "vector2": {"base": "table"},
@@ -1903,10 +1915,12 @@
     "FrameAPIDressUpModel": {"functions": {
         "Dress": {"parameters": [], "returns": []},
         "GetAutoDress": {"parameters": [], "returns": ["boolean"]},
+        "GetItemModifiedAppearanceID": {"parameters": ["invSlot: number"], "returns": ["number"], "only": ["Classic"]},
         "GetItemTransmogInfo": {"parameters": ["inventorySlot: number"], "returns": ["ItemTransmogInfo|nil"]},
         "GetItemTransmogInfoList": {"parameters": [], "returns": ["table"]},
         "GetObeyHideInTransmogFlag": {"parameters": [], "returns": ["boolean"]},
         "GetSheathed": {"parameters": [], "returns": ["boolean"]},
+        "GetSpellItemEnchantmentID": {"parameters": ["invSlot: number"], "returns": ["number"], "only": ["Classic"]},
         "GetUseTransmogChoices": {"parameters": [], "returns": ["boolean"]},
         "GetUseTransmogSkin": {"parameters": [], "returns": ["boolean"]},
         "IsGeoReady": {"parameters": [], "returns": ["boolean"]},
@@ -2103,9 +2117,11 @@
         "GetLowerBackgroundFileName": {"parameters": [], "returns": ["number"]},
         "GetLowerBorderFile": {"parameters": [], "returns": ["number"]},
         "GetLowerEmblemFile": {"parameters": [], "returns": ["number"]},
+        "GetLowerEmblemFileName": {"parameters": [], "returns": ["string"], "only": ["Classic"]},
         "GetUpperBackgroundFileName": {"parameters": [], "returns": ["number"]},
         "GetUpperBorderFile": {"parameters": [], "returns": ["number"]},
-        "GetUpperEmblemFile": {"parameters": [], "returns": ["number"]}
+        "GetUpperEmblemFile": {"parameters": [], "returns": ["number"]},
+        "GetUpperEmblemFileName": {"parameters": [], "returns": ["string"], "only": ["Classic"]}
       }},
     "FrameAPITabardModelBase": {"functions": {
         "CanSaveTabardNow": {"parameters": [], "returns": ["boolean"]},
@@ -2323,8 +2339,13 @@
         "SetArchBlobRingAlpha": {"parameters": ["alpha: number"], "returns": []},
         "SetArchBlobRingScalar": {"parameters": ["scalar: number"], "returns": []},
         "SetArchBlobRingTexture": {"parameters": ["asset: number|string"], "returns": []},
+        "SetBlipTexture": {"parameters": ["asset: number|string"], "returns": [], "only": ["Classic"]},
+        "SetCorpsePOIArrowTexture": {"parameters": ["asset: number|string"], "returns": [], "only": ["Classic"]},
         "SetIconScale": {"parameters": ["scale: number"], "returns": []},
+        "SetIconTexture": {"parameters": ["asset: number|string"], "returns": [], "only": ["Classic"]},
         "SetMaskTexture": {"parameters": ["asset: number|string"], "returns": []},
+        "SetPOIArrowTexture": {"parameters": ["asset: number|string"], "returns": [], "only": ["Classic"]},
+        "SetPlayerTexture": {"parameters": ["asset: number|string"], "returns": [], "only": ["Classic"]},
         "SetQuestBlobInsideAlpha": {"parameters": ["alpha: number"], "returns": []},
         "SetQuestBlobInsideTexture": {"parameters": ["asset: number|string"], "returns": []},
         "SetQuestBlobOutsideAlpha": {"parameters": ["alpha: number"], "returns": []},
@@ -2332,6 +2353,7 @@
         "SetQuestBlobRingAlpha": {"parameters": ["alpha: number"], "returns": []},
         "SetQuestBlobRingScalar": {"parameters": ["scalar: number"], "returns": []},
         "SetQuestBlobRingTexture": {"parameters": ["asset: number|string"], "returns": []},
+        "SetStaticPOIArrowTexture": {"parameters": ["asset: number|string"], "returns": [], "only": ["Classic"]},
         "SetTaskBlobInsideAlpha": {"parameters": ["alpha: number"], "returns": []},
         "SetTaskBlobInsideTexture": {"parameters": ["asset: number|string"], "returns": []},
         "SetTaskBlobOutsideAlpha": {"parameters": ["alpha: number"], "returns": []},
@@ -2341,7 +2363,8 @@
         "SetTaskBlobRingTexture": {"parameters": ["asset: number|string"], "returns": []},
         "SetUsingSoftCursor": {"parameters": ["usingSoftCursor: boolean"], "returns": []},
         "SetZoom": {"parameters": ["zoomFactor: number"], "returns": []},
-        "UpdateBlips": {"parameters": [], "returns": []}
+        "UpdateBlips": {"parameters": [], "returns": []},
+        "UpdateMouseoverAtPoint": {"parameters": ["pointX: number", "pointY: number"], "returns": [], "only": ["Forever"]}
       }},
     "NumericFormatterAPI": {"functions": {
         "FormatNumber": {"parameters": ["number: number"], "returns": ["string"]}
@@ -3385,12 +3408,18 @@
     "AbbreviateLargeNumbers": {"parameters": ["number: number", "options: NumberAbbrevOptions|nil"], "returns": ["string"]},
     "AbbreviateNumbers": {"parameters": ["number: number", "options: NumberAbbrevOptions|nil"], "returns": ["string"]},
     "AcceptAreaSpiritHeal": {"parameters": [], "returns": []},
+    "AcceptArenaTeam": {"parameters": [], "returns": [], "only": ["Classic"]},
     "AcceptGuild": {"parameters": [], "returns": []},
     "AcceptResurrect": {"parameters": [], "returns": []},
     "AddSourceLocationExclude": {"parameters": ["fileName: string"], "returns": []},
     "Ambiguate": {"parameters": ["fullName: string", "context: string"], "returns": ["string"]},
     "AreClassRolesSoftSuggestions": {"parameters": [], "returns": ["boolean"]},
     "AreDangerousScriptsAllowed": {"parameters": [], "returns": ["boolean"]},
+    "ArenaTeamDisband": {"parameters": ["index: number"], "returns": [], "only": ["Classic"]},
+    "ArenaTeamInviteByName": {"parameters": ["index: number", "target: string"], "returns": [], "only": ["Classic"]},
+    "ArenaTeamLeave": {"parameters": ["index: number"], "returns": [], "only": ["Classic"]},
+    "ArenaTeamSetLeaderByName": {"parameters": ["index: number", "target: string"], "returns": [], "only": ["Classic"]},
+    "ArenaTeamUninviteByName": {"parameters": ["index: number", "target: string"], "returns": [], "only": ["Classic"]},
     "AssistUnit": {"parameters": ["name: string|nil", "exactMatch: boolean|nil"], "returns": []},
     "AttackTarget": {"parameters": [], "returns": []},
     "AutoEquipCursorItem": {"parameters": [], "returns": []},
@@ -3430,6 +3459,9 @@
     "ClearTarget": {"parameters": [], "returns": ["boolean"]},
     "ClosestGameObjectPosition": {"parameters": ["gameObjectID: number"], "returns": ["number|nil", "number|nil", "number|nil"]},
     "ClosestUnitPosition": {"parameters": ["creatureID: number"], "returns": ["number|nil", "number|nil", "number|nil"]},
+    "ConfirmBarbersChoice": {"parameters": [], "returns": [], "only": ["Classic"]},
+    "ConfirmBinder": {"parameters": [], "returns": [], "only": ["Classic"]},
+    "ConfirmPetUnlearn": {"parameters": [], "returns": [], "only": ["Classic"]},
     "ConfirmTalentWipe": {"parameters": [], "returns": []},
     "ConsoleEcho": {"parameters": ["command: string", "addToHistory: boolean|nil", "prefix: string|nil"], "returns": ["boolean"]},
     "ConsoleExec": {"parameters": ["command: string", "addToHistory: boolean|nil"], "returns": ["boolean"]},
@@ -3452,6 +3484,7 @@
     "CursorHasMacro": {"parameters": [], "returns": ["boolean"]},
     "CursorHasMoney": {"parameters": [], "returns": ["boolean"]},
     "CursorHasSpell": {"parameters": [], "returns": ["boolean"]},
+    "DeclineArenaTeam": {"parameters": [], "returns": [], "only": ["Classic"]},
     "DeclineGuild": {"parameters": [], "returns": []},
     "DeclineName": {"parameters": ["name: string", "gender: Enum.UnitSex|nil", "declensionSet: number", "namePartType: Enum.NamePartType|nil"], "returns": [], "rest": "string|nil"},
     "DeclineResurrect": {"parameters": [], "returns": []},
@@ -3475,6 +3508,7 @@
     "GetAllowRecentAlliesSeeLocation": {"parameters": [], "returns": ["boolean"]},
     "GetAreaSpiritHealerTime": {"parameters": [], "returns": ["number"]},
     "GetAreaText": {"parameters": [], "returns": ["string"]},
+    "GetArenaOpponentSpec": {"parameters": ["index: number"], "returns": ["number|nil", "number|nil"]},
     "GetArmorPenetration": {"parameters": [], "returns": ["number"]},
     "GetAttackPowerForStat": {"parameters": ["stat: number", "value: number"], "returns": ["number"]},
     "GetAutoDeclineGuildInvites": {"parameters": [], "returns": ["boolean"]},
@@ -3517,7 +3551,6 @@
     "GetCursorInfo": {"parameters": [], "returns": []},
     "GetCursorMoney": {"parameters": [], "returns": ["number"]},
     "GetCursorPosition": {"parameters": [], "returns": ["number", "number"]},
-    "GetDefaultAbbreviationBreakpoints": {"parameters": ["locale: WowLocale|nil"], "returns": ["table"]},
     "GetDefaultScale": {"parameters": [], "returns": ["number"]},
     "GetDifficultyInfo": {"parameters": ["difficultyID: number"], "returns": ["string", "string", "boolean", "boolean", "boolean", "boolean", "number|nil", "boolean", "number|nil", "number|nil", "boolean"]},
     "GetDodgeChance": {"parameters": [], "returns": ["number"]},
@@ -3701,6 +3734,7 @@
     "HasNoReleaseAura": {"parameters": [], "returns": ["boolean", "number", "boolean"]},
     "HasSPEffectsAttackPower": {"parameters": [], "returns": ["boolean"]},
     "InCinematic": {"parameters": [], "returns": ["boolean"]},
+    "InCombatLockdown": {"parameters": [], "returns": ["boolean"]},
     "InitiateRolePoll": {"parameters": [], "returns": ["boolean"]},
     "InitiateTrade": {"parameters": ["guid: string"], "returns": []},
     "Is64BitClient": {"parameters": [], "returns": ["boolean"]},
@@ -3860,11 +3894,13 @@
     "SetPreferredGamepadInteractTarget": {"parameters": ["unit: string|nil"], "returns": []},
     "SetRaidDifficultyID": {"parameters": ["difficultyID: number", "force: boolean|nil"], "returns": []},
     "SetRaidTarget": {"parameters": ["target: string", "userIndex: number"], "returns": []},
+    "SetTableSecurityOption": {"parameters": ["table", "option: Enum.TableSecurityOption"], "returns": [], "only": ["Classic"]},
     "SetTaxiBenchmarkMode": {"parameters": ["enable: boolean|nil"], "returns": []},
     "SetUIVisibility": {"parameters": ["visible: boolean"], "returns": []},
     "SetUnitCursorTexture": {"parameters": ["textureObject: Texture", "unit: string", "style: Enum.CursorStyle|nil", "includeLowPriority: boolean|nil", "preferGamepadIcon: boolean|nil"], "returns": ["boolean"]},
     "ShouldDisplayRaidRolesInSocialFrame": {"parameters": [], "returns": ["boolean"]},
     "ShouldDisplayStoryModeTooltipInSocialFrame": {"parameters": [], "returns": ["boolean"]},
+    "ShouldKnowUnitHealth": {"parameters": ["unit: string"], "returns": ["boolean"], "only": ["Classic"]},
     "ShouldShowExpansionUpgradeBanner": {"parameters": [], "returns": ["boolean"]},
     "ShouldShowIslandsWeeklyPOI": {"parameters": [], "returns": ["boolean"]},
     "ShouldShowSpecialSplashScreen": {"parameters": [], "returns": ["boolean"]},
@@ -4144,6 +4180,7 @@
         "DeathRecapConsts": {"values": {"SWING_DAMAGE_SPELL_ID": "number"}},
         "DelvesConsts": {"values": {"DELVES_MIN_PLAYER_LEVEL_CONTENT_TUNING_ID": "number", "DELVES_NORMAL_KEY_CURRENCY_ID": "number", "DELVES_COMPANION_INFO_SELECTION_CHARACTER_DATA_ELEMENT_ID": "number", "DELVES_COMPANION_TOOLTIP_WIDGET_SET_ID": "number", "DELVES_COMPANION_BRANN_CREATURE_ID": "number", "DELVES_COMPANION_VALEERA_CREATURE_ID": "number"}},
         "EditModeConsts": {"values": {"EditModeDefaultGridSpacing": "number", "EditModeMinGridSpacing": "number", "EditModeMaxGridSpacing": "number", "EditModeMaxLayoutsPerType": "number"}},
+        "EditModeLayoutConsts": {"values": {"EditModeDefaultLayout": "Enum.EditModePresetLayouts"}},
         "EditModeLayoutConsts_Mainline": {"values": {"EditModeDefaultLayout": "Enum.EditModePresetLayouts"}},
         "EncodingLimits": {"values": {"EncodingDecompressSizeLimit": "number", "EncodingDeserializeSizeLimit": "number", "EncodingStackSizeLimit": "number"}},
         "EncounterTimelineEventConstants": {"values": {"ENCOUNTER_TIMELINE_INVALID_EVENT": "number", "ENCOUNTER_TIMELINE_RESERVED_EVENT_COUNT": "number"}},
@@ -4155,13 +4192,19 @@
         "HousingConsts": {"values": {"NeighborhoodNameMaxCharacters": "number", "NeighborhoodNameMinCharacters": "number", "BlueprintNameMaxCharacters": "number", "BlueprintNameMinCharacters": "number", "HOUSING_BLUEPRINTS_MAX_PER_BNET_ACCOUNT": "number", "HOUSING_BLUEPRINTS_MAX_BACKUPS_PER_BNET_ACCOUNT": "number"}},
         "ITEM_WEAPON_SUBCLASSConstants": {"values": {"ITEM_WEAPON_SUBCLASS_NONE": "Enum.ItemWeaponSubclass", "ITEM_WEAPON_SUBCLASS_MASK": "number", "ITEM_WEAPON_SUBCLASS_IS2HWEAPON_MASK": "number", "ITEM_WEAPON_SUBCLASS_USES2HANDS_MASK": "number", "ITEM_WEAPON_SUBCLASS_ISRANGEDWEAPON_MASK": "number", "ITEM_WEAPON_SUBCLASS_ISTWOHANDEDRANGEDWEAPON_MASK": "number", "ITEM_WEAPON_SUBCLASS_ISMAINHANDWEAPON_NONRANGED_MASK": "number"}},
         "ITEM_WEAPON_SUBCLASSConstants_PostMists": {"values": {"ITEM_WEAPON_SUBCLASS_ISTITANSGRIPWEAPON_MASK": "number"}},
+        "ITEM_WEAPON_SUBCLASSConstants_PreMists": {"values": {"ITEM_WEAPON_SUBCLASS_ISTITANSGRIPWEAPON_MASK": "number"}},
+        "ITEM_WEAPON_SUBCLASS_CLASSIC": {"values": {"ITEM_WEAPON_SUBCLASS_EXOTIC1H": "Enum.ItemWeaponSubclass", "ITEM_WEAPON_SUBCLASS_EXOTIC2H": "Enum.ItemWeaponSubclass", "ITEM_WEAPON_SUBCLASS_SPEAR": "Enum.ItemWeaponSubclass"}},
         "InventoryConstants": {"values": {"NumBagSlots": "number", "NumCharacterBankSlots": "number", "NumReagentBagSlots": "number", "NumAccountBankSlots": "number", "MAX_TRANSACTION_BANK_TABS": "number"}},
         "ItemConsts": {"values": {"NUM_ITEM_ENCHANTMENT_SOCKETS": "number", "MAX_LOOT_OBJECT_ITEMS": "number", "INVALID_BANK_TAB_SLOT": "number", "DEFAULT_ITEM_SAVE_VERSION": "number", "CURRENT_ITEM_SAVE_VERSION": "number", "DEFAULT_ARTIFACT_POWERS_VERSION": "number", "CURRENT_ARTIFACT_POWERS_VERSION": "number", "DEFAULT_RETENTION": "number", "MAXIMUM_QUEST_ITEM_LOOT_PRIORITY_VALUES": "number", "NUM_RAND_PROP_POINTS_CATEGORIES": "number", "NUM_PROFESSION_PROP_POINTS_CATEGORIES": "number", "CASTER_WEAPON_DAMAGE_REDUCTION_DIVISOR_WITH_FLAG": "number", "CASTER_WEAPON_SPELL_POWER_MULT_WITH_FLAG": "number", "CASTER_WEAPON_SPELL_HEALING_MULT_WITH_FLAG": "number", "CASTER_WEAPON_SPELL_HEALING_DAMAGE_MULT_WITH_FLAG": "number"}},
         "ItemConsts_Mainline": {"values": {"HWM_SQUISH_ERA_PLAYER_DATA_ACCOUNT_ELEMENT_ID": "number"}},
         "LFGConstsExposed": {"values": {"GROUP_FINDER_MAX_ACTIVITY_CAPACITY": "number"}},
         "LFG_ROLEConstants": {"values": {"LFG_ROLE_NO_ROLE": "Enum.LFGRole", "LFG_ROLE_ANY": "Enum.LFGRole"}},
         "LegacyConsts": {"values": {"LEGACY_REWARD_TRACK_FACTION_ID": "number", "LEGACY_POINTS_TRAIT_CURRENCY_ID": "number", "LEGACY_REWARD_MAX_LEGACY_POINTS": "number", "LEGACY_REWARD_TEXTURE_KIT_ID": "number", "LEGACY_REWARD_GLOBAL_COLOR_ID": "number", "LEGACY_TREE_PROFESSIONS_ID": "number", "LEGACY_TREE_ADVENTURE_ID": "number", "LEGACY_TREE_PROGRESSION_ID": "number", "LEGACY_TREE_ADVENTURE_TALENTED_NODE_ID": "number", "LEGACY_DEFAULT_CATEGORY_WARRIOR": "number", "LEGACY_DEFAULT_CATEGORY_PALADIN": "number", "LEGACY_DEFAULT_CATEGORY_HUNTER": "number", "LEGACY_DEFAULT_CATEGORY_ROGUE": "number", "LEGACY_DEFAULT_CATEGORY_PRIEST": "number", "LEGACY_DEFAULT_CATEGORY_SHAMAN": "number", "LEGACY_DEFAULT_CATEGORY_MAGE": "number", "LEGACY_DEFAULT_CATEGORY_WARLOCK": "number", "LEGACY_DEFAULT_CATEGORY_DRUID": "number"}},
+        "LevelConstsExposed": {"values": {"MIN_RES_SICKNESS_LEVEL": "number", "MIN_ACHIEVEMENT_LEVEL": "number"}},
+        "LevelConstsExposed_Camelot": {"values": {"MIN_RES_SICKNESS_LEVEL": "number", "MIN_ACHIEVEMENT_LEVEL": "number", "MIN_TALENT_LEVEL": "number"}},
         "LevelConstsExposed_RetailAndClassic": {"values": {"MIN_RES_SICKNESS_LEVEL": "number", "MIN_ACHIEVEMENT_LEVEL": "number", "MIN_TALENT_LEVEL": "number"}},
+        "LootConsts": {"values": {"MasterLootQualityThreshold": "number"}},
+        "LootConsts_Camelot": {"values": {"MasterLootQualityThreshold": "number"}},
         "LootConsts_Retail": {"values": {"MasterLootQualityThreshold": "number"}},
         "LossOfControlConsts": {"values": {"LOSS_OF_CONTROL_ACTIVE_INDEX": "number"}},
         "MacroConsts": {"values": {"MAX_ACCOUNT_MACROS": "number", "MAX_CHARACTER_MACROS": "number"}},
@@ -4170,11 +4213,19 @@
         "MountDynamicFlightConsts": {"values": {"TRAIT_SYSTEM_ID": "number", "TREE_ID": "number"}},
         "PartyCountdownConstants": {"values": {"MaxCountdownSeconds": "number"}},
         "PetBattleConsts": {"values": {"SUMMON_RANDOM_FAVORITE_BATTLEPET_SPELL_ID": "number"}},
+        "PetConsts": {"values": {"PETNUMBER_INVALIDSLOT": "number", "MAX_SUMMONABLE_PETS": "number", "PETNUMBER_INVALIDPET": "number", "PETNUMBER_PENDINGPET": "number"}},
+        "PetConsts_Camelot": {"values": {"PET_XP_LEVEL_MODIFIER": "number", "NUM_PET_SLOTS_THAT_NEED_LEARNED_SPELL": "number", "MAX_SUMMONABLE_HUNTER_PETS": "number", "MAX_STABLE_SLOTS": "number", "EXTRA_PET_STABLE_SLOT": "number", "STABLED_PETS_FIRST_SLOT_INDEX": "number", "NUM_PET_SLOTS_HUNTER": "number", "MAX_NUM_PET_SLOTS": "number", "DEFAULT_PET_PERSONALITY": "number"}},
+        "PetConsts_PostCata": {"values": {"NUM_PET_SLOTS_THAT_NEED_LEARNED_SPELL": "number", "MAX_SUMMONABLE_HUNTER_PETS": "number", "MAX_STABLE_SLOTS": "number", "EXTRA_PET_STABLE_SLOT": "number", "STABLED_PETS_FIRST_SLOT_INDEX": "number", "NUM_PET_SLOTS_HUNTER": "number", "NUM_PET_SLOTS_DEATHKNIGHT": "number", "DEATHKNIGHT_PET_CREATURE_ID": "number", "NUM_PET_SLOTS_MAGE": "number", "NUM_PET_SLOTS_WARLOCK": "number", "MAX_NUM_PET_SLOTS": "number", "PET_MAX_LEVEL_DIFFERENCE": "number"}},
+        "PetConsts_PreWrath": {"values": {"NUM_PET_SLOTS_THAT_NEED_LEARNED_SPELL": "number", "MAX_SUMMONABLE_HUNTER_PETS": "number", "MAX_STABLE_SLOTS": "number", "EXTRA_PET_STABLE_SLOT": "number", "STABLED_PETS_FIRST_SLOT_INDEX": "number", "NUM_PET_SLOTS_HUNTER": "number", "NUM_PET_SLOTS_DEATHKNIGHT": "number", "DEATHKNIGHT_PET_CREATURE_ID": "number", "NUM_PET_SLOTS_MAGE": "number", "NUM_PET_SLOTS_WARLOCK": "number", "MAX_NUM_PET_SLOTS": "number", "PET_MAX_LEVEL_DIFFERENCE": "number"}},
         "PetConsts_Retail": {"values": {"PET_XP_LEVEL_MODIFIER": "number", "NUM_PET_SLOTS_THAT_NEED_LEARNED_SPELL": "number", "MAX_SUMMONABLE_HUNTER_PETS": "number", "MAX_STABLE_SLOTS": "number", "EXTRA_PET_STABLE_SLOT": "number", "STABLED_PETS_FIRST_SLOT_INDEX": "number", "NUM_PET_SLOTS_HUNTER": "number", "MAX_NUM_PET_SLOTS": "number", "DEFAULT_PET_PERSONALITY": "number"}},
         "ProfessionConsts": {"values": {"NUM_PRIMARY_PROFESSIONS": "number", "CLASSIC_PROFESSION_PARENT_TIER_INDEX": "number", "RUNEFORGING_SKILL_LINE_ID": "number", "RUNEFORGING_ROOT_CATEGORY_ID": "number", "MAX_CRAFTING_REAGENT_SLOTS": "number", "CRAFTING_ORDER_CLAIM_DURATION": "number", "PUBLIC_CRAFTING_ORDER_STALE_THRESHOLD": "number", "CRAFTING_ORDER_ITEM_RETENTION": "number", "CRAFTING_ORDER_CURRENCY_WALLET_ITEM_ID": "number"}},
         "PvpInfoConsts": {"values": {"MaxPlayersPerInstance": "number", "MAX_PVP_LOCK_LIST_MAP": "number"}},
+        "QuestInfoLuaConsts": {"values": {"QUEST_INFO_ELITE_ID": "number", "QUEST_INFO_DUNGEON_ID": "number", "QUEST_INFO_PVP_ID": "number", "QUEST_INFO_RAID_ID": "number"}},
+        "QuestLogConstsMainlineCamelot": {"values": {"MAXIMUM_NUM_QUESTS_LOG_CAN_ACCEPT": "number"}},
         "QuestLogConstsMainlineRetail": {"values": {"MAXIMUM_NUM_QUESTS_LOG_CAN_ACCEPT": "number"}},
         "QuestWatchConsts": {"values": {"MAX_QUEST_WATCHES": "number", "MAX_WORLD_QUEST_WATCHES_AUTOMATIC": "number", "MAX_WORLD_QUEST_WATCHES_MANUAL": "number"}},
+        "QuestWatchConsts_Classic": {"values": {"MAX_WORLD_QUEST_WATCHES": "number", "MAX_WORLD_QUEST_HARD_WATCHES": "number"}},
+        "QuestWatchConsts_ClassicPreWrath": {"values": {"MAX_QUEST_WATCHES": "number"}},
         "RaidMarkerConsts": {"values": {"MAX_RAID_TARGETS_USER": "number", "MAX_RAID_TARGETS_RESTRICTED": "number", "MAX_VALID_RAID_TARGETS": "number", "MAX_RAID_MARKERS": "number"}},
         "RecentAlliesConsts": {"values": {"PIN_EXPIRATION_WARNING_DAYS": "number"}},
         "RewardsVcConstants": {"values": {"REWARDS_VC_UPDATE_THROTTLE": "number", "REWARDS_VC_GET_REQUEST_THROTTLE": "number", "REWARDS_VC_GRANT_REQUEST_THROTTLE": "number"}},
@@ -4411,6 +4462,7 @@
         "CurrencyFlagsB": {"values": {"CurrencyBUseTotalEarnedForEarned": "Enum.CurrencyFlagsB", "CurrencyBShowQuestXPGainInTooltip": "Enum.CurrencyFlagsB", "CurrencyBNoNotificationMailOnOfflineProgress": "Enum.CurrencyFlagsB", "CurrencyBBattlenetVirtualCurrency": "Enum.CurrencyFlagsB", "FutureCurrencyFlag": "Enum.CurrencyFlagsB", "CurrencyBDontDisplayIfZero": "Enum.CurrencyFlagsB", "CurrencyBScaleMaxQuantityBySeasonWeeks": "Enum.CurrencyFlagsB", "CurrencyBScaleMaxQuantityByWeeksSinceStart": "Enum.CurrencyFlagsB", "CurrencyBForceMaxQuantityOnConversion": "Enum.CurrencyFlagsB", "CurrencyBUnearnableBeforeMaxQuantityStart": "Enum.CurrencyFlagsB", "CurrencyBAllowReductionByResourcefulness": "Enum.CurrencyFlagsB", "CurrencyBNoBonusXP": "Enum.CurrencyFlagsB"}},
         "CurrencyGainFlags": {"values": {"None": "Enum.CurrencyGainFlags", "BonusAward": "Enum.CurrencyGainFlags", "DroppedFromDeath": "Enum.CurrencyGainFlags", "FromAccountServer": "Enum.CurrencyGainFlags", "Autotracking": "Enum.CurrencyGainFlags"}},
         "CurrencyNameStyle": {"values": {"Symbol": "Enum.CurrencyNameStyle", "NarrowSymbol": "Enum.CurrencyNameStyle", "Long": "Enum.CurrencyNameStyle", "FormalSymbol": "Enum.CurrencyNameStyle", "VariantSymbol": "Enum.CurrencyNameStyle"}},
+        "CurrencySource": {"values": {"ConvertOldItem": "Enum.CurrencySource", "ConvertOldPvPCurrency": "Enum.CurrencySource", "ItemRefund": "Enum.CurrencySource", "QuestReward": "Enum.CurrencySource", "Cheat": "Enum.CurrencySource", "Vendor": "Enum.CurrencySource", "PvPKillCredit": "Enum.CurrencySource", "PvPMetaCredit": "Enum.CurrencySource", "PvPScriptedAward": "Enum.CurrencySource", "Loot": "Enum.CurrencySource", "UpdatingVersion": "Enum.CurrencySource", "LFGReward": "Enum.CurrencySource", "Trade": "Enum.CurrencySource", "Spell": "Enum.CurrencySource", "ItemDeletion": "Enum.CurrencySource", "RatedBattleground": "Enum.CurrencySource", "RandomBattleground": "Enum.CurrencySource", "Arena": "Enum.CurrencySource", "ExceededMaxQty": "Enum.CurrencySource", "PvPCompletionBonus": "Enum.CurrencySource", "Script": "Enum.CurrencySource", "GuildBankWithdrawal": "Enum.CurrencySource", "Pushloot": "Enum.CurrencySource", "GarrisonBuilding": "Enum.CurrencySource", "PvPDrop": "Enum.CurrencySource", "GarrisonFollowerActivation": "Enum.CurrencySource", "GarrisonBuildingRefund": "Enum.CurrencySource", "GarrisonMissionReward": "Enum.CurrencySource", "GarrisonResourceOverTime": "Enum.CurrencySource", "QuestRewardIgnoreCaps": "Enum.CurrencySource", "GarrisonTalent": "Enum.CurrencySource", "GarrisonWorldQuestBonus": "Enum.CurrencySource", "PvPHonorReward": "Enum.CurrencySource", "BonusRoll": "Enum.CurrencySource", "AzeriteRespec": "Enum.CurrencySource", "WorldQuestReward": "Enum.CurrencySource", "WorldQuestRewardIgnoreCaps": "Enum.CurrencySource", "AccountCopy": "Enum.CurrencySource", "ArenaPoints": "Enum.CurrencySource", "PvPTeamContribution": "Enum.CurrencySource", "PvPHonorQuestReward": "Enum.CurrencySource", "AuctionDeposit": "Enum.CurrencySource", "Barbershop": "Enum.CurrencySource", "SimulateLoot": "Enum.CurrencySource", "ChallengeModeDungeon": "Enum.CurrencySource", "InitiativeReward": "Enum.CurrencySource", "AccountServerConversion": "Enum.CurrencySource"}},
         "CurrencyTokenCategoryFlags": {"values": {"FlagSortLast": "Enum.CurrencyTokenCategoryFlags", "FlagPlayerItemAssignment": "Enum.CurrencyTokenCategoryFlags", "Hidden": "Enum.CurrencyTokenCategoryFlags", "Virtual": "Enum.CurrencyTokenCategoryFlags", "StartsCollapsed": "Enum.CurrencyTokenCategoryFlags"}},
         "CurrencyType": {"values": {"Copper": "Enum.CurrencyType", "Silver": "Enum.CurrencyType", "Gold": "Enum.CurrencyType"}},
         "CurrencyWeeksFromStartOption": {"values": {"DebugLogging": "Enum.CurrencyWeeksFromStartOption", "IgnoreTimeBeforeStart": "Enum.CurrencyWeeksFromStartOption"}},
@@ -4827,6 +4879,7 @@
         "RecipeRequirementType": {"values": {"SpellFocus": "Enum.RecipeRequirementType", "Totem": "Enum.RecipeRequirementType", "Area": "Enum.RecipeRequirementType"}},
         "RecruitAFriendFailure": {"values": {"Success": "Enum.RecruitAFriendFailure", "NotLinked": "Enum.RecruitAFriendFailure", "NotNow": "Enum.RecruitAFriendFailure", "NoTarget": "Enum.RecruitAFriendFailure", "NotInParty": "Enum.RecruitAFriendFailure", "SummonLevelMax": "Enum.RecruitAFriendFailure", "SummonCooldown": "Enum.RecruitAFriendFailure", "InsufExpanLvl": "Enum.RecruitAFriendFailure", "Offline": "Enum.RecruitAFriendFailure", "MapIncomingTransferNotAllowed": "Enum.RecruitAFriendFailure", "NotInClassic": "Enum.RecruitAFriendFailure"}},
         "RecruitAFriendRewardsVersion": {"values": {"InvalidVersion": "Enum.RecruitAFriendRewardsVersion", "UnusedVersionOne": "Enum.RecruitAFriendRewardsVersion", "VersionTwo": "Enum.RecruitAFriendRewardsVersion", "VersionThree": "Enum.RecruitAFriendRewardsVersion"}},
+        "ReforgeFailedReason": {"values": {"None": "Enum.ReforgeFailedReason", "ReforgeSrcStatNotFound": "Enum.ReforgeFailedReason", "ReforgeInsufficientSrcStat": "Enum.ReforgeFailedReason", "ReforgeAlreadyHasDstStat": "Enum.ReforgeFailedReason", "ReforgeItemTooLowLevel": "Enum.ReforgeFailedReason"}},
         "RegisterAddonMessagePrefixResult": {"values": {"Success": "Enum.RegisterAddonMessagePrefixResult", "DuplicatePrefix": "Enum.RegisterAddonMessagePrefixResult", "InvalidPrefix": "Enum.RegisterAddonMessagePrefixResult", "MaxPrefixes": "Enum.RegisterAddonMessagePrefixResult"}},
         "RelativeContentDifficulty": {"values": {"Trivial": "Enum.RelativeContentDifficulty", "Easy": "Enum.RelativeContentDifficulty", "Fair": "Enum.RelativeContentDifficulty", "Difficult": "Enum.RelativeContentDifficulty", "Impossible": "Enum.RelativeContentDifficulty"}},
         "ReleaseType": {"values": {"Original": "Enum.ReleaseType", "Classic": "Enum.ReleaseType"}},
@@ -4852,6 +4905,7 @@
         "RoomConnectionType": {"values": {"None": "Enum.RoomConnectionType", "All": "Enum.RoomConnectionType"}},
         "RuneforgePowerFilter": {"values": {"All": "Enum.RuneforgePowerFilter", "Relevant": "Enum.RuneforgePowerFilter", "Available": "Enum.RuneforgePowerFilter", "Unavailable": "Enum.RuneforgePowerFilter"}},
         "RuneforgePowerState": {"values": {"Available": "Enum.RuneforgePowerState", "Unavailable": "Enum.RuneforgePowerState", "Invalid": "Enum.RuneforgePowerState"}},
+        "ScalingArmorType": {"values": {"Cloth": "Enum.ScalingArmorType", "Leather": "Enum.ScalingArmorType", "Mail": "Enum.ScalingArmorType", "Plate": "Enum.ScalingArmorType"}},
         "ScreenLocationType": {"values": {"Center": "Enum.ScreenLocationType", "Left": "Enum.ScreenLocationType", "Right": "Enum.ScreenLocationType", "Top": "Enum.ScreenLocationType", "Bottom": "Enum.ScreenLocationType", "TopLeft": "Enum.ScreenLocationType", "TopRight": "Enum.ScreenLocationType", "LeftOutside": "Enum.ScreenLocationType", "RightOutside": "Enum.ScreenLocationType", "LeftRight": "Enum.ScreenLocationType", "TopBottom": "Enum.ScreenLocationType", "LeftRightOutside": "Enum.ScreenLocationType"}},
         "ScreenshotSource": {"values": {"Automatic": "Enum.ScreenshotSource", "PlayerReport": "Enum.ScreenshotSource", "Cheat": "Enum.ScreenshotSource"}},
         "ScribeClassID": {"values": {"None": "Enum.ScribeClassID", "Witch": "Enum.ScribeClassID", "Slayer": "Enum.ScribeClassID", "Inquisitor": "Enum.ScribeClassID"}},
@@ -5315,6 +5369,7 @@
         "GetAreaPOIForMap": {"parameters": ["uiMapID: number"], "returns": ["table"]},
         "GetAreaPOIInfo": {"parameters": ["uiMapID: number|nil", "areaPoiID: number"], "returns": ["AreaPOIInfo|nil"]},
         "GetAreaPOISecondsLeft": {"parameters": ["areaPoiID: number"], "returns": ["number|nil"]},
+        "GetAreaPOITimeLeft": {"parameters": ["areaPoiID: number"], "returns": ["number|nil"], "only": ["Classic"]},
         "GetDelvesForMap": {"parameters": ["uiMapID: number"], "returns": ["table"]},
         "GetDragonridingRacesForMap": {"parameters": ["uiMapID: number"], "returns": ["table"]},
         "GetEventsForMap": {"parameters": ["uiMapID: number"], "returns": ["table"]},
@@ -5610,15 +5665,21 @@
         "ApplyCustomizationChoices": {"parameters": [], "returns": ["boolean"]},
         "Cancel": {"parameters": [], "returns": []},
         "ClearPreviewChoices": {"parameters": ["clearSavedChoices: boolean|nil"], "returns": []},
+        "CycleCharCustomization": {"parameters": ["type: Enum.CharCustomizationType", "forward: boolean"], "returns": [], "only": ["Classic"]},
         "GetAvailableCustomizations": {"parameters": [], "returns": ["table|nil"]},
+        "GetBarbersChoiceCost": {"parameters": [], "returns": ["number"], "only": ["Classic"]},
         "GetCurrentCameraZoom": {"parameters": [], "returns": ["number"]},
         "GetCurrentCharacterData": {"parameters": [], "returns": ["PlayerInfoCharacterData|nil"]},
         "GetCurrentCost": {"parameters": [], "returns": ["number"]},
+        "GetCustomizationTypeInfo": {"parameters": ["type: Enum.CharCustomizationType"], "returns": ["string", "string", "boolean"], "only": ["Classic"]},
         "GetViewingChrModel": {"parameters": [], "returns": ["number|nil"]},
         "HasAlteredForm": {"parameters": [], "returns": ["boolean"]},
         "HasAnyChanges": {"parameters": [], "returns": ["boolean"]},
         "HasCustomizationFeature": {"parameters": ["featureMask: Enum.ChrModelFeatureFlags"], "returns": ["boolean"]},
+        "IsValidCustomizationType": {"parameters": ["type: Enum.CharCustomizationType"], "returns": ["boolean"], "only": ["Classic"]},
         "IsViewingAlteredForm": {"parameters": [], "returns": ["boolean"]},
+        "IsViewingNativeSex": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]},
+        "IsViewingVisibleSex": {"parameters": ["sex: Enum.UnitSex"], "returns": ["boolean"], "only": ["Classic"]},
         "MarkCustomizationChoiceAsSeen": {"parameters": ["choiceID: number"], "returns": []},
         "MarkCustomizationOptionAsSeen": {"parameters": ["optionID: number"], "returns": []},
         "PreviewCustomizationChoice": {"parameters": ["optionID: number", "choiceID: number"], "returns": []},
@@ -5631,6 +5692,7 @@
         "SetCameraZoomLevel": {"parameters": ["zoomLevel: number", "keepCustomZoom: boolean|nil"], "returns": []},
         "SetCustomizationChoice": {"parameters": ["optionID: number", "choiceID: number"], "returns": []},
         "SetModelDressState": {"parameters": ["dressedState: boolean"], "returns": []},
+        "SetPortraitTexture": {"parameters": ["texture: Texture", "raceID: number", "sex: Enum.UnitSex"], "returns": [], "only": ["Classic"]},
         "SetSelectedSex": {"parameters": ["sex: Enum.UnitSex"], "returns": []},
         "SetViewingAlteredForm": {"parameters": ["isViewingAlteredForm: boolean"], "returns": []},
         "SetViewingChrModel": {"parameters": ["chrModelID: number|nil", "spellShapeshiftFormID: number|nil"], "returns": []},
@@ -5832,6 +5894,7 @@
         "BulkRefundDecors": {"parameters": ["decorGUIDs: table"], "returns": []},
         "BypassAchievementRequirement": {"parameters": [], "returns": ["boolean"]},
         "CloseCatalogShopInteraction": {"parameters": [], "returns": []},
+        "ConfirmHousingPurchase": {"parameters": ["productIDs: table"], "returns": [], "only": ["Classic", "Forever"]},
         "ConfirmVCProductPurchase": {"parameters": ["productIDs: table"], "returns": []},
         "FindBestCurrencyProductForNeededAmount": {"parameters": ["vcCurrencyCode: string", "amountNeeded: number"], "returns": ["number|nil"]},
         "GetAvailableCategoryIDs": {"parameters": [], "returns": ["table"]},
@@ -5883,7 +5946,12 @@
         "GetActiveChallengeMapID": {"parameters": [], "returns": ["number|nil"]},
         "GetActiveKeystoneInfo": {"parameters": [], "returns": ["number", "table", "boolean"]},
         "GetAffixInfo": {"parameters": ["affixID: number"], "returns": ["string|nil", "string|nil", "number|nil"]},
+        "GetChallengeBestTime": {"parameters": ["mapID: number"], "returns": ["number|nil", "number|nil"], "only": ["Classic"]},
         "GetChallengeCompletionInfo": {"parameters": [], "returns": ["ChallengeCompletionInfo"]},
+        "GetChallengeGuildBestTimeInfo": {"parameters": ["mapID: number"], "returns": ["ChallengeModeBestTime|nil"], "only": ["Classic"]},
+        "GetChallengeMapRewardInfo": {"parameters": ["mapID: number", "medal: number", "index: number"], "returns": ["number|nil", "string", "number", "number", "boolean"], "only": ["Classic"]},
+        "GetChallengeModeMapTimes": {"parameters": ["mapID: number"], "returns": ["table"], "only": ["Classic"]},
+        "GetChallengeRealmBestTimeInfo": {"parameters": ["mapID: number"], "returns": ["ChallengeModeBestTime|nil"], "only": ["Classic"]},
         "GetDeathCount": {"parameters": [], "returns": ["number|nil", "number|nil"]},
         "GetDungeonScoreRarityColor": {"parameters": ["dungeonScore: number"], "returns": ["colorRGB"]},
         "GetGuildLeaders": {"parameters": [], "returns": ["table|nil"]},
@@ -5892,6 +5960,8 @@
         "GetMapScoreInfo": {"parameters": [], "returns": ["table|nil"]},
         "GetMapTable": {"parameters": [], "returns": ["table"]},
         "GetMapUIInfo": {"parameters": ["mapChallengeModeID: number"], "returns": ["string|nil", "number|nil", "number|nil", "number|nil", "number|nil", "number|nil"]},
+        "GetNumChallengeMapRewards": {"parameters": ["mapID: number", "medal: number"], "returns": ["number"], "only": ["Classic"]},
+        "GetNumMedals": {"parameters": ["mapID: number"], "returns": ["number"], "only": ["Classic"]},
         "GetOverallDungeonScore": {"parameters": [], "returns": ["number"]},
         "GetPowerLevelDamageHealthMod": {"parameters": ["powerLevel: number"], "returns": ["number|nil", "number|nil"]},
         "GetSlottedKeystoneInfo": {"parameters": [], "returns": ["number|nil", "table|nil", "number|nil"]},
@@ -5900,8 +5970,10 @@
         "GetStartTime": {"parameters": [], "returns": ["number"]},
         "HasSlottedKeystone": {"parameters": [], "returns": ["boolean"]},
         "IsChallengeModeActive": {"parameters": [], "returns": ["boolean"]},
+        "IsChallengeModeEnabled": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]},
         "IsChallengeModeResettable": {"parameters": [], "returns": ["boolean"]},
         "RemoveKeystone": {"parameters": [], "returns": ["boolean"]},
+        "RequestChallengeModeLeaderboard": {"parameters": ["mapID: number", "challengeModeID: number", "page: number"], "returns": [], "only": ["Classic"]},
         "RequestLeaders": {"parameters": ["mapChallengeModeID: number"], "returns": []},
         "Reset": {"parameters": [], "returns": []},
         "SlotKeystone": {"parameters": [], "returns": []},
@@ -5917,6 +5989,7 @@
       "functions": {
         "AreOutgoingAddonChatMessagesRestricted": {"parameters": [], "returns": ["boolean"]},
         "CanPlayerSpeakLanguage": {"parameters": ["languageId: number"], "returns": ["boolean"]},
+        "CanReportPlayer": {"parameters": ["playerLocation: PlayerLocation"], "returns": ["boolean"], "only": ["Classic"]},
         "CancelEmote": {"parameters": [], "returns": []},
         "DropCautionaryChatMessage": {"parameters": ["confirmNumber: number"], "returns": []},
         "GetChannelInfoFromIdentifier": {"parameters": ["channelIdentifier: string"], "returns": ["ChatChannelInfo|nil"]},
@@ -5952,6 +6025,7 @@
         "PerformEmote": {"parameters": ["emoteName: string", "targetName: string|nil", "suppressMoveError: boolean|nil"], "returns": ["boolean"]},
         "RegisterAddonMessagePrefix": {"parameters": ["prefix: string"], "returns": ["Enum.RegisterAddonMessagePrefixResult"]},
         "ReplaceIconAndGroupExpressions": {"parameters": ["input: string", "noIconReplacement: boolean|nil", "noGroupReplacement: boolean|nil"], "returns": ["string"]},
+        "ReportServerLag": {"parameters": [], "returns": [], "only": ["Classic"]},
         "RequestCanLocalWhisperTarget": {"parameters": ["whisperTarget: string"], "returns": []},
         "ResetDefaultZoneChannels": {"parameters": [], "returns": []},
         "SendAddonMessage": {"parameters": ["prefix: string", "message: string", "chatType: string|nil", "target: string|nil"], "returns": ["Enum.SendAddonMessageResult"]},
@@ -6223,17 +6297,25 @@
     },
     "C_CombatLog": {
       "functions": {
+        "AddEventFilter": {"parameters": [], "returns": [], "only": ["Classic"]},
         "ApplyFilterSettings": {"parameters": ["filterSettings"], "returns": []},
         "AreFilteredEventsEnabled": {"parameters": [], "returns": ["boolean"]},
         "ClearEntries": {"parameters": [], "returns": []},
+        "ClearEventFilters": {"parameters": [], "returns": [], "only": ["Classic"]},
         "DoesObjectMatchFilter": {"parameters": ["mask: Enum.CombatLogObject", "flags: Enum.CombatLogObject"], "returns": ["boolean"]},
+        "GetCurrentEntryInfo": {"parameters": [], "returns": [], "only": ["Classic"]},
+        "GetCurrentEventInfo": {"parameters": [], "returns": [], "only": ["Classic"]},
+        "GetEntryCount": {"parameters": ["ignoreFilter: boolean|nil"], "returns": ["number"], "only": ["Classic"]},
         "GetEntryRetentionTime": {"parameters": [], "returns": ["number"]},
         "GetMessageLimit": {"parameters": [], "returns": ["number"]},
         "IsCombatLogRestricted": {"parameters": [], "returns": ["boolean"]},
         "RefilterEntries": {"parameters": [], "returns": []},
+        "SeekToNewestEntry": {"parameters": ["ignoreFilter: boolean|nil"], "returns": ["boolean"], "only": ["Classic"]},
+        "SeekToPreviousEntry": {"parameters": ["ignoreFilter: boolean|nil"], "returns": ["boolean"], "only": ["Classic"]},
         "SetEntryRetentionTime": {"parameters": ["retentionTime: number"], "returns": []},
         "SetFilteredEventsEnabled": {"parameters": ["enabled: boolean"], "returns": []},
-        "SetMessageLimit": {"parameters": ["messageLimit: number"], "returns": []}
+        "SetMessageLimit": {"parameters": ["messageLimit: number"], "returns": []},
+        "ShouldShowCurrentEntry": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]}
       }
     },
     "C_CombatLogInternal": {
@@ -6426,6 +6508,7 @@
         "GetContainerItemCooldown": {"parameters": ["containerIndex: Enum.BagIndex", "slotIndex: number"], "returns": ["number", "number", "number"]},
         "GetContainerItemDurability": {"parameters": ["containerIndex: Enum.BagIndex", "slotIndex: number"], "returns": ["number|nil", "number|nil"]},
         "GetContainerItemEquipmentSetInfo": {"parameters": ["containerIndex: Enum.BagIndex", "slotIndex: number"], "returns": ["boolean", "string"]},
+        "GetContainerItemGems": {"parameters": ["containerIndex: Enum.BagIndex", "slotIndex: number"], "returns": ["table"], "only": ["Classic"]},
         "GetContainerItemID": {"parameters": ["containerIndex: Enum.BagIndex", "slotIndex: number"], "returns": ["number|nil"]},
         "GetContainerItemInfo": {"parameters": ["containerIndex: Enum.BagIndex", "slotIndex: number"], "returns": ["ContainerItemInfo|nil"]},
         "GetContainerItemLink": {"parameters": ["containerIndex: Enum.BagIndex", "slotIndex: number"], "returns": ["string"]},
@@ -6440,6 +6523,7 @@
         "GetMaxArenaCurrency": {"parameters": [], "returns": ["number"]},
         "GetSortBagsRightToLeft": {"parameters": [], "returns": ["boolean"]},
         "HasContainerItem": {"parameters": ["containerIndex: Enum.BagIndex", "slotIndex: number"], "returns": ["boolean"]},
+        "IsBagSlotFlagEnabledOnOtherBankBags": {"parameters": ["bagIndex: Enum.BagIndex", "flagIndex: number"], "returns": ["boolean"], "only": ["Classic"]},
         "IsBattlePayItem": {"parameters": ["containerIndex: Enum.BagIndex", "slotIndex: number"], "returns": ["boolean"]},
         "IsContainerFiltered": {"parameters": ["containerIndex: Enum.BagIndex"], "returns": ["boolean"]},
         "PickupContainerItem": {"parameters": ["containerIndex: Enum.BagIndex", "slotIndex: number"], "returns": []},
@@ -6805,6 +6889,8 @@
         "GetAllDyeColorCategories": {"parameters": [], "returns": ["table"]},
         "GetAllDyeColors": {"parameters": ["ownedColorsOnly: boolean|nil"], "returns": ["table"]},
         "GetDyeColorCategoryInfo": {"parameters": ["dyeColorCategoryID: number"], "returns": ["DyeColorCategoryDisplayInfo|nil"]},
+        "GetDyeColorForItem": {"parameters": ["itemLinkOrID: number|string"], "returns": ["number|nil"], "only": ["Classic"]},
+        "GetDyeColorForItemLocation": {"parameters": ["itemLocation: ItemLocation"], "returns": ["number|nil"], "only": ["Classic"]},
         "GetDyeColorInfo": {"parameters": ["dyeColorID: number"], "returns": ["DyeColorDisplayInfo|nil"]},
         "GetDyeColorsForItem": {"parameters": ["itemLinkOrID: number|string"], "returns": ["table"]},
         "GetDyeColorsForItemLocation": {"parameters": ["itemLocation: ItemLocation"], "returns": ["table"]},
@@ -6935,6 +7021,36 @@
     "C_EndOfMatchUI": {
       "functions": {
         "GetEndOfMatchDetails": {"parameters": [], "returns": ["MatchDetails|nil"]}
+      }
+    },
+    "C_Engraving": {
+      "functions": {
+        "AddCategoryFilter": {"parameters": ["category: Enum.InventoryType"], "returns": [], "only": ["Classic"]},
+        "AddExclusiveCategoryFilter": {"parameters": ["category: Enum.InventoryType"], "returns": [], "only": ["Classic"]},
+        "CastRune": {"parameters": ["skillLineAbilityID: number"], "returns": [], "only": ["Classic"]},
+        "ClearAllCategoryFilters": {"parameters": [], "returns": [], "only": ["Classic"]},
+        "ClearCategoryFilter": {"parameters": ["category: Enum.InventoryType"], "returns": [], "only": ["Classic"]},
+        "ClearExclusiveCategoryFilter": {"parameters": [], "returns": [], "only": ["Classic"]},
+        "EnableEquippedFilter": {"parameters": ["enabled: boolean"], "returns": [], "only": ["Classic"]},
+        "GetCurrentRuneCast": {"parameters": [], "returns": ["EngravingData|nil"], "only": ["Classic"]},
+        "GetEngravingModeEnabled": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]},
+        "GetExclusiveCategoryFilter": {"parameters": [], "returns": ["Enum.InventoryType|nil"], "only": ["Classic"]},
+        "GetNumRunesKnown": {"parameters": ["equipmentSlot: Enum.InventoryType|nil"], "returns": ["number", "number"], "only": ["Classic"]},
+        "GetRuneCategories": {"parameters": ["shouldFilter: boolean", "ownedOnly: boolean"], "returns": ["table"], "only": ["Classic"]},
+        "GetRuneForEquipmentSlot": {"parameters": ["equipmentSlot: number"], "returns": ["EngravingData|nil"], "only": ["Classic"]},
+        "GetRuneForInventorySlot": {"parameters": ["containerIndex: number", "slotIndex: number"], "returns": ["EngravingData|nil"], "only": ["Classic"]},
+        "GetRunesForCategory": {"parameters": ["category: Enum.InventoryType", "ownedOnly: boolean"], "returns": ["table"], "only": ["Classic"]},
+        "HasCategoryFilter": {"parameters": ["category: Enum.InventoryType"], "returns": ["boolean"], "only": ["Classic"]},
+        "IsEngravingEnabled": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]},
+        "IsEquipmentSlotEngravable": {"parameters": ["equipmentSlot: number"], "returns": ["boolean"], "only": ["Classic"]},
+        "IsEquippedFilterEnabled": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]},
+        "IsInventorySlotEngravable": {"parameters": ["containerIndex: number", "slotIndex: number"], "returns": ["boolean"], "only": ["Classic"]},
+        "IsInventorySlotEngravableByCurrentRuneCast": {"parameters": ["containerIndex: number", "slotIndex: number"], "returns": ["boolean"], "only": ["Classic"]},
+        "IsKnownRuneSpell": {"parameters": ["spellID: number"], "returns": ["boolean"], "only": ["Classic"]},
+        "IsRuneEquipped": {"parameters": ["skillLineAbilityID: number"], "returns": ["boolean"], "only": ["Classic"]},
+        "RefreshRunesList": {"parameters": [], "returns": [], "only": ["Classic"]},
+        "SetEngravingModeEnabled": {"parameters": ["enabled: boolean"], "returns": [], "only": ["Classic"]},
+        "SetSearchFilter": {"parameters": ["filter: string"], "returns": [], "only": ["Classic"]}
       }
     },
     "C_EquipmentSet": {
@@ -7212,6 +7328,12 @@
         "IsOnGlueScreen": {"parameters": [], "returns": ["boolean"]}
       }
     },
+    "C_GlyphInfo": {
+      "functions": {
+        "GetGlyphInfoByID": {"parameters": ["glyphID: number"], "returns": ["string|nil", "number|nil", "boolean|nil", "number|nil", "number|nil", "string|nil"], "only": ["Classic"]},
+        "GetGlyphLink": {"parameters": ["glyphIndex: number", "glyphID: number"], "returns": ["string|nil"], "only": ["Classic"]}
+      }
+    },
     "C_GossipInfo": {
       "functions": {
         "CloseGossip": {"parameters": [], "returns": []},
@@ -7369,6 +7491,7 @@
         "IsHousingServiceEnabled": {"parameters": [], "returns": ["boolean"]},
         "IsInsideHouse": {"parameters": [], "returns": ["boolean"]},
         "IsInsideHouseOrPlot": {"parameters": [], "returns": ["boolean"]},
+        "IsInsideOwnHouse": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]},
         "IsInsideOwnedHouse": {"parameters": [], "returns": ["boolean"]},
         "IsInsideOwnedHouseOrPlot": {"parameters": [], "returns": ["boolean"]},
         "IsInsideOwnedPlot": {"parameters": [], "returns": ["boolean"]},
@@ -7612,6 +7735,7 @@
         "GetHighestOccupiedFloorIndex": {"parameters": [], "returns": ["number"]},
         "GetLowestOccupiedFloorIndex": {"parameters": [], "returns": ["number"]},
         "GetNumActiveRooms": {"parameters": [], "returns": ["number"]},
+        "GetNumFloors": {"parameters": [], "returns": ["number"], "only": ["Classic"]},
         "GetRoomPlacementBudget": {"parameters": [], "returns": ["number|nil"]},
         "GetRoomPlayerIsIn": {"parameters": [], "returns": ["string|nil"]},
         "GetSelectedBlueprintFloorplan": {"parameters": [], "returns": ["number|nil", "string|nil"]},
@@ -7631,6 +7755,7 @@
         "HasValidConnection": {"parameters": ["roomGUID: string", "componentID: number", "roomId: number"], "returns": ["boolean"]},
         "IsBaseRoom": {"parameters": ["roomGUID: string"], "returns": ["boolean"]},
         "IsDraggingRoom": {"parameters": [], "returns": ["boolean", "boolean"]},
+        "IsDraggingStairwell": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]},
         "MoveDraggedRoom": {"parameters": ["sourceDoorIndex: number", "destRoom: string", "destDoorIndex: number"], "returns": []},
         "MoveLayoutCamera": {"parameters": ["direction: Enum.HousingLayoutCameraDirection", "isPressed: boolean"], "returns": []},
         "RemoveRoom": {"parameters": ["roomGUID: string"], "returns": []},
@@ -7851,6 +7976,7 @@
         "IsCurioItem": {"parameters": ["itemInfo: number|string"], "returns": ["boolean|nil"]},
         "IsCurrentItem": {"parameters": ["itemInfo: number|string"], "returns": ["boolean"]},
         "IsDecorItem": {"parameters": ["itemInfo: number|string"], "returns": ["boolean|nil"]},
+        "IsDressableItem": {"parameters": ["itemInfo: number|string"], "returns": ["boolean"], "only": ["Classic"]},
         "IsDressableItemByID": {"parameters": ["itemInfo: number|string"], "returns": ["boolean"]},
         "IsEquippableItem": {"parameters": ["itemInfo: number|string"], "returns": ["boolean"]},
         "IsEquippedItem": {"parameters": ["itemInfo: number|string"], "returns": ["boolean"]},
@@ -8179,6 +8305,7 @@
     "C_Macro": {
       "functions": {
         "GetMacroName": {"parameters": ["macroId: number"], "returns": ["string|nil"]},
+        "GetNumIcons": {"parameters": [], "returns": ["number"], "only": ["Classic"]},
         "GetSelectedMacroIcon": {"parameters": ["macroId: number"], "returns": ["number"]},
         "RunMacroText": {"parameters": ["text: string", "button: string"], "returns": []},
         "SetMacroExecuteLineCallback": {"parameters": ["cb: function"], "returns": []}
@@ -8219,6 +8346,7 @@
         "CloseWorldMapInteraction": {"parameters": [], "returns": []},
         "GetAreaInfo": {"parameters": ["areaID: number"], "returns": ["string"]},
         "GetBestMapForUnit": {"parameters": ["unitToken: string"], "returns": ["number|nil"]},
+        "GetBountySetIDForMap": {"parameters": ["uiMapID: number"], "returns": ["number"], "only": ["Classic"]},
         "GetBountySetMaps": {"parameters": ["bountySetID: number"], "returns": ["table"]},
         "GetFallbackWorldMapID": {"parameters": [], "returns": ["number"]},
         "GetMapArtBackgroundAtlas": {"parameters": ["uiMapID: number"], "returns": ["string"]},
@@ -8394,6 +8522,7 @@
         "GetSeasonBestAffixScoreInfoForMap": {"parameters": ["mapChallengeModeID: number"], "returns": ["table|nil", "number|nil"]},
         "GetSeasonBestForMap": {"parameters": ["mapChallengeModeID: number"], "returns": ["MapSeasonBestInfo|nil", "MapSeasonBestInfo|nil"]},
         "GetSeasonBestMythicRatingFromThisExpansion": {"parameters": [], "returns": ["number|nil", "number|nil"]},
+        "GetSeasonTimesForMap": {"parameters": ["mapChallengeModeID: number"], "returns": ["SeasonTimeInfo|nil"], "only": ["Classic"]},
         "GetWeeklyBestForMap": {"parameters": ["mapChallengeModeID: number"], "returns": ["number|nil", "number|nil", "CalendarTime|nil", "table|nil", "table|nil", "number|nil"]},
         "GetWeeklyChestRewardLevel": {"parameters": [], "returns": ["number", "number", "number", "number"]},
         "IsMythicPlusActive": {"parameters": [], "returns": ["boolean"]},
@@ -8732,6 +8861,7 @@
         "IsTradingPostAvailable": {"parameters": [], "returns": ["boolean"]},
         "IsTravelersLogAvailable": {"parameters": [], "returns": ["boolean"]},
         "IsTutorialsTabAvailable": {"parameters": [], "returns": ["boolean"]},
+        "IsXPUserDisabled": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]},
         "ShouldDisplaySurname": {"parameters": [], "returns": ["boolean"]},
         "UnitIsSameServer": {"parameters": ["playerLocation: PlayerLocation"], "returns": ["boolean"]}
       }
@@ -8799,6 +8929,7 @@
         "CanSurrenderArena": {"parameters": [], "returns": ["boolean"]},
         "CanToggleWarMode": {"parameters": ["toggle: boolean"], "returns": ["boolean"]},
         "CanToggleWarModeInArea": {"parameters": [], "returns": ["boolean"]},
+        "ClearLocklistMap": {"parameters": ["mapID: number"], "returns": [], "only": ["Classic"]},
         "DoesMatchOutcomeAffectRating": {"parameters": [], "returns": ["boolean"]},
         "GetActiveBrawlInfo": {"parameters": [], "returns": ["PvpBrawlInfo|nil"]},
         "GetActiveMatchBracket": {"parameters": [], "returns": ["number"]},
@@ -8807,7 +8938,6 @@
         "GetActiveMatchWinner": {"parameters": [], "returns": ["number"]},
         "GetArenaCrowdControlDuration": {"parameters": ["playerToken: string"], "returns": ["LuaDurationObject"]},
         "GetArenaCrowdControlInfo": {"parameters": ["playerToken: string"], "returns": ["number|nil", "number|nil", "number|nil"]},
-        "GetArenaOpponentSpec": {"parameters": ["index: number"], "returns": ["number|nil", "number|nil"]},
         "GetArenaRewards": {"parameters": ["teamSize: number"], "returns": ["number|nil", "number|nil", "table|nil", "table|nil", "RoleShortageReward|nil"]},
         "GetArenaSkirmishRewards": {"parameters": [], "returns": ["number", "number", "table|nil", "table|nil", "RoleShortageReward|nil"]},
         "GetAssignedSpecForBattlefieldQueue": {"parameters": ["queueID: number"], "returns": ["number|nil"]},
@@ -8820,8 +8950,13 @@
         "GetBrawlSoloRBGMinItemLevel": {"parameters": [], "returns": ["number"]},
         "GetCustomVictoryStatID": {"parameters": [], "returns": ["number"]},
         "GetGlobalPvpScalingInfoForSpecID": {"parameters": ["specializationID: number"], "returns": ["table|nil"]},
+        "GetHolidayBGInfo": {"parameters": [], "returns": ["RandomBGInfo"], "only": ["Classic"]},
+        "GetHolidayBGLossRewards": {"parameters": [], "returns": ["number", "number", "table|nil", "table|nil", "RoleShortageReward|nil"], "only": ["Classic"]},
+        "GetHolidayBGRewards": {"parameters": [], "returns": ["number", "number", "table|nil", "table|nil", "RoleShortageReward|nil"], "only": ["Classic"]},
         "GetHonorRewardInfo": {"parameters": ["honorLevel: number"], "returns": ["HonorRewardInfo|nil"]},
         "GetLevelUpBattlegrounds": {"parameters": ["level: number"], "returns": ["table"]},
+        "GetLocklistMap": {"parameters": ["index: number"], "returns": ["number"], "only": ["Classic"]},
+        "GetLocklistMapName": {"parameters": ["index: number"], "returns": ["string"], "only": ["Classic"]},
         "GetMatchPVPStatColumn": {"parameters": ["pvpStatID: number"], "returns": ["MatchPVPStatColumn|nil"]},
         "GetMatchPVPStatColumns": {"parameters": [], "returns": ["table"]},
         "GetNextHonorLevelForReward": {"parameters": ["honorLevel: number"], "returns": ["number|nil"]},
@@ -8837,6 +8972,7 @@
         "GetPvpTierID": {"parameters": ["tierEnum: number", "bracketEnum: number"], "returns": ["number|nil"]},
         "GetPvpTierInfo": {"parameters": ["tierID: number"], "returns": ["PvpTierInfo|nil"]},
         "GetRandomBGInfo": {"parameters": [], "returns": ["RandomBGInfo"]},
+        "GetRandomBGLossRewards": {"parameters": [], "returns": ["number", "number", "table|nil", "table|nil", "RoleShortageReward|nil"], "only": ["Classic"]},
         "GetRandomBGRewards": {"parameters": [], "returns": ["number", "number", "table|nil", "table|nil", "RoleShortageReward|nil"]},
         "GetRandomEpicBGInfo": {"parameters": [], "returns": ["RandomBGInfo"]},
         "GetRandomEpicBGRewards": {"parameters": [], "returns": ["number", "number", "table|nil", "table|nil", "RoleShortageReward|nil"]},
@@ -8851,6 +8987,7 @@
         "GetScoreInfo": {"parameters": ["offsetIndex: number"], "returns": ["PVPScoreInfo|nil"]},
         "GetScoreInfoByPlayerGuid": {"parameters": ["guid: string"], "returns": ["PVPScoreInfo|nil"]},
         "GetSeasonBestInfo": {"parameters": [], "returns": ["number", "number|nil"]},
+        "GetSelectedBattlefieldIndex": {"parameters": [], "returns": ["number"], "only": ["Classic"]},
         "GetSkirmishInfo": {"parameters": ["pvpBracket: number"], "returns": ["BattlemasterListInfo|nil"]},
         "GetSpecialEventBrawlInfo": {"parameters": [], "returns": ["PvpBrawlInfo|nil"]},
         "GetTeamInfo": {"parameters": ["factionIndex: number"], "returns": ["PVPTeamInfo|nil"]},
@@ -8859,6 +8996,8 @@
         "GetWarModeRewardBonus": {"parameters": [], "returns": ["number"]},
         "GetWarModeRewardBonusDefault": {"parameters": [], "returns": ["number"]},
         "GetWeeklyChestInfo": {"parameters": [], "returns": ["boolean", "boolean", "boolean", "number"]},
+        "GetWorldPVPAreaInfo": {"parameters": ["index: number"], "returns": ["WorldPVPBattlegroundInfo"], "only": ["Classic"]},
+        "GetWorldPvPWaitTime": {"parameters": ["index: number"], "returns": ["number"], "only": ["Classic"]},
         "GetZonePVPInfo": {"parameters": [], "returns": ["string|nil", "boolean|nil", "string|nil"]},
         "HasArenaSkirmishWinToday": {"parameters": [], "returns": ["boolean"]},
         "HasMatchStarted": {"parameters": [], "returns": ["boolean"]},
@@ -8898,12 +9037,26 @@
         "JoinRatedBGBlitz": {"parameters": [], "returns": []},
         "JoinTrainingGround": {"parameters": ["trainingGroundID: number"], "returns": []},
         "RequestCrowdControlSpell": {"parameters": ["playerToken: string"], "returns": []},
+        "SetLocklistMap": {"parameters": ["mapID: number"], "returns": [], "only": ["Classic"]},
         "SetPVP": {"parameters": ["enablePVP: boolean|nil"], "returns": []},
+        "SetSelectedBattlefieldByIndex": {"parameters": ["index: number"], "returns": [], "only": ["Classic"]},
         "SetWarModeDesired": {"parameters": ["warModeDesired: boolean"], "returns": []},
         "StartSoloRBGWarGameByName": {"parameters": ["args: string"], "returns": ["number"]},
         "StartSpectatorSoloRBGWarGame": {"parameters": ["opaqueID1: number", "opaqueID2: number", "specifiedMap: string", "tournamentRules: boolean"], "returns": ["number"]},
         "TogglePVP": {"parameters": [], "returns": []},
         "ToggleWarMode": {"parameters": [], "returns": []}
+      }
+    },
+    "C_QuestChoice": {
+      "functions": {
+        "CloseQuestChoice": {"parameters": [], "returns": [], "only": ["Classic"]},
+        "GetQuestChoiceInfo": {"parameters": [], "returns": ["number", "string", "number"], "only": ["Classic"]},
+        "GetQuestChoiceOptionInfo": {"parameters": ["index: number"], "returns": ["number|nil", "string|nil", "string|nil", "number|nil"], "only": ["Classic"]},
+        "GetQuestChoiceRewardCurrency": {"parameters": ["optionIndex: number", "currencyIndex: number"], "returns": ["number|nil", "number|nil", "number|nil"], "only": ["Classic"]},
+        "GetQuestChoiceRewardFaction": {"parameters": ["optionIndex: number", "currencyIndex: number"], "returns": ["number|nil", "number|nil"], "only": ["Classic"]},
+        "GetQuestChoiceRewardInfo": {"parameters": ["index: number"], "returns": ["string|nil", "number|nil", "number|nil", "number|nil", "number|nil", "number|nil", "number|nil", "number|nil", "number|nil"], "only": ["Classic"]},
+        "GetQuestChoiceRewardItem": {"parameters": ["optionIndex: number", "itemIndex: number"], "returns": ["number|nil", "string|nil", "number|nil", "number|nil"], "only": ["Classic"]},
+        "SendQuestChoiceResponse": {"parameters": ["responseID: number"], "returns": [], "only": ["Classic"]}
       }
     },
     "C_QuestHub": {
@@ -8975,6 +9128,7 @@
         "GetQuestIDForLogIndex": {"parameters": ["questLogIndex: number"], "returns": ["number|nil"]},
         "GetQuestIDForQuestWatchIndex": {"parameters": ["questWatchIndex: number"], "returns": ["number|nil"]},
         "GetQuestIDForWorldQuestWatchIndex": {"parameters": ["questWatchIndex: number"], "returns": ["number|nil"]},
+        "GetQuestInfo": {"parameters": ["questID: number"], "returns": ["string|nil"], "only": ["Classic"]},
         "GetQuestLogMajorFactionReputationRewards": {"parameters": ["questID: number"], "returns": ["table|nil"]},
         "GetQuestLogPortraitGiver": {"parameters": ["questLogIndex: number|nil"], "returns": ["number|nil", "string|nil", "string|nil", "number|nil", "number|nil"]},
         "GetQuestObjectives": {"parameters": ["questID: number"], "returns": ["table|nil"]},
@@ -9102,6 +9256,7 @@
         "GetRecruitActivityRequirementsText": {"parameters": ["activityID: number", "acceptanceID"], "returns": ["table"]},
         "GetRecruitInfo": {"parameters": [], "returns": ["boolean", "number"]},
         "GetSummonFriendCooldown": {"parameters": [], "returns": ["number", "number", "boolean"]},
+        "IsEnabled": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]},
         "IsRecruitAFriendLinked": {"parameters": ["guid: string"], "returns": ["boolean"]},
         "IsRecruitingEnabled": {"parameters": [], "returns": ["boolean"]},
         "IsSystemEnabled": {"parameters": [], "returns": ["boolean"]},
@@ -9109,6 +9264,19 @@
         "RemoveRAFRecruit": {"parameters": ["wowAccountGUID: string"], "returns": ["boolean"]},
         "RequestUpdatedRecruitmentInfo": {"parameters": [], "returns": ["boolean"]},
         "SummonFriend": {"parameters": ["target: string", "name: string"], "returns": []}
+      }
+    },
+    "C_Reforge": {
+      "functions": {
+        "CloseReforge": {"parameters": [], "returns": [], "only": ["Classic"]},
+        "GetDestinationReforgeStats": {"parameters": ["srcStat: number", "srcStatValue: number"], "returns": ["table"], "only": ["Classic"]},
+        "GetNumReforgeOptions": {"parameters": [], "returns": ["number"], "only": ["Classic"]},
+        "GetReforgeItemInfo": {"parameters": [], "returns": ["number|nil", "number|nil", "string|nil", "number|nil", "string|nil", "number|nil"], "only": ["Classic"]},
+        "GetReforgeItemStats": {"parameters": [], "returns": ["table|nil"], "only": ["Classic"]},
+        "GetReforgeOptionInfo": {"parameters": ["index: number"], "returns": ["string", "number", "number", "string", "number", "number"], "only": ["Classic"]},
+        "GetSourceReforgeStats": {"parameters": [], "returns": ["table|nil"], "only": ["Classic"]},
+        "ReforgeItem": {"parameters": ["index: number"], "returns": [], "only": ["Classic"]},
+        "SetReforgeFromCursorItem": {"parameters": [], "returns": [], "only": ["Classic"]}
       }
     },
     "C_RemixArtifactUI": {
@@ -9179,7 +9347,6 @@
       "functions": {
         "CheckAllowProtectedFunctions": {"parameters": ["object: FrameScriptObject", "silent: boolean|nil"], "returns": ["boolean"]},
         "GetAddOnRestrictionState": {"parameters": ["type: Enum.AddOnRestrictionType"], "returns": ["Enum.AddOnRestrictionState"]},
-        "InCombatLockdown": {"parameters": [], "returns": ["boolean"]},
         "IsAddOnRestrictionActive": {"parameters": ["type: Enum.AddOnRestrictionType"], "returns": ["boolean"]}
       }
     },
@@ -9238,6 +9405,12 @@
         "GetTimeUntilCurrentPVPSeasonEnd": {"parameters": [], "returns": ["number"]}
       }
     },
+    "C_Seasons": {
+      "functions": {
+        "GetActiveSeason": {"parameters": [], "returns": ["number|nil"], "only": ["Classic"]},
+        "HasActiveSeason": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]}
+      }
+    },
     "C_Secrets": {
       "functions": {
         "CanCompareUnitTokens": {"parameters": ["unit1: string", "unit2: string"], "returns": ["boolean"]},
@@ -9278,6 +9451,7 @@
         "GetHousingPurchaseCost": {"parameters": [], "returns": ["number"]},
         "GetHousingPurchaseQuantity": {"parameters": [], "returns": ["number"]},
         "GetHousingVCPurchaseProductID": {"parameters": [], "returns": ["number"]},
+        "GetMailInfo": {"parameters": [], "returns": ["MailInfo"], "only": ["Classic"]},
         "GetMailReceiveInfo": {"parameters": [], "returns": ["MailReceiveInfo"]},
         "GetMailSendInfo": {"parameters": [], "returns": ["MailSendInfo"]},
         "GetTradePartner": {"parameters": [], "returns": ["string|nil"]},
@@ -9607,6 +9781,7 @@
       "functions": {
         "DoesGroupHavePurchaseableProducts": {"parameters": ["groupID: number"], "returns": ["boolean"]},
         "EventStoreUISetShown": {"parameters": ["newShown: boolean", "contextKey: string|nil"], "returns": []},
+        "HasPurchaseableProducts": {"parameters": [], "returns": ["boolean"], "only": ["Classic"]},
         "IsEnabled": {"parameters": [], "returns": ["boolean"]},
         "IsRewardsShopEnabled": {"parameters": [], "returns": ["boolean"]},
         "IsRewardsShopOverrideEnabled": {"parameters": [], "returns": ["boolean"]}
@@ -9622,6 +9797,7 @@
         "EscapeLuaPatterns": {"parameters": ["text: string"], "returns": ["string"]},
         "EscapeQuotedCodes": {"parameters": ["text: string"], "returns": ["string"]},
         "FloorToNearestString": {"parameters": ["number: number"], "returns": ["string"]},
+        "GetDefaultAbbreviationBreakpoints": {"parameters": ["locale: WowLocale|nil"], "returns": ["table"]},
         "RemoveContiguousSpaces": {"parameters": ["text: string", "maxAllowedSpaces: number"], "returns": ["string"]},
         "RoundToNearestString": {"parameters": ["number: number"], "returns": ["string"]},
         "StripHyperlinks": {"parameters": ["text: string", "maintainColor: boolean|nil", "maintainBrackets: boolean|nil", "stripNewlines: boolean|nil", "maintainAtlases: boolean|nil", "maintainTextures: boolean|nil"], "returns": ["string"]},
@@ -9665,6 +9841,12 @@
         "SetSuperTrackedVignette": {"parameters": ["vignetteGUID: string"], "returns": []}
       }
     },
+    "C_SwingTimer": {
+      "functions": {
+        "EnableRangeCheck": {"parameters": ["swingType: Enum.PlayerSwingType", "enable: boolean"], "returns": [], "only": ["Forever"]},
+        "IsTargetWithinSwingRange": {"parameters": ["swingType: Enum.PlayerSwingType"], "returns": ["boolean|nil"], "only": ["Forever"]}
+      }
+    },
     "C_System": {
       "functions": {
         "GetFrameStack": {"parameters": [], "returns": ["table"]}
@@ -9696,6 +9878,11 @@
         "SetVoiceOption": {"parameters": ["voiceType: Enum.TtsVoiceType", "voiceID: number"], "returns": []},
         "SetVoiceOptionName": {"parameters": ["voiceType: Enum.TtsVoiceType", "voiceName: string"], "returns": []},
         "ShouldOverrideMessage": {"parameters": ["language: number", "messageText: string"], "returns": ["boolean"]}
+      }
+    },
+    "C_TableUtil": {
+      "functions": {
+        "FindIndexedMismatch": {"parameters": ["t1", "t2"], "returns": ["number|nil"], "only": ["Classic"]}
       }
     },
     "C_TaskQuest": {
@@ -9928,6 +10115,7 @@
         "GetSkillLineForGear": {"parameters": ["itemInfo: number|string"], "returns": ["number|nil"]},
         "GetSourceTypeFilter": {"parameters": [], "returns": ["number"]},
         "GetTradeSkillDisplayName": {"parameters": ["skillLineID: number"], "returns": ["string"]},
+        "GetTradeSkillTexture": {"parameters": ["tradeSkillID: number"], "returns": ["number|nil"], "only": ["Classic"]},
         "HasFavoriteOrderRecipes": {"parameters": [], "returns": ["boolean"]},
         "HasNoReagentCost": {"parameters": ["recipeID: number"], "returns": ["boolean"]},
         "IsEnchantTargetValid": {"parameters": ["recipeID: number", "itemGUID: string", "craftingReagents: table|nil"], "returns": ["boolean"]},
@@ -10164,6 +10352,7 @@
         "GetUnassignedAtlasForSlot": {"parameters": ["slot: Enum.TransmogOutfitSlot"], "returns": ["string|nil"]},
         "GetUnassignedDisplayAtlasForSlot": {"parameters": ["slot: Enum.TransmogOutfitSlot"], "returns": ["string|nil"]},
         "GetViewedOutfitSlotInfo": {"parameters": ["slot: Enum.TransmogOutfitSlot", "type: Enum.TransmogType", "option: Enum.TransmogOutfitSlotOption"], "returns": ["ViewedTransmogOutfitSlotInfo|nil"]},
+        "GetWeaponOptionsForSlot": {"parameters": ["slot: Enum.TransmogOutfitSlot"], "returns": ["table|nil", "table|nil"], "only": ["Classic"]},
         "HasPendingOutfitSituations": {"parameters": [], "returns": ["boolean"]},
         "HasPendingOutfitTransmogs": {"parameters": [], "returns": ["boolean"]},
         "InTransmogEvent": {"parameters": [], "returns": ["boolean"]},
@@ -10185,6 +10374,7 @@
         "SetPendingTransmogSheatheCategory": {"parameters": ["slot: Enum.TransmogOutfitSlot", "option: Enum.TransmogOutfitSlotOption", "category: Enum.TransmogOutfitSlotOptionSheatheCategory"], "returns": []},
         "SetSecondarySlotState": {"parameters": ["slot: Enum.TransmogOutfitSlot", "option: Enum.TransmogOutfitSlotOption", "state: boolean"], "returns": []},
         "SetViewedOptionForSlot": {"parameters": ["slot: Enum.TransmogOutfitSlot", "option: Enum.TransmogOutfitSlotOption"], "returns": []},
+        "SetViewedWeaponOptionForSlot": {"parameters": ["slot: Enum.TransmogOutfitSlot", "weaponOption: Enum.TransmogOutfitSlotOption"], "returns": [], "only": ["Classic"]},
         "SlotHasSecondary": {"parameters": ["slot: Enum.TransmogOutfitSlot"], "returns": ["boolean"]},
         "TransmogEventActive": {"parameters": [], "returns": ["boolean"]},
         "UpdatePendingSituation": {"parameters": ["option: TransmogSituationOption", "value: boolean"], "returns": []}
@@ -10318,6 +10508,7 @@
         "AddAuraSound": {"parameters": ["trigger: Enum.UnitAuraSoundTrigger", "sound: UnitAuraSoundInfo"], "returns": ["number|nil"]},
         "AddBlockedAura": {"parameters": ["unit: string", "auraInstanceID: number"], "returns": []},
         "AddPrivateAuraAnchor": {"parameters": ["args: AddPrivateAuraAnchorArgs"], "returns": ["number|nil"]},
+        "AddPrivateAuraAppliedSound": {"parameters": ["sound: UnitPrivateAuraAppliedSoundInfo"], "returns": ["number|nil"], "only": ["Classic"]},
         "AuraIsBigDefensive": {"parameters": ["spellID: number|string"], "returns": ["boolean"]},
         "AuraIsPrivate": {"parameters": ["spellID: number|string"], "returns": ["boolean"]},
         "CancelAuraByInstanceID": {"parameters": ["unit: string", "auraInstanceID: number"], "returns": []},
@@ -10347,11 +10538,13 @@
         "IsAuraFilteredOutByInstanceID": {"parameters": ["unit: string", "auraInstanceID: number", "filter: string"], "returns": ["boolean"]},
         "RemoveAuraSound": {"parameters": ["auraSoundID: number"], "returns": []},
         "RemovePrivateAuraAnchor": {"parameters": ["anchorID: number"], "returns": []},
+        "RemovePrivateAuraAppliedSound": {"parameters": ["privateAuraSoundID: number"], "returns": [], "only": ["Classic"]},
         "ResetAuraDataProvider": {"parameters": [], "returns": []},
         "SetGroupBuffVisualAlerts": {"parameters": ["visualAlerts: table"], "returns": []},
         "SetHiddenGroupBuffs": {"parameters": ["spellIDs: table"], "returns": []},
         "SetPrivateWarningTextAnchor": {"parameters": ["parent: Frame", "anchor: AnchorBinding|nil"], "returns": []},
         "SwitchAuraDataProvider": {"parameters": [], "returns": []},
+        "TriggerPrivateAuraShowDispelType": {"parameters": ["show: boolean"], "returns": [], "only": ["Classic"]},
         "WantsAlteredForm": {"parameters": ["unit: string"], "returns": ["boolean"]}
       }
     },

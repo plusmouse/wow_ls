@@ -16,6 +16,8 @@
 //! WoW's UI XML files: what they load, and the frames they define.
 
 use std::collections::HashMap;
+
+use crate::types::TypeSet;
 use std::path::PathBuf;
 
 use serde_json::{json, Map, Value};
@@ -123,7 +125,13 @@ impl Schema {
         let xs = |node: &roxmltree::Node, name: &str| node.is_element() && node.tag_name().name() == name;
         for node in document.root_element().children() {
             if xs(&node, "element") {
-                if let (Some(name), Some(ty)) = (node.attribute("name"), node.attribute("type")) {
+                // Its type named, or written inside it as an extension of
+                // one, as `Font`'s is of `FontType`
+                let ty = node.attribute("type").or_else(|| {
+                    let inline = node.children().find(|n| xs(n, "complexType"))?;
+                    inline.descendants().find(|n| xs(n, "extension"))?.attribute("base")
+                });
+                if let (Some(name), Some(ty)) = (node.attribute("name"), ty) {
                     let group = local_name(node.attribute("substitutionGroup").unwrap_or("")).to_string();
                     schema.elements.insert(name.to_string(), (local_name(ty).to_string(), group));
                 }
@@ -135,6 +143,10 @@ impl Schema {
                 ) else { continue };
                 schema.extends.insert(name.to_string(), local_name(base).to_string());
             }
+        }
+        // A font family is a font object in the game, one font for each alphabet
+        if schema.elements.contains_key("FontFamily") {
+            schema.extends.entry("FontFamilyType".to_string()).or_insert_with(|| "FontType".to_string());
         }
         schema
     }
@@ -480,29 +492,33 @@ fn entity(name: &str) -> Option<char> {
     }
 }
 
-/// The names the game gives the arguments of a kind of script handler
-/// written inline, after `self`. Others get only `self` (and `...`)
-pub fn handler_parameters(handler: &str) -> &'static [&'static str] {
+/// The names the game gives the arguments of a kind of script handler, after
+/// `self`, with their types. Others get only `self` (and `...`, which for
+/// `OnEvent` is the event's payload)
+pub fn handler_parameters(handler: &str) -> &'static [(&'static str, TypeSet)] {
+    const STRING: TypeSet = TypeSet::STRING;
+    const NUMBER: TypeSet = TypeSet::NUMBER;
+    const BOOLEAN: TypeSet = TypeSet::BOOLEAN;
     match handler {
-        "OnEvent" => &["event"],
-        "OnUpdate" => &["elapsed"],
-        "OnClick" | "PreClick" | "PostClick" => &["button", "down"],
-        "OnDoubleClick" | "OnMouseDown" | "OnMouseUp" | "OnDragStart" => &["button"],
-        "OnMouseWheel" => &["delta"],
-        "OnEnter" | "OnLeave" => &["motion"],
-        "OnValueChanged" => &["value", "userInput"],
-        "OnTextChanged" => &["userInput"],
-        "OnChar" => &["text"],
-        "OnKeyDown" | "OnKeyUp" => &["key"],
-        "OnSizeChanged" => &["width", "height"],
-        "OnAttributeChanged" => &["name", "value"],
-        "OnHyperlinkClick" => &["link", "text", "button"],
-        "OnHyperlinkEnter" | "OnHyperlinkLeave" => &["link", "text"],
-        "OnVerticalScroll" | "OnHorizontalScroll" => &["offset"],
-        "OnScrollRangeChanged" => &["xrange", "yrange"],
-        "OnFinished" | "OnStop" => &["requested"],
-        "OnLoop" => &["loopState"],
-        "OnCursorChanged" => &["x", "y", "w", "h"],
+        "OnEvent" => &[("event", STRING)],
+        "OnUpdate" => &[("elapsed", NUMBER)],
+        "OnClick" | "PreClick" | "PostClick" => &[("button", STRING), ("down", BOOLEAN)],
+        "OnDoubleClick" | "OnMouseDown" | "OnMouseUp" | "OnDragStart" => &[("button", STRING)],
+        "OnMouseWheel" => &[("delta", NUMBER)],
+        "OnEnter" | "OnLeave" => &[("motion", BOOLEAN)],
+        "OnValueChanged" => &[("value", NUMBER), ("userInput", BOOLEAN)],
+        "OnTextChanged" => &[("userInput", BOOLEAN)],
+        "OnChar" => &[("text", STRING)],
+        "OnKeyDown" | "OnKeyUp" => &[("key", STRING)],
+        "OnSizeChanged" => &[("width", NUMBER), ("height", NUMBER)],
+        "OnAttributeChanged" => &[("name", STRING), ("value", TypeSet::UNKNOWN)],
+        "OnHyperlinkClick" => &[("link", STRING), ("text", STRING), ("button", STRING)],
+        "OnHyperlinkEnter" | "OnHyperlinkLeave" => &[("link", STRING), ("text", STRING)],
+        "OnVerticalScroll" | "OnHorizontalScroll" => &[("offset", NUMBER)],
+        "OnScrollRangeChanged" => &[("xrange", NUMBER), ("yrange", NUMBER)],
+        "OnFinished" | "OnStop" => &[("requested", BOOLEAN)],
+        "OnLoop" => &[("loopState", STRING)],
+        "OnCursorChanged" => &[("x", NUMBER), ("y", NUMBER), ("w", NUMBER), ("h", NUMBER)],
         _ => &[],
     }
 }
