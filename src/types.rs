@@ -273,6 +273,90 @@ const MOST_FAMILIES: u32 = 1 << 20;
 /// dependencies (`LAYER_FILES`), and before those of namespaces
 const FAMILIES: FileId = FileId(u32::MAX - (1 << 20));
 
+/// A call whose callee's summaries are being applied (see `ForwardedCall`,
+/// `FieldWrite`): what it passes, and where it came from in the function
+/// making it, for passing the summaries on as that function's own
+struct Passing {
+    /// By the callee's parameter positions
+    passed: Values,
+    /// For each position, the calling function's parameter it passes on, if
+    /// it does
+    origins: Vec<Option<usize>>,
+    /// Whether those past the callee's named parameters are the calling
+    /// function's `...`
+    rest_origin: bool,
+    /// How many parameters the callee names
+    named: usize,
+    /// The types of the callee's parameters, as its body sees them
+    parameters: Vec<Type>,
+    self_value: Option<Type>,
+    /// What `self` is in the calling function's terms, if a summary can be
+    /// on it there (see `Walker::write_target`)
+    self_origin: Option<Result<On, TableId>>,
+    /// What the call returns
+    returns: Values,
+}
+
+impl Passing {
+    /// The calling function's parameter passed on at `position`, if it is one
+    fn origin(&self, position: usize) -> Option<usize> {
+        self.origins.get(position).copied().flatten()
+    }
+
+    /// What's passed at `position`, kept to the parameter's type, as the
+    /// callee's body sees it, which what it's passed to may narrow: the
+    /// parameter's type where nothing's known of what's passed
+    fn argument(&self, position: usize) -> Type {
+        let passed = self.passed.get(position);
+        let Some(&parameter) = self.parameters.get(position) else { return passed };
+        match says_nothing(passed) {
+            true => parameter,
+            false => narrowed_to(passed, parameter),
+        }
+    }
+
+    /// `part` of a summary of the callee, in the calling function's terms:
+    /// what it passes on of its own, or else the value passed, as `argument`
+    /// gives it
+    fn in_caller_terms(&self, part: Forwarded, argument: &dyn Fn(usize) -> Type) -> Vec<Forwarded> {
+        match part {
+            Forwarded::Parameter(i) => vec![self.origin(i).map_or_else(|| Forwarded::Value(argument(i)), Forwarded::Parameter)],
+            Forwarded::Truthy(i) => vec![self.origin(i).map_or_else(|| Forwarded::Value(argument(i).truthy()), Forwarded::Truthy)],
+            Forwarded::Rest if self.rest_origin => vec![Forwarded::Rest],
+            Forwarded::Rest => self.passed.values.iter().skip(self.named).map(|&ty| Forwarded::Value(ty)).collect(),
+            value => vec![value],
+        }
+    }
+}
+
+/// Whether nothing's known of a value: it may be any value that's true (and
+/// perhaps false or nil), as `unknown`, `unknown (not nil)` and `unknown
+/// (truthy)` are
+fn says_nothing(ty: Type) -> bool {
+    ty.set.contains(TypeSet::UNKNOWN.without(TypeSet::NIL | TypeSet::FALSE))
+}
+
+/// Another handle on the same code
+fn copy_expression(expression: &Expression) -> Option<Expression> {
+    Expression::cast(expression.syntax().clone())
+}
+
+/// What a call returns for a field (`ReturnedField`), as the function's body
+/// returns `body`: that field's type for the call, unless nothing is known
+/// of it, kept to what the body could return
+fn narrowed_to(field: Type, body: Type) -> Type {
+    if field.set == TypeSet::UNKNOWN || field.set == TypeSet::NEVER {
+        return body
+    }
+    if body.set == TypeSet::UNKNOWN {
+        return field
+    }
+    match field.set.intersection(body.set) {
+        TypeSet::NEVER => body,
+        set => Type { set, ..field },
+    }
+}
+
 /// The identity of a new table the definitions' function `function` returns
 /// at a call at `at`, in return position `slot`, if it can have one
 fn family_member(at: Location, function: BuiltinId, slot: usize) -> Option<Location> {
@@ -720,6 +804,42 @@ pub struct FunctionInfo {
     /// The methods it calls whose function depends on its arguments, for each
     /// call to it to call with its own
     pub forwarded_calls: Vec<ForwardedCall>,
+    /// The fields it gives what it's passed, for each call to it to give with
+    /// its own
+    pub field_writes: Vec<FieldWrite>,
+    /// For each return, the field of `self` or a parameter it returns, if it
+    /// always returns one: what each call returns is that field of its own
+    pub returned_fields: Vec<Option<ReturnedField>>,
+}
+
+/// What a `FieldWrite` or `ReturnedField` is on
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum On {
+    /// A method's `self`
+    SelfValue,
+    /// What it's passed for a parameter, by position
+    Parameter(usize),
+    /// The table it returns new at each call (see `FreshObject`), by return position
+    Returned(usize),
+}
+
+/// A field a function gives what it's passed, as `ColorMixin:SetRGBA(r, g,
+/// b, a)` gives `self.r` its `r`, and `CreateColor(r, g, b, a)` the `r` of
+/// the table it returns, through the methods it calls
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldWrite {
+    pub on: On,
+    pub field: String,
+    /// What it's given: each of these, together
+    pub value: Vec<Forwarded>,
+}
+
+/// A field a function returns, of `self` or a parameter, as `ColorMixin:GetRGB()`
+/// returns `self.r`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReturnedField {
+    pub on: On,
+    pub field: String,
 }
 
 /// A method a function calls on what a parameter is, or on a table it makes
@@ -728,8 +848,9 @@ pub struct FunctionInfo {
 /// arguments, so each call to the function calls it, with its own
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ForwardedCall {
-    /// The parameters whose arguments may hold the method, the last first
-    pub on: Vec<usize>,
+    /// What may hold the method: `self`, or the arguments of parameters, the
+    /// last first
+    pub on: Vec<On>,
     pub method: String,
     pub arguments: Vec<Forwarded>,
 }
@@ -741,6 +862,8 @@ pub enum Forwarded {
     Parameter(usize),
     /// Its `...`: what it was passed beyond its parameters. Only last
     Rest,
+    /// What it was passed for a parameter, if it's true: `x` in `x or 1`
+    Truthy(usize),
     Value(Type),
 }
 
@@ -769,7 +892,7 @@ impl PartialEq for Signature<'_> {
         a.method == b.method && a.varargs == b.varargs && a.returns == b.returns && a.fresh_returns == b.fresh_returns
             && a.parameters.len() == b.parameters.len()
             && a.parameters.iter().zip(&b.parameters).all(|(a, b)| a.name == b.name && a.mandated == b.mandated)
-            && a.forwarded_calls == b.forwarded_calls
+            && a.forwarded_calls == b.forwarded_calls && a.field_writes == b.field_writes && a.returned_fields == b.returned_fields
     }
 }
 
@@ -1377,12 +1500,21 @@ fn renumber_function(info: &FunctionInfo, file: &impl Fn(FileId) -> FileId) -> F
         })).collect(),
         calls: info.calls.iter().map(|&id| renumber(id, file)).collect(),
         forwarded_calls: info.forwarded_calls.iter().map(|call| ForwardedCall {
-            arguments: call.arguments.iter().map(|&argument| match argument {
-                Forwarded::Value(ty) => Forwarded::Value(renumber_type(ty, file)),
-                other => other,
-            }).collect(),
+            arguments: call.arguments.iter().map(|&argument| renumber_forwarded(argument, file)).collect(),
             ..call.clone()
         }).collect(),
+        field_writes: info.field_writes.iter().map(|write| FieldWrite {
+            value: write.value.iter().map(|&part| renumber_forwarded(part, file)).collect(),
+            ..write.clone()
+        }).collect(),
+        returned_fields: info.returned_fields.clone(),
+    }
+}
+
+fn renumber_forwarded(forwarded: Forwarded, file: &impl Fn(FileId) -> FileId) -> Forwarded {
+    match forwarded {
+        Forwarded::Value(ty) => Forwarded::Value(renumber_type(ty, file)),
+        other => other,
     }
 }
 
@@ -2337,6 +2469,15 @@ struct Walker<'a> {
     /// Per function being walked: the methods it calls that `ForwardedCall`s
     /// stand for
     forwarded: Vec<Vec<ForwardedCall>>,
+    /// Per function being walked: the fields it gives what it's passed, on
+    /// `self`, a parameter, or a table it makes (which `FieldWrite`s name by
+    /// the return that gives it, once that's known)
+    field_writes: Vec<Vec<(Result<On, TableId>, String, Vec<Forwarded>)>>,
+    /// Per function being walked: for each return, the field of `self` or a
+    /// parameter it returns, so far (None once returns disagree)
+    returned_fields: Vec<Option<Vec<Option<ReturnedField>>>>,
+    /// Per function being walked: its `self`, if it's a method
+    self_bindings: Vec<Option<BindingId>>,
     /// Which parameter of its function each parameter binding is
     parameter_index: HashMap<BindingId, usize>,
     /// For tables and objects made in a function: which of its parameters
@@ -3174,9 +3315,12 @@ impl<'a> Walker<'a> {
                             self.write_binding(&token, id, types);
                         }
                         (None, None) => match field_access(target.syntax()) {
-                            Some((base, field)) => {
-                                let base = self.expression(&base);
+                            Some((base_expression, field)) => {
+                                let base = self.expression(&base_expression);
                                 self.forget_fields();
+                                // Only a value of its own, not one of several a call returns
+                                let value = (expressions.len() == targets.len()).then(|| expressions.get(i)).flatten();
+                                self.note_field_write(&base_expression, base, field.text(), value);
                                 self.field_write(base, field.text(), types);
                                 self.field_reference(target.syntax(), &field, base, types, true);
                             }
@@ -3389,6 +3533,19 @@ impl<'a> Walker<'a> {
                 }
             }
             Statement::Return(s) => {
+                let returned_fields: Vec<Option<ReturnedField>> = s.expressions().iter().map(|e| self.returned_field(e)).collect();
+                if let Some(fields) = self.returned_fields.last_mut() {
+                    *fields = Some(match fields.take() {
+                        None => returned_fields,
+                        // Every return has to agree
+                        Some(earlier) => (0..earlier.len().max(returned_fields.len()))
+                            .map(|i| match (earlier.get(i), returned_fields.get(i)) {
+                                (Some(Some(a)), Some(Some(b))) if a == b => Some(a.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                    });
+                }
                 let values = self.expression_values(&s.expressions());
                 if !self.fresh.is_empty() {
                     let made: Vec<Option<FreshObject>> = values.values.iter()
@@ -3495,6 +3652,15 @@ impl<'a> Walker<'a> {
         }
         let base = self.definitions.member_source(base);
         if let Some(declared) = self.definitions.field(base, name) {
+            // A value the definitions don't know the type of: what this table
+            // was given, if anything
+            if declared.set == TypeSet::UNKNOWN {
+                if let (Some(prior), Some(at)) = (self.prior, base.named.identity()) {
+                    if let Some(own) = self.own_field(prior, at, name, 0) {
+                        return own
+                    }
+                }
+            }
             return declared
         }
         // Writes can come later in the file, so only a previous walk knows them all
@@ -3884,6 +4050,9 @@ impl<'a> Walker<'a> {
         self.fresh.push(None);
         self.kept_outside.push(HashSet::default());
         self.forwarded.push(Vec::new());
+        self.field_writes.push(Vec::new());
+        self.returned_fields.push(None);
+        self.self_bindings.push(None);
         if let Some(self_type) = self_type {
             let depth = self.scopes.len() - 1;
             // Implicit, so it's declared by the method's name: `b` in `function a:b()`
@@ -3896,6 +4065,9 @@ impl<'a> Walker<'a> {
             self.bindings[id].assigned = true;
             self.bindings[id].visible = Some(def.syntax().text_range());
             self.scopes[depth].names.insert("self".to_string(), id);
+            if let Some(binding) = self.self_bindings.last_mut() {
+                *binding = Some(id);
+            }
         }
         let params = def.params();
         let parameters = params.as_ref().map(|p| p.parameter_tokens()).unwrap_or_default();
@@ -3919,6 +4091,23 @@ impl<'a> Walker<'a> {
         let fresh_returns = self.fresh.pop().flatten().unwrap_or_default();
         self.kept_outside.pop();
         let forwarded_calls = self.forwarded.pop().unwrap_or_default();
+        self.self_bindings.pop();
+        let returned_fields = self.returned_fields.pop().flatten().unwrap_or_default();
+        // A table it makes is given by the return that gives it new
+        let mut field_writes: Vec<FieldWrite> = Vec::new();
+        for (on, field, value) in self.field_writes.pop().unwrap_or_default() {
+            let on = match on {
+                Ok(on) => on,
+                Err(made) => match fresh_returns.iter().position(|fresh| fresh.as_ref().is_some_and(|f| f.made == Some(made))) {
+                    Some(slot) => On::Returned(slot),
+                    None => continue,
+                },
+            };
+            let write = FieldWrite { on, field, value };
+            if !field_writes.contains(&write) {
+                field_writes.push(write);
+            }
+        }
         let returns = match returned {
             Some(returns) if block.as_ref().is_some_and(always_returns) => returns,
             // Reaching `end` returns nothing
@@ -3939,7 +4128,7 @@ impl<'a> Walker<'a> {
         }).collect();
         let varargs = params.is_some_and(|p| p.ellipsis())
             .then(|| Parameter { name: "...".to_string(), types: Type::UNKNOWN, mandated: None });
-        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls }));
+        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls, field_writes, returned_fields }));
     }
 
     fn prior_parameter_types(&self, id: FunctionId, index: usize) -> Type {
@@ -4244,11 +4433,7 @@ impl<'a> Walker<'a> {
         let callee = match (callee, call.method_name()) {
             (Some(base), Some(method)) => {
                 let types = self.field_read(base, method.text());
-                // Only for a function of the files, or one it can't tell: not
-                // a WoW object's method, whose definition is known
-                if matches!(types.function, FunctionRef::One(_) | FunctionRef::Unknown) {
-                    forward_on = self.forwardable_receiver(call.callee().as_ref(), base);
-                }
+                forward_on = self.forwardable_receiver(call.callee().as_ref(), base, types);
                 self.field_reference(call.syntax(), &method, base, types, false);
                 self.last_field_is_callee();
                 if forward_on.is_some() {
@@ -4311,7 +4496,13 @@ impl<'a> Walker<'a> {
         let documented = function.returns.clone();
         let fresh_returns = function.fresh_returns.clone();
         let forwarded_calls = function.forwarded_calls.clone();
-        let named_parameters = function.parameters.len();
+        let field_writes = function.field_writes.clone();
+        let returned_fields = function.returned_fields.clone();
+        // The callee's parameters as its body sees them, for its summaries
+        let settled_parameters: Vec<Type> = match function.field_writes.is_empty() && function.forwarded_calls.is_empty() {
+            true => Vec::new(),
+            false => function.parameters.iter().map(|p| p.types).collect(),
+        };
         let callee_method = function.method;
         // How far each argument is from the parameter it fills (see `pending_call`)
         let offset: isize = match (callee_method, is_method) {
@@ -4366,8 +4557,34 @@ impl<'a> Walker<'a> {
         // What the function calls on what this call passes it. A definition's
         // function has its arguments by position
         let passed = if matches!(callee.function, FunctionRef::One(_)) { (&parameter_types, offset) } else { (&argument_types, 0) };
-        for forwarded in &forwarded_calls {
-            self.forward_call(forwarded, passed.0, named_parameters, &arguments, passed.1);
+        // `self`, and the code giving it
+        let self_value = match (is_method, callee_method) {
+            (true, _) => receiver.map(|r| (r, call.callee())),
+            (false, true) => Some((argument_types.get(0), arguments.first().and_then(copy_expression))),
+            (false, false) => None,
+        };
+        if !field_writes.is_empty() || !forwarded_calls.is_empty() {
+            let passing = self.passing(passed.0, &settled_parameters, self_value, &returns, &arguments, passed.1);
+            let method = call.method_name().map(|name| name.text().to_string());
+            self.apply_summaries(&field_writes, &forwarded_calls, method.as_deref().map(|name| (name, callee.function)), &passing, &mut vec![callee.function]);
+        }
+        let self_value = match (is_method, callee_method) {
+            (true, _) => receiver,
+            (false, true) => Some(argument_types.get(0)),
+            (false, false) => None,
+        };
+        for (slot, field) in returned_fields.iter().enumerate() {
+            let Some(field) = field else { continue };
+            let on = match field.on {
+                On::SelfValue => self_value,
+                On::Parameter(p) => Some(passed.0.get(p)),
+                On::Returned(_) => None,
+            };
+            let (Some(on), Some(&value)) = (on, returns.values.get(slot)) else { continue };
+            if on.named.identity().is_none() && !matches!(on.named, NamedRef::Several(_)) {
+                continue
+            }
+            returns.values[slot] = narrowed_to(self.field_read(on, &field.field), value);
         }
         if let (Some(receiver), Some(method)) = (receiver, call.method_name()) {
             returns = self.object_method(call, receiver, method.text(), arguments.first(), template.and_then(|i| arguments.get(i)), &argument_types, returns);
@@ -5019,20 +5236,214 @@ impl<'a> Walker<'a> {
     /// A function's new object, for one call: a new identity at the call, with
     /// the object the function made mixed in (for the fields it set there)
     /// along with that call's arguments for the parameters it mixed in
-    /// For `receiver:m()` in a function, with `receiver` of type `base`: the
-    /// parameters whose arguments may hold `m`, if it's one of its parameters,
-    /// or a table it made with parameters mixed in
-    fn forwardable_receiver(&self, receiver: Option<&Expression>, base: Type) -> Option<Vec<usize>> {
+    /// What `expression`, in a function, is that a `FieldWrite` can be on: its
+    /// `self`, a parameter, or a table it made (of type `ty`)
+    fn write_target(&self, expression: &Expression, ty: Type) -> Option<Result<On, TableId>> {
         if self.function == MAIN_CHUNK {
             return None
         }
         let caller = self.function_ranges.last().map(|&(_, function)| function)?;
-        if let Some((_, index)) = receiver.and_then(|r| self.parameter_read(r)).filter(|&(function, _)| function == caller) {
-            return Some(vec![index])
+        if let Expression::Identifier(identifier) = expression {
+            if let Some(name) = identifier.simple_name() {
+                let self_binding = self.self_bindings.last().copied().flatten();
+                if self_binding.is_some() && self.local_binding(name.text()) == self_binding {
+                    return Some(Ok(On::SelfValue))
+                }
+            }
         }
-        let at = base.named.identity().filter(|&at| self.made_here(at))?;
-        let mixed = self.parameter_mixins.get(&at).filter(|mixed| !mixed.is_empty())?;
-        Some(mixed.clone())
+        if let Some((_, index)) = self.parameter_read(expression).filter(|&(function, _)| function == caller) {
+            return Some(Ok(On::Parameter(index)))
+        }
+        let at = ty.named.identity().filter(|&at| self.made_here(at) && !self.kept_outside.last().is_some_and(|kept| kept.contains(&at)))?;
+        Some(Err(at))
+    }
+
+    /// What `value` is in terms of the function's parameters, if it's one,
+    /// or `p or v` with `p` one and `v` a literal or one
+    fn value_parts(&self, value: &Expression) -> Option<Vec<Forwarded>> {
+        let caller = self.function_ranges.last().map(|&(_, function)| function)?;
+        let parameter = |e: &Expression| self.parameter_read(e).filter(|&(function, _)| function == caller).map(|(_, index)| index);
+        let literal = |e: &Expression| -> Option<Type> {
+            let Expression::Literal(literal) = e else { return None };
+            let set = if literal.get_number().is_some() { TypeSet::NUMBER }
+                else if literal.get_string().is_some() { TypeSet::STRING }
+                else { match literal.get_bool().as_deref() { Some("true") => TypeSet::TRUE, Some("false") => TypeSet::FALSE, _ => return None } };
+            Some(Type::of(set))
+        };
+        if let Some(index) = parameter(value) {
+            return Some(vec![Forwarded::Parameter(index)])
+        }
+        let Expression::BinaryExpression(binary) = value else { return None };
+        let parts = binary.flatten();
+        let [crate::ast::BinaryPart::Operand(left), crate::ast::BinaryPart::Operator(Operator::Or), crate::ast::BinaryPart::Operand(right)] = parts.as_slice() else { return None };
+        let left = Forwarded::Truthy(parameter(left)?);
+        let right = match (parameter(right), literal(right)) {
+            (Some(index), _) => Forwarded::Parameter(index),
+            (None, Some(ty)) => Forwarded::Value(ty),
+            (None, None) => return None,
+        };
+        Some(vec![left, right])
+    }
+
+    /// Notes `base.field = value` in a function, as a `FieldWrite`, when it
+    /// gives what it's passed to `self`, a parameter or a table it makes
+    fn note_field_write(&mut self, base: &Expression, ty: Type, field: &str, value: Option<&Expression>) {
+        let Some(value) = value.and_then(|value| self.value_parts(value)) else { return };
+        let Some(on) = self.write_target(base, ty) else { return };
+        self.add_field_write(on, field.to_string(), value);
+    }
+
+    fn add_field_write(&mut self, on: Result<On, TableId>, field: String, value: Vec<Forwarded>) {
+        if let Some(writes) = self.field_writes.last_mut() {
+            let write = (on, field, value);
+            if !writes.contains(&write) {
+                writes.push(write);
+            }
+        }
+    }
+
+    /// The field of `self` or a parameter `expression` reads, if it's one
+    fn returned_field(&self, expression: &Expression) -> Option<ReturnedField> {
+        let Expression::Identifier(identifier) = expression else { return None };
+        let (base, field) = field_access(identifier.syntax())?;
+        match self.write_target(&base, Type::default())? {
+            Ok(on @ (On::SelfValue | On::Parameter(_))) => Some(ReturnedField { on, field: field.text().to_string() }),
+            _ => None,
+        }
+    }
+
+    /// The origins of a call's arguments and `self`, in the terms of the
+    /// function making it (see `Passing`): from its argument `expressions`,
+    /// each `offset` from the parameter it fills, to a callee with parameters
+    /// of types `parameters`
+    fn passing(&self, passed: &Values, parameters: &[Type], self_value: Option<(Type, Option<Expression>)>, returns: &Values, expressions: &[Expression], offset: isize) -> Passing {
+        let named = parameters.len();
+        let caller = self.function_ranges.last().map(|&(_, function)| function).filter(|_| self.function != MAIN_CHUNK);
+        let expression = |position: usize| usize::try_from(position as isize - offset).ok().and_then(|i| expressions.get(i));
+        let positions = passed.values.len().max(named);
+        let origins = (0..positions)
+            .map(|i| expression(i).and_then(|e| self.parameter_read(e)).filter(|&(function, _)| Some(function) == caller).map(|(_, index)| index))
+            .collect();
+        // Its `...` passed as the last argument, filling those past the named
+        let rest_origin = caller.is_some() && usize::try_from(named as isize - offset).ok()
+            .is_some_and(|i| i + 1 == expressions.len() && matches!(expressions.get(i), Some(Expression::VarArgs(_))));
+        let self_origin = caller.and(self_value.as_ref())
+            .and_then(|(ty, e)| e.as_ref().and_then(|e| self.write_target(e, *ty)));
+        Passing { passed: passed.clone(), origins, rest_origin, named, parameters: parameters.to_vec(), self_value: self_value.map(|(ty, _)| ty), self_origin, returns: returns.clone() }
+    }
+
+    /// Applies what a callee's summaries say a call to it does, for the
+    /// call `call` describes: the fields it gives (`field_writes`) and the
+    /// methods it calls on what it's passed (`forwarded_calls`). `method` the
+    /// method called, if it's
+    /// a method call; `within` the functions whose summaries these come from,
+    /// stopping a method calling itself
+    fn apply_summaries(&mut self, field_writes: &[FieldWrite], forwarded_calls: &[ForwardedCall], method: Option<(&str, FunctionRef)>, call: &Passing, within: &mut Vec<FunctionRef>) {
+        for write in field_writes {
+            self.give_field(write, method, call);
+        }
+        for forwarded in forwarded_calls {
+            self.forward_call(forwarded, call, within);
+        }
+    }
+
+    /// What `on` is in the calling function's terms, for passing a summary on
+    fn origin_of(&self, on: On, call: &Passing) -> Option<Result<On, TableId>> {
+        let made = |ty: Type| ty.named.identity().filter(|&at| self.made_here(at) && !self.kept_outside.last().is_some_and(|kept| kept.contains(&at))).map(Err);
+        match on {
+            On::SelfValue => call.self_origin,
+            On::Parameter(k) => call.origin(k).map(|j| Ok(On::Parameter(j))).or_else(|| made(call.passed.get(k))),
+            On::Returned(slot) => made(call.returns.get(slot)),
+        }
+    }
+
+    /// The field `write` stands for. Given to the table it's on (of several
+    /// `self` may be, those whose method is `method`), and passed on as the
+    /// calling function's own when that's its `self`, a parameter or a table
+    /// it makes. Not a write to the calling function's own `self` by a method
+    /// it calls on it, as that call is passed on itself (a `ForwardedCall` on
+    /// `self`), to call whichever method `self` has at each call
+    fn give_field(&mut self, write: &FieldWrite, method: Option<(&str, FunctionRef)>, call: &Passing) {
+        let on = match write.on {
+            On::SelfValue => match call.self_value {
+                Some(ty) => ty,
+                None => return,
+            },
+            On::Parameter(k) => call.passed.get(k),
+            On::Returned(slot) => call.returns.get(slot),
+        };
+        let origin = self.origin_of(write.on, call);
+        let passed_on_by_call = origin == Some(Ok(On::SelfValue)) && write.on == On::SelfValue;
+        let target = origin.filter(|_| !passed_on_by_call);
+        let argument = |i: usize| call.argument(i);
+        // Given here, but for what the caller passes on of what it was passed
+        // when the write is passed on too: its type here isn't what each call
+        // to the caller passes, which the caller's own write gives, as a
+        // parameter passed straight on is settled by its calls (see
+        // `pending_call`)
+        let passed_on = |part: Forwarded| match part {
+            Forwarded::Parameter(i) | Forwarded::Truthy(i) => call.origin(i).is_some(),
+            Forwarded::Rest => call.rest_origin,
+            Forwarded::Value(_) => false,
+        };
+        let value = write.value.iter()
+            .filter(|&&part| origin.is_none() || !passed_on(part))
+            .map(|&part| match part {
+                Forwarded::Parameter(i) => argument(i),
+                Forwarded::Truthy(i) => argument(i).truthy(),
+                Forwarded::Value(ty) => ty,
+                Forwarded::Rest => call.passed.rest,
+            })
+            // Nothing known of it, which says nothing of what the table holds:
+            // the function's own write gives it what its body knows
+            .filter(|&ty| !says_nothing(ty))
+            .reduce(Type::union);
+        // Only a table that's known, not a field name of every table
+        if let Some(value) = value.filter(|_| on.named.identity().is_some() || matches!(on.named, NamedRef::Several(_))) {
+            let objects: Vec<TableId> = match (write.on, method, on.named) {
+                (On::SelfValue, Some((name, function)), NamedRef::Several(_)) => on.named.alternatives().into_iter()
+                    .filter(|&object| self.field_read(Type { named: object, ..on }, name).function == function)
+                    .filter_map(|object| object.identity())
+                    .collect(),
+                _ => on.named.identity().into_iter().chain(self.several_objects(on)).collect(),
+            };
+            for at in objects {
+                self.apply(Write::Field(at, write.field.clone(), value));
+            }
+        }
+        let Some(target) = target else { return };
+        let parts: Vec<Forwarded> = write.value.iter()
+            .flat_map(|&part| call.in_caller_terms(part, &argument))
+            .collect();
+        self.add_field_write(target, write.field.clone(), parts);
+    }
+
+    /// For `receiver:m()` in a function, with `receiver` of type `base` and
+    /// `m` of type `method`: what the method may be on, for a `ForwardedCall`,
+    /// if it's the function's `self`, one of its parameters or a table it
+    /// made with parameters mixed in. The method only one of the files' own,
+    /// or one it can't tell, or one of the definitions' with summaries of its
+    /// own: not a WoW object's method, which does nothing more on each call
+    fn forwardable_receiver(&self, receiver: Option<&Expression>, base: Type, method: Type) -> Option<Vec<On>> {
+        if self.function == MAIN_CHUNK {
+            return None
+        }
+        let summarised = match method.function {
+            FunctionRef::One(_) | FunctionRef::Unknown => true,
+            FunctionRef::Builtin(_) => self.known_function(method.function).is_some_and(|info| !info.field_writes.is_empty() || !info.forwarded_calls.is_empty()),
+            FunctionRef::None => false,
+        };
+        if !summarised {
+            return None
+        }
+        match self.write_target(receiver?, base)? {
+            Ok(on @ (On::SelfValue | On::Parameter(_))) => Some(vec![on]),
+            Ok(On::Returned(_)) => None,
+            Err(at) => {
+                let mixed = self.parameter_mixins.get(&at).filter(|mixed| !mixed.is_empty())?;
+                Some(mixed.iter().map(|&p| On::Parameter(p)).collect())
+            }
+        }
     }
 
     /// Notes that the function being walked makes `call` for each call to it,
@@ -5065,60 +5476,108 @@ impl<'a> Walker<'a> {
         forwarded
     }
 
-    /// The call `forwarded` stands for, made by a call passing `passed` (by
-    /// the callee's parameter positions, of which `named` are named), with
-    /// argument `expressions` each `offset` from the parameter they fill. It
-    /// calls the method of the first argument holding it, as known, and is
-    /// passed on in turn when that argument is a parameter of the function
-    /// calling, which then makes the call for each of its own calls
-    fn forward_call(&mut self, forwarded: &ForwardedCall, passed: &Values, named: usize, expressions: &[Expression], offset: isize) {
-        let argument = |position: usize| -> Vec<Type> {
-            match forwarded.arguments.get(position) {
-                Some(&Forwarded::Parameter(i)) => vec![passed.get(i)],
-                Some(&Forwarded::Value(ty)) => vec![ty],
-                Some(Forwarded::Rest) => passed.values.iter().skip(named).copied().collect(),
-                None => Vec::new(),
-            }
-        };
-        let mut values: Vec<Type> = (0..forwarded.arguments.len()).flat_map(argument).collect();
-        let rest = if forwarded.arguments.last() == Some(&Forwarded::Rest) { passed.rest } else { Type::NIL };
-        let expression = |position: usize| usize::try_from(position as isize - offset).ok().and_then(|i| expressions.get(i));
-        // Passed on by the function calling
+    /// The call `forwarded` stands for, made by the call `call` describes. It
+    /// calls the method of the first of what it may be on (the last first)
+    /// that has it, as known there, with its own summaries, and is passed on
+    /// in turn when what it's on is the calling function's `self` or a
+    /// parameter, which then makes the call for each of its own calls
+    fn forward_call(&mut self, forwarded: &ForwardedCall, call: &Passing, within: &mut Vec<FunctionRef>) {
+        // A method called on the calling function's own `self` that calls
+        // this on its `self`: the caller's own summary has the call on `self`
+        // (see `forwardable_receiver`), which each call to it resolves on
+        // what `self` is there, this with it. Copying it up too would make
+        // every method's summary every method it can reach
+        if call.self_origin == Some(Ok(On::SelfValue)) && forwarded.on.contains(&On::SelfValue) {
+            return
+        }
+        // Passed on by the function calling, when it's on its `self` or a
+        // parameter: then each call to it makes the call, on what that call
+        // passes, so there's nothing to do here
         if self.function != MAIN_CHUNK {
-            let caller = self.function_ranges.last().map(|&(_, function)| function);
-            let on: Vec<usize> = forwarded.on.iter()
-                .filter_map(|&p| expression(p).and_then(|e| self.parameter_read(e)).filter(|&(function, _)| Some(function) == caller).map(|(_, index)| index))
+            let on: Vec<On> = forwarded.on.iter()
+                .filter_map(|&on| match self.origin_of(on, call) {
+                    Some(Ok(on @ (On::SelfValue | On::Parameter(_)))) => Some(on),
+                    _ => None,
+                })
                 .collect();
             if !on.is_empty() {
-                // In the caller's terms: its parameters, its `...` when passed
-                // as the last argument, or values
-                let is_varargs = |position: usize| position as isize - offset == expressions.len() as isize - 1
-                    && expression(position).is_some_and(|e| matches!(e, Expression::VarArgs(_)));
-                let arguments = forwarded.arguments.iter().flat_map(|&argument| match argument {
-                    Forwarded::Parameter(i) => vec![match expression(i).and_then(|e| self.parameter_read(e)).filter(|&(function, _)| Some(function) == caller) {
-                        Some((_, index)) => Forwarded::Parameter(index),
-                        None if is_varargs(i) => Forwarded::Rest,
-                        None => Forwarded::Value(passed.get(i)),
-                    }],
-                    Forwarded::Rest if is_varargs(named) => vec![Forwarded::Rest],
-                    Forwarded::Rest => passed.values.iter().skip(named).map(|&ty| Forwarded::Value(ty)).collect(),
-                    value => vec![value],
-                }).collect();
+                let arguments = forwarded.arguments.iter().flat_map(|&part| call.in_caller_terms(part, &|i| call.argument(i))).collect();
                 self.add_forwarded(ForwardedCall { on, method: forwarded.method.clone(), arguments });
+                return
             }
         }
-        let Some((receiver, id)) = forwarded.on.iter().rev().find_map(|&p| {
-            let receiver = passed.get(p);
+        let Some((receiver, on, function)) = forwarded.on.iter().rev().find_map(|&on| {
+            let receiver = match on {
+                On::SelfValue => call.self_value?,
+                On::Parameter(k) => call.passed.get(k),
+                On::Returned(_) => return None,
+            };
             match self.field_read(receiver, &forwarded.method).function {
-                FunctionRef::One(id) => Some((receiver, id)),
+                function @ (FunctionRef::One(_) | FunctionRef::Builtin(_)) => Some((receiver, on, function)),
                 _ => None,
             }
         }) else { return };
-        // Called with `:`, so `self` is separate unless the function takes it
-        if self.known_function(FunctionRef::One(id)).is_some_and(|info| !info.method) {
-            values.insert(0, receiver);
+        // What it passes the method
+        let mut values = Vec::new();
+        let mut rest = Type::NIL;
+        for &part in &forwarded.arguments {
+            match part {
+                Forwarded::Parameter(i) => values.push(call.argument(i)),
+                Forwarded::Truthy(i) => values.push(call.argument(i).truthy()),
+                Forwarded::Value(ty) => values.push(ty),
+                Forwarded::Rest => {
+                    values.extend(call.passed.values.iter().skip(call.named).copied());
+                    rest = call.passed.rest;
+                }
+            }
         }
-        self.apply(Write::CallArguments(id, Values { values, rest }));
+        let Some(info) = self.known_function(function) else { return };
+        let (method_takes_self, named) = (info.method, info.parameters.len());
+        let (field_writes, forwarded_calls) = (info.field_writes.clone(), info.forwarded_calls.clone());
+        let parameters: Vec<Type> = info.parameters.iter().map(|p| p.types).collect();
+        if let FunctionRef::One(id) = function {
+            // Only what's known: this adds to what the body's own call passes
+            // (or calls the method's file sees), and what says nothing would
+            // swamp it
+            let mut passed: Vec<Type> = values.iter().map(|&ty| if says_nothing(ty) { Type::default() } else { ty }).collect();
+            // Called with `:`, so `self` is separate unless the function takes it
+            if !method_takes_self {
+                passed.insert(0, receiver);
+            }
+            let rest = if says_nothing(rest) { Type::default() } else { rest };
+            self.apply(Write::CallArguments(id, Values { values: passed, rest }));
+        }
+        // What the method does, in turn: deep enough for real chains of
+        // methods, and never one already being applied
+        if within.len() >= 6 || within.contains(&function) || (field_writes.is_empty() && forwarded_calls.is_empty()) {
+            return
+        }
+        let mut origins: Vec<Option<usize>> = forwarded.arguments.iter()
+            .take_while(|part| !matches!(part, Forwarded::Rest))
+            .map(|&part| match part {
+                Forwarded::Parameter(i) => call.origin(i),
+                _ => None,
+            })
+            .collect();
+        let rest_origin = forwarded.arguments.last() == Some(&Forwarded::Rest) && call.rest_origin;
+        origins.resize(origins.len().max(values.len()), None);
+        let self_origin = match on {
+            On::SelfValue => call.self_origin,
+            on => self.origin_of(on, call),
+        };
+        let inner = Passing {
+            passed: Values { values, rest },
+            origins,
+            rest_origin: rest_origin && forwarded.arguments.len() - 1 == named,
+            named,
+            parameters,
+            self_value: Some(receiver),
+            self_origin,
+            returns: Values::none(),
+        };
+        within.push(function);
+        self.apply_summaries(&field_writes, &forwarded_calls, Some((&forwarded.method, function)), &inner, within);
+        within.pop();
     }
 
     /// `expressions` are the call's arguments, each `offset` from the
@@ -7170,9 +7629,15 @@ mod tests {
             "CreateFromMixins": {"parameters": ["..."], "returns": ["unknown"]},
             "Mixin": {"parameters": ["object", "..."], "returns": ["unknown"]},
             "CreateAndInitFromMixin": {"parameters": ["mixin", "..."], "returns": ["table"], "fresh_returns": [{"parameters": [0]}], "method_calls": [{"on": [0], "method": "Init", "arguments": ["..."]}]},
-            "CreateFooter": {"parameters": ["parent"], "returns": ["table"], "fresh_returns": [{"mixins": ["FooterMixin"]}]}
+            "CreateFooter": {"parameters": ["parent"], "returns": ["table"], "fresh_returns": [{"mixins": ["FooterMixin"]}]},
+            "MakePaint": {"parameters": ["r", "g", "a"], "returns": ["table"], "fresh_returns": [{"mixins": ["PaintMixin"]}],
+                "field_writes": [{"on": {"returned": 0}, "field": "r", "value": [0]}, {"on": {"returned": 0}, "field": "a", "value": [{"truthy": 2}, "number"]}]}
         }, "tables": {
-            "FooterMixin": {"functions": {"Finalize": {"returns": ["number"]}}}
+            "FooterMixin": {"functions": {"Finalize": {"returns": ["number"]}}},
+            "PaintMixin": {"functions": {
+                "GetR": {"returns": ["unknown"], "returned_fields": [{"on": "self", "field": "r"}]},
+                "SetR": {"parameters": ["r"], "field_writes": [{"on": "self", "field": "r", "value": [0]}]}
+            }, "values": {"r": "unknown", "a": "unknown"}}
         }}"#).unwrap())
     }
 
@@ -7253,6 +7718,41 @@ mod tests {
             local name, size, a = any:Name(), any:Size(), CreateAndInitFromMixin(A).Size"]);
         assert_eq!(types_in(&analysis, 0, "name"), ["string"]);
         assert_eq!(types_in(&analysis, 0, "size"), ["number"]);
+    }
+
+    #[test]
+    fn fields_given_what_functions_are_passed() {
+        // As `CreateColor` and `ColorMixin` are: each call's table has what
+        // that call passed, its methods give it back, and any of many has
+        // what each has
+        let paints: Vec<String> = (0..9).map(|_| "MakePaint(1)".to_string()).collect();
+        let analysis = analyse_mixins(&[&format!("local p = MakePaint(1) local s = MakePaint('s')
+            local r, a, sr, got = p.r, p.a, s.r, p:GetR()
+            local t = MakePaint('t') t:SetR(true) local set = t.r
+            local all = {{ {} }} local any = all[1] local anyr, anyget = any.r, any:GetR()", paints.join(", "))]);
+        assert_eq!(types_in(&analysis, 0, "r"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "a"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "sr"), ["string"]);
+        assert_eq!(types_in(&analysis, 0, "got"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "set"), ["string|true"]);
+        // Any of them is of the function's family: what any of its tables
+        // in the file was given, the others' too
+        assert_eq!(types_in(&analysis, 0, "anyr"), ["number|string|true"]);
+        assert_eq!(types_in(&analysis, 0, "anyget"), ["number|string|true"]);
+        // The files' own, through the methods a function calls on its new
+        // table, each call's its own
+        let analysis = analyse_mixins(&["local M = {}
+            function M:SetRA(r, a) self.r = r self.a = a or 1 end
+            function M:OnLoad(r, a) self:SetRA(r, a) end
+            function M:GetR() return self.r end
+            local function Make(r, a) local c = CreateFromMixins(M) c:OnLoad(r, a) return c end
+            local c, s = Make(1), Make('s', 'x')
+            local cr, sr, ca, sa, got = c.r, s.r, c.a, s.a, s:GetR()"]);
+        assert_eq!(types_in(&analysis, 0, "cr"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "sr"), ["string"]);
+        assert_eq!(types_in(&analysis, 0, "ca"), ["number"]);
+        assert_eq!(types_in(&analysis, 0, "sa"), ["number|string"]);
+        assert_eq!(types_in(&analysis, 0, "got"), ["string"]);
     }
 
     #[test]

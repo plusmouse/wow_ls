@@ -1250,8 +1250,13 @@ impl Definitions {
         let forwarded_calls = match definition.get("method_calls") {
             None => Vec::new(),
             Some(Value::Array(items)) => items.iter().map(|item| -> Result<_, String> {
+                // `"self"`, or the positions of parameters
                 let on = item.get("on").and_then(Value::as_array).ok_or("`method_calls` needs `on`")?.iter()
-                    .map(|p| p.as_u64().map(|p| p as usize).ok_or_else(|| "`on` should hold numbers".to_string()))
+                    .map(|on| match on {
+                        Value::String(s) if s == "self" => Ok(crate::types::On::SelfValue),
+                        Value::Number(n) => n.as_u64().map(|p| crate::types::On::Parameter(p as usize)).ok_or_else(|| "`on` should hold whole numbers".to_string()),
+                        _ => Err("`on` should hold \"self\" or positions".to_string()),
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let method = item.get("method").and_then(Value::as_str).ok_or("`method_calls` needs `method`")?.to_string();
                 let arguments = match item.get("arguments") {
@@ -1268,7 +1273,50 @@ impl Definitions {
             }).collect::<Result<Vec<_>, _>>()?,
             Some(_) => return Err("`method_calls` should be an array".to_string()),
         };
-        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns, calls: Vec::new(), forwarded_calls })
+        // What an argument stands for, in `method_calls` and `field_writes`: a
+        // position, `{"truthy": position}`, `...` or a type
+        let forwarded = |argument: &Value| -> Result<crate::types::Forwarded, String> {
+            match argument {
+                Value::Number(n) => n.as_u64().map(|p| crate::types::Forwarded::Parameter(p as usize)).ok_or_else(|| "a position should be a whole number".to_string()),
+                Value::String(s) if s == "..." => Ok(crate::types::Forwarded::Rest),
+                Value::String(s) => self.parse_type(s).map(crate::types::Forwarded::Value),
+                Value::Object(o) => o.get("truthy").and_then(Value::as_u64).map(|p| crate::types::Forwarded::Truthy(p as usize)).ok_or_else(|| "an object argument should be `{\"truthy\": position}`".to_string()),
+                _ => Err("an argument should be a position, `...`, a type or `{\"truthy\": position}`".to_string()),
+            }
+        };
+        // What one of them is on: `"self"`, a position, or `{"returned": position}`
+        let on = |on: Option<&Value>| -> Result<crate::types::On, String> {
+            match on {
+                Some(Value::String(s)) if s == "self" => Ok(crate::types::On::SelfValue),
+                Some(Value::Number(n)) => n.as_u64().map(|p| crate::types::On::Parameter(p as usize)).ok_or_else(|| "`on` should be a whole number".to_string()),
+                Some(Value::Object(o)) => o.get("returned").and_then(Value::as_u64).map(|p| crate::types::On::Returned(p as usize)).ok_or_else(|| "`on` should be `{\"returned\": position}`".to_string()),
+                _ => Err("`on` should be \"self\", a position or `{\"returned\": position}`".to_string()),
+            }
+        };
+        // Fields it gives what it's passed
+        let field_writes = match definition.get("field_writes") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items.iter().map(|item| -> Result<_, String> {
+                let field = item.get("field").and_then(Value::as_str).ok_or("`field_writes` needs `field`")?.to_string();
+                let value = item.get("value").and_then(Value::as_array).ok_or("`field_writes` needs `value`")?.iter()
+                    .map(&forwarded).collect::<Result<Vec<_>, _>>()?;
+                Ok(crate::types::FieldWrite { on: on(item.get("on"))?, field, value })
+            }).collect::<Result<Vec<_>, _>>()?,
+            Some(_) => return Err("`field_writes` should be an array".to_string()),
+        };
+        // For each return, `null` or the field of `self` or a parameter it is
+        let returned_fields = match definition.get("returned_fields") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items.iter().map(|item| -> Result<_, String> {
+                if item.is_null() {
+                    return Ok(None)
+                }
+                let field = item.get("field").and_then(Value::as_str).ok_or("`returned_fields` needs `field`")?.to_string();
+                Ok(Some(crate::types::ReturnedField { on: on(item.get("on"))?, field }))
+            }).collect::<Result<Vec<_>, _>>()?,
+            Some(_) => return Err("`returned_fields` should be an array".to_string()),
+        };
+        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns, calls: Vec::new(), forwarded_calls, field_writes, returned_fields })
     }
 
     /// `"name"` or `"name: type"`

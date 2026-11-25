@@ -159,7 +159,8 @@ fn names(analysis: &Analysis, file: FileId, offset: TextSize, prefix: &str) -> C
 }
 
 /// The type of the code ending just before the `.` or `:` at `separator`: a
-/// name (`frame.`, `a.b.`) or a call (`CreateFrame("Frame"):`)
+/// name (`frame.`, `a.b.`), a call (`CreateFrame("Frame"):`) or an index
+/// (`colors[1]:`)
 fn base_type(analysis: &Analysis, file: FileId, root: &SyntaxNode, separator: TextSize) -> Option<Type> {
     let mut token = root.token_at_offset(separator).left_biased()?;
     // Whitespace (or the separator itself, if the offset is inside it) before it
@@ -169,8 +170,34 @@ fn base_type(analysis: &Analysis, file: FileId, root: &SyntaxNode, separator: Te
     match token.kind() {
         SyntaxKind::Name => name_type(analysis, file, &token).map(|(ty, _)| ty),
         SyntaxKind::RightBracket => call_type(analysis, file, &token),
+        SyntaxKind::RightSquareBracket => index_type(analysis, file, root, &token),
         _ => None,
     }
+}
+
+/// What indexing gives, for the index ending at `bracket`: the field a
+/// string key names (`t["name"]`), else what the table holds
+fn index_type(analysis: &Analysis, file: FileId, root: &SyntaxNode, bracket: &SyntaxToken) -> Option<Type> {
+    // Its `[`, past any brackets inside the key
+    let mut depth = 0;
+    let mut open = bracket.prev_token()?;
+    loop {
+        match open.kind() {
+            SyntaxKind::RightSquareBracket => depth += 1,
+            SyntaxKind::LeftSquareBracket if depth == 0 => break,
+            SyntaxKind::LeftSquareBracket => depth -= 1,
+            _ => {}
+        }
+        open = open.prev_token()?;
+    }
+    // A string key names a field, which the analysis recorded at the key
+    let key = open.next_token().filter(|t| t.kind() == SyntaxKind::String && t.next_token().as_ref() == Some(bracket));
+    if let Some(field) = key.and_then(|key| analysis.field_reference_at(file, key.text_range().start()).filter(|f| f.range == key.text_range())) {
+        return Some(field.types)
+    }
+    let base = base_type(analysis, file, root, open.text_range().start())?;
+    let contents = analysis.contents(base.named.identity()?)?;
+    Some(contents.values)
 }
 
 /// The type at a name the analysis recorded, and for a callee, what calling it there returns
@@ -457,6 +484,20 @@ mod tests {
         let colors: Vec<String> = (0..9).map(|i| format!("[{i}] = CreateColor({i}/255, 1, 1)")).collect();
         let c = complete_at(&format!("local qualityColors = {{ {} }}\nlocal a = qualityColors[1]\na:GetRG|", colors.join(", ")));
         assert!(names_of(&c).contains(&"GetRGB"), "{:?}", names_of(&c));
+    }
+
+    #[test]
+    fn members_of_what_a_table_holds() {
+        let colors: Vec<String> = (0..9).map(|i| format!("[{i}] = CreateColor({i}/255, 1, 1)")).collect();
+        let c = complete_at(&format!("local qualityColors = {{ {} }}\nqualityColors[0]:|", colors.join(", ")));
+        assert!(names_of(&c).contains(&"GetRGB"), "{:?}", names_of(&c));
+        // Through fields, calls and other indexes, and a key naming a field
+        let c = complete_at("local ns = { list = { { a = 1 } } }\nlocal function f() return ns.list end\nns.list[1].|");
+        assert_eq!(names_of(&c), ["a"]);
+        let c = complete_at("local ns = { list = { { a = 1 } } }\nlocal function f() return ns.list end\nf()[ns.list[1].a].|");
+        assert_eq!(names_of(&c), ["a"]);
+        let c = complete_at("local t = { inner = { b = 1 } }\nt[\"inner\"].|");
+        assert_eq!(names_of(&c), ["b"]);
     }
 
     #[test]

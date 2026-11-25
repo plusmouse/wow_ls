@@ -189,7 +189,8 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path) -> Res
     let handlers: usize = cache.values().map(|analysed| analysed.scripts.len()).sum();
     eprintln!("analysed in {:?}, with {handlers} script handlers written inline in XML", started.elapsed());
 
-    let generator = Generator { kinds: &kinds, definitions: &analysis_definitions, layer: &layer, templates: &templates, source, texts: Default::default() };
+    let giving_methods = giving_methods(&layer);
+    let generator = Generator { kinds: &kinds, definitions: &analysis_definitions, layer: &layer, templates: &templates, source, texts: Default::default(), giving_methods };
     let mut mixin_names: Vec<String> = Vec::new();
     for object in templates.values().chain(frames.values()) {
         collect_mixins(object, &mut mixin_names);
@@ -469,6 +470,37 @@ enum Member {
     Value(String),
 }
 
+/// The names of the methods of Blizzard's Lua that give fields what they're
+/// passed (`field_writes`), or call one on `self` that does, however
+/// indirectly: what a method calling one on `self` (a `ForwardedCall`) can
+/// do on each call, for an addon. Others are left out of the definitions,
+/// which would otherwise list most of Blizzard's calls of methods on `self`
+fn giving_methods(layer: &Layer) -> std::collections::HashSet<String> {
+    // The names each function is stored under
+    let mut names: HashMap<crate::types::FunctionId, Vec<&str>> = HashMap::new();
+    for fields in layer.fields.values() {
+        for (name, ty) in fields {
+            if let FunctionRef::One(id) = ty.function {
+                names.entry(id).or_default().push(name);
+            }
+        }
+    }
+    let mut giving: std::collections::HashSet<String> = std::collections::HashSet::new();
+    loop {
+        let before = giving.len();
+        for (id, info) in &layer.functions {
+            let gives = !info.field_writes.is_empty() || info.forwarded_calls.iter()
+                .any(|call| call.on.contains(&crate::types::On::SelfValue) && giving.contains(&call.method));
+            if gives {
+                giving.extend(names.get(id).into_iter().flatten().map(|name| name.to_string()));
+            }
+        }
+        if giving.len() == before {
+            return giving
+        }
+    }
+}
+
 struct Generator<'a> {
     kinds: &'a Kinds<'a>,
     /// What the analysis was over, whose types it gives: with Blizzard's
@@ -480,6 +512,8 @@ struct Generator<'a> {
     source: &'a Path,
     /// Files' text, read once each, for the lines sites are on
     texts: std::cell::RefCell<HashMap<String, String>>,
+    /// The names of methods that give fields (see `giving_methods`)
+    giving_methods: std::collections::HashSet<String>,
 }
 
 impl Generator<'_> {
@@ -657,13 +691,18 @@ impl Generator<'_> {
         // New plain tables each call, with mixins: parameters, by the
         // positions of the parameters written, and globals. Not a pool's,
         // whose objects aren't written
-        let fresh: Vec<Value> = info.fresh_returns.iter().zip(&info.returns.values)
-            .map(|(fresh, &value)| {
+        let fresh: Vec<Value> = info.fresh_returns.iter().zip(&info.returns.values).enumerate()
+            .map(|(slot, (fresh, &value))| {
                 let Some(fresh) = fresh.as_ref().filter(|f| f.pool_mixed_parameters.is_none()) else { return Value::Null };
                 let Some(made) = fresh.made.filter(|_| self.type_text(value) == "table") else { return Value::Null };
                 let Some(positions) = fresh.mixed_parameters.iter().map(|&p| p.checked_sub(usize::from(skipped))).collect::<Option<Vec<usize>>>() else { return Value::Null };
                 let mut mixins = Vec::new();
-                if !self.global_mixins(made, &mut mixins, 0) {
+                // The fields each call gives it, which `field_writes` say
+                let given: Vec<&str> = info.field_writes.iter()
+                    .filter(|write| write.on == crate::types::On::Returned(slot))
+                    .map(|write| write.field.as_str())
+                    .collect();
+                if !self.global_mixins(made, &given, &mut mixins, 0) {
                     return Value::Null
                 }
                 let mut entry = Map::new();
@@ -682,21 +721,49 @@ impl Generator<'_> {
         // Methods it calls on what it's passed, by the positions of the
         // parameters written
         let position = |p: usize| p.checked_sub(usize::from(skipped));
+        let argument = |argument: crate::types::Forwarded| match argument {
+            crate::types::Forwarded::Parameter(p) => position(p).map(|p| json!(p)),
+            crate::types::Forwarded::Truthy(p) => position(p).map(|p| json!({"truthy": p})),
+            crate::types::Forwarded::Rest => Some(json!("...")),
+            crate::types::Forwarded::Value(ty) => Some(json!(self.type_text(ty))),
+        };
+        // `self`, a parameter, or a return. `function M.F(self, x)`'s `self` is
+        // written as a method's is
+        let on = |on: crate::types::On| match on {
+            crate::types::On::SelfValue => Some(json!("self")),
+            crate::types::On::Parameter(0) if skipped => Some(json!("self")),
+            crate::types::On::Parameter(p) => position(p).map(|p| json!(p)),
+            crate::types::On::Returned(slot) => Some(json!({"returned": slot})),
+        };
         let method_calls: Vec<Value> = info.forwarded_calls.iter()
+            // On `self`, only of methods that give fields: nothing else they
+            // do is any use to an addon
+            .filter(|call| !call.on.contains(&crate::types::On::SelfValue) || self.giving_methods.contains(&call.method))
             .filter_map(|call| {
-                let on: Vec<usize> = call.on.iter().map(|&p| position(p)).collect::<Option<_>>()?;
-                let arguments: Vec<Value> = call.arguments.iter()
-                    .map(|&argument| match argument {
-                        crate::types::Forwarded::Parameter(p) => position(p).map(|p| json!(p)),
-                        crate::types::Forwarded::Rest => Some(json!("...")),
-                        crate::types::Forwarded::Value(ty) => Some(json!(self.type_text(ty))),
-                    })
-                    .collect::<Option<_>>()?;
+                let on: Vec<Value> = call.on.iter().map(|&o| on(o)).collect::<Option<_>>()?;
+                let arguments: Vec<Value> = call.arguments.iter().map(|&a| argument(a)).collect::<Option<_>>()?;
                 Some(json!({"on": on, "method": call.method, "arguments": arguments}))
             })
             .collect();
         if !method_calls.is_empty() {
             function.insert("method_calls".into(), Value::Array(method_calls));
+        }
+        // Fields it gives what it's passed
+        let field_writes: Vec<Value> = info.field_writes.iter()
+            .filter_map(|write| {
+                let value: Vec<Value> = write.value.iter().map(|&a| argument(a)).collect::<Option<_>>()?;
+                Some(json!({"on": on(write.on)?, "field": write.field, "value": value}))
+            })
+            .collect();
+        if !field_writes.is_empty() {
+            function.insert("field_writes".into(), Value::Array(field_writes));
+        }
+        // The fields of `self` or a parameter it returns
+        let returned: Vec<Value> = info.returned_fields.iter()
+            .map(|field| field.as_ref().and_then(|field| Some(json!({"on": on(field.on)?, "field": field.field}))).unwrap_or(Value::Null))
+            .collect();
+        if returned.iter().any(|r| !r.is_null()) {
+            function.insert("returned_fields".into(), Value::Array(returned));
         }
         Value::Object(function)
     }
@@ -705,12 +772,13 @@ impl Generator<'_> {
     /// mixins that are global tables, and theirs, through tables it's made
     /// from (another function's new table at a call). Not the mixins that
     /// are the parameters of the function making a table, which are each
-    /// call's own. False if it has fields of its own, or a mixin does that's
-    /// no global, which a name can't give, or it has a mixin that's no table
-    /// made in Blizzard's Lua, which can't be named: left out, its methods
-    /// would be reported missing
-    fn global_mixins(&self, table: crate::types::TableId, names: &mut Vec<String>, depth: usize) -> bool {
-        if depth > 8 || self.layer.fields.get(&table).is_some_and(|fields| !fields.is_empty()) {
+    /// call's own. False if it has fields of its own but those `given` (by
+    /// each call, as `field_writes` say), or a mixin does that's no global,
+    /// which a name can't give, or it has a mixin that's no table made in
+    /// Blizzard's Lua, which can't be named: left out, its methods would be
+    /// reported missing
+    fn global_mixins(&self, table: crate::types::TableId, given: &[&str], names: &mut Vec<String>, depth: usize) -> bool {
+        if depth > 8 || self.layer.fields.get(&table).is_some_and(|fields| fields.keys().any(|name| !given.contains(&name.as_str()))) {
             return false
         }
         // The types of the parameters mixed in by the function that makes it
@@ -728,7 +796,7 @@ impl Generator<'_> {
                 .min();
             match global {
                 Some(name) => if !names.contains(name) { names.push(name.clone()) },
-                None => if !self.global_mixins(at, names, depth + 1) { return false },
+                None => if !self.global_mixins(at, &[], names, depth + 1) { return false },
             }
         }
         true
