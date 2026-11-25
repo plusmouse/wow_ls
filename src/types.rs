@@ -3858,8 +3858,18 @@ impl<'a> Walker<'a> {
                 .reduce(Type::union)
                 .unwrap_or(Type::UNKNOWN)
         }
-        // Any of several tables: what any of them has
+        // Any of several tables: what any of them has. Those without it don't
+        // make it unknown, as a field reset from `{}` to a table of constants
+        // has only the second's fields
         if let NamedRef::Tables(_) = base.named {
+            if let Some(prior) = self.prior {
+                let held = base.named.identities().into_iter()
+                    .filter_map(|at| self.own_field(prior, at, name, 0))
+                    .reduce(Type::union);
+                if let Some(held) = held {
+                    return held
+                }
+            }
             return base.named.identities().into_iter()
                 .map(|at| self.field_read(Type { named: NamedRef::Table(at), ..base }, name))
                 .reduce(Type::union)
@@ -7577,6 +7587,11 @@ mod tests {
         assert_eq!(library_types_of(source, "x")[0], "true?");
         assert_eq!(library_types_of(source, "each")[0], "true");
         assert_eq!(library_types_of(source, "c")[0], "number");
+        // One without the field doesn't make it unknown: Auctionator's
+        // `Constants = {}`, then `Auctionator.Constants = { IsForever = ... }`
+        let source = "local A = { C = {} } A.C = { F = true } local x = A.C.F";
+        assert_eq!(types_of(source, "x"), ["true"]);
+        assert_eq!(types_of("local A = { C = { G = 1 } } A.C = { F = true } local x, y = A.C.F, A.C.G", "y"), ["number"]);
     }
 
     #[test]
@@ -8041,8 +8056,10 @@ mod tests {
         // WoW objects share fields by name
         assert_eq!(object_types_of("local f = CreateFrame('Frame') f.value = 5 local a = f.value", "a"), ["number"]);
         assert_eq!(object_types_of("local f = CreateFrame('Frame') function f:OnEvent() return 1 end local a = f:OnEvent()", "a"), ["number"]);
+        // Reading from either of two tables gets what the one with it holds
+        assert_eq!(types_of("local t = {} t.x = 1 local a = (c and {} or t).x", "a"), ["number"]);
         // Reading from something unknown stays unknown
-        assert_eq!(types_of("local t = {} t.x = 1 local a = (c and {} or t).x", "a"), ["unknown"]);
+        assert_eq!(types_of("local t = {} t.x = 1 local a = (c and f() or t).x", "a"), ["unknown"]);
     }
 
     /// Files analysed together, in order, as one addon (`in_addon`) or just
