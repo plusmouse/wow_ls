@@ -71,6 +71,8 @@ pub struct Edit {
     old_end: usize,
     /// Where it ends in the text now
     new_end: usize,
+    /// The text now between them: what's been typed since the analysis
+    typed: String,
     /// Whether something the completion needed was inside the span, so the
     /// analysis couldn't say what it is
     missed: Cell<bool>,
@@ -79,7 +81,7 @@ pub struct Edit {
 impl Edit {
     /// No change: the analysis was made from the text being completed
     pub fn none() -> Edit {
-        Edit { start: usize::MAX, old_end: usize::MAX, new_end: usize::MAX, missed: Cell::new(false) }
+        Edit { start: usize::MAX, old_end: usize::MAX, new_end: usize::MAX, typed: String::new(), missed: Cell::new(false) }
     }
 
     /// The change from `old`, which the analysis was made from, to `new`
@@ -95,12 +97,8 @@ impl Edit {
         while !(old.is_char_boundary(o.len() - end) && new.is_char_boundary(n.len() - end)) {
             end -= 1;
         }
-        Edit { start, old_end: o.len() - end, new_end: n.len() - end, missed: Cell::new(false) }
-    }
-
-    /// Whether the texts differ
-    fn is_change(&self) -> bool {
-        !(self.start == self.old_end && self.start == self.new_end)
+        let new_end = n.len() - end;
+        Edit { start, old_end: o.len() - end, new_end, typed: new[start..new_end].to_string(), missed: Cell::new(false) }
     }
 
     /// Whether the analysis couldn't answer, as what was asked about is newer
@@ -124,8 +122,27 @@ impl Edit {
     }
 
     /// Where the code at `range` was in the analysis's text, unless it's
-    /// changed since: overlaps the span
+    /// changed since: overlaps the span. Then the analysis can't answer
     fn range(&self, range: TextRange) -> Option<TextRange> {
+        let mapped = self.unchanged(range);
+        if mapped.is_none() {
+            self.missed.set(true);
+        }
+        mapped
+    }
+
+    /// Whether what's been typed since the analysis names `name` other than
+    /// at `at`, so it may declare or assign it, which the analysis doesn't know
+    fn may_declare(&self, name: &str, at: TextRange) -> bool {
+        let own = usize::from(at.start()).checked_sub(self.start).filter(|_| self.unchanged(at).is_none());
+        self.typed.match_indices(name).any(|(i, _)| {
+            let whole = !self.typed[..i].ends_with(is_name_char) && !self.typed[i + name.len()..].starts_with(is_name_char);
+            whole && Some(i) != own
+        })
+    }
+
+    /// As `range`, for code that can be understood some other way if it's changed
+    fn unchanged(&self, range: TextRange) -> Option<TextRange> {
         let (start, end) = (usize::from(range.start()), usize::from(range.end()));
         if end <= self.start {
             Some(range)
@@ -133,7 +150,6 @@ impl Edit {
             let shift = |at: usize| TextSize::from((at - self.new_end + self.old_end) as u32);
             Some(TextRange::new(shift(start), shift(end)))
         } else {
-            self.missed.set(true);
             None
         }
     }
@@ -286,19 +302,54 @@ fn index_type(analysis: &Analysis, file: FileId, root: &SyntaxNode, bracket: &Sy
 
 /// The type at a name the analysis recorded, and for a callee, what calling it there returns
 fn name_type(analysis: &Analysis, file: FileId, token: &SyntaxToken, edit: &Edit) -> Option<(Type, Option<Values>)> {
-    let range = edit.range(token.text_range())?;
-    if let Some(r) = analysis.reference_at(file, range.start()).filter(|r| r.range == range) {
-        return Some((r.types, r.call_returns.clone()))
+    if let Some(range) = edit.unchanged(token.text_range()) {
+        if let Some(r) = analysis.reference_at(file, range.start()).filter(|r| r.range == range) {
+            return Some((r.types, r.call_returns.clone()))
+        }
+        if let Some(f) = analysis.field_reference_at(file, range.start()).filter(|f| f.range == range) {
+            return Some((f.types, f.call_returns.clone()))
+        }
     }
-    let found = analysis.field_reference_at(file, range.start())
-        .filter(|f| f.range == range)
-        .map(|f| (f.types, f.call_returns.clone()));
-    // An older text may not have had it as an expression: a name on its own,
-    // before the `.` after it was typed, isn't a statement
-    if found.is_none() && edit.is_change() {
+    // Nothing recorded there: typed since the analysis, or not an expression
+    // then (a name on its own, before the `.` after it was typed, isn't a
+    // statement). So what the name means there
+    // Unless it's been declared or assigned since, which only analysing
+    // again would find
+    let found = by_name(analysis, file, token, edit);
+    if found.is_none() && edit.may_declare(token.text(), token.text_range()) {
         edit.missed.set(true);
     }
-    found
+    found.map(|ty| (ty, None))
+}
+
+/// What the name `token` means where it is, found by name rather than by a
+/// reference recorded there: after `.` or `:`, the member of that name of what
+/// comes before; else the innermost local of that name in scope, else the
+/// global. A local's or field's type anywhere, not just there
+fn by_name(analysis: &Analysis, file: FileId, token: &SyntaxToken, edit: &Edit) -> Option<Type> {
+    let name = token.text();
+    let mut before = token.prev_token();
+    while let Some(t) = before.as_ref().filter(|t| matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment)) {
+        before = t.prev_token();
+    }
+    if let Some(separator) = before.filter(|t| matches!(t.text(), "." | ":")) {
+        let root = token.parent()?.ancestors().last()?;
+        let base = base_type(analysis, file, &root, separator.text_range().start(), edit)?;
+        return members(analysis, base, false).into_iter().find(|c| c.name == name).map(|c| c.types)
+    }
+    let at = edit.cursor(token.text_range().start());
+    let local = analysis.bindings.iter()
+        .filter(|b| b.file == file && b.kind != BindingKind::Global && &*b.name == name)
+        .filter_map(|b| b.visible.filter(|v| !v.is_empty() && v.contains_inclusive(at)).map(|v| (v.start(), b.types)))
+        .max_by_key(|&(start, _)| start);
+    if let Some((_, types)) = local {
+        return Some(types)
+    }
+    analysis.bindings.iter()
+        .find(|b| b.kind == BindingKind::Global && b.assigned() && &*b.name == name)
+        .map(|b| b.types)
+        .or_else(|| analysis.layer.globals.get(name).copied())
+        .or_else(|| analysis.definitions.global(name))
 }
 
 /// The first value returned by the call whose argument list ends at `bracket`
@@ -624,19 +675,43 @@ mod tests {
         let (c, missed) = complete_stale("local t = { a = 1 }\nprint(t)", "local t = { a = 1 }\nprint(t.|)");
         assert!(!missed);
         assert_eq!(names_of(&c), ["a"]);
-        // A name on its own isn't an expression, so the analysis has nothing at it
-        let (_, missed) = complete_stale("local t = { a = 1 }\nt", "local t = { a = 1 }\nt.|");
-        assert!(missed);
+        // A name on its own isn't an expression, so the analysis has nothing
+        // at it, but knows what the name means there
+        let (c, missed) = complete_stale("local t = { a = 1 }\nt", "local t = { a = 1 }\nt.|");
+        assert!(!missed);
+        assert_eq!(names_of(&c), ["a"]);
         // And after an edit above it, which moved it
         let (c, missed) = complete_stale("local t = { a = 1 }\nlocal x = 2\nt.", "local t = { a = 1 }\nlocal xyz = 2\nt.|");
         assert!(!missed);
         assert_eq!(names_of(&c), ["a"]);
-        // `t` typed since, which the analysis doesn't know
-        let (_, missed) = complete_stale("local t = { a = 1 }\n", "local t = { a = 1 }\nt.|");
+        // Names typed since, by what they mean where they are
+        let (c, missed) = complete_stale("local t = { a = 1 }\n", "local t = { a = 1 }\nt.|");
+        assert!(!missed);
+        assert_eq!(names_of(&c), ["a"]);
+        let (c, missed) = complete_stale("local te = { a = 1 }\nlocal tea = { b = 1 }\nte", "local te = { a = 1 }\nlocal tea = { b = 1 }\ntea.|");
+        assert!(!missed);
+        assert_eq!(names_of(&c), ["b"]);
+        // The innermost local of the name, and fields of fields
+        let (c, missed) = complete_stale("local t = { a = 1 }\nlocal function f()\n  local t = { inner = { b = 1 } }\n  \nend", "local t = { a = 1 }\nlocal function f()\n  local t = { inner = { b = 1 } }\n  t.inner.|\nend");
+        assert!(!missed);
+        assert_eq!(names_of(&c), ["b"]);
+        // Globals, and those the definitions give
+        let (c, missed) = complete_stale("G = { a = 1 }\n", "G = { a = 1 }\nG.|");
+        assert!(!missed);
+        assert_eq!(names_of(&c), ["a"]);
+        let (c, missed) = complete_stale("", "C_Timer.|");
+        assert!(!missed);
+        assert!(names_of(&c).contains(&"After"), "{:?}", names_of(&c));
+        // But not a local declared in what was typed since
+        let (_, missed) = complete_stale("", "local t = { a = 1 }\nt.|");
         assert!(missed);
-        // Nor what `te` became
-        let (_, missed) = complete_stale("local te = { a = 1 }\nlocal tea = {}\nte", "local te = { a = 1 }\nlocal tea = {}\ntea.|");
+        let (_, missed) = complete_stale("local t = {}\n", "local t = {}\nt.b = {}\nt.b.|");
         assert!(missed);
+        // While one the analysis doesn't know, nothing typed since could have
+        // made known
+        let (c, missed) = complete_stale("local t = {}\n", "local t = {}\nt.unknown.|");
+        assert!(!missed);
+        assert!(c.candidates.is_empty());
     }
 
     #[test]
