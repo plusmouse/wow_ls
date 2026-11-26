@@ -69,6 +69,9 @@ pub struct Addon {
     /// The addons it needs or uses if they're there, which load before it, by
     /// name as written
     pub dependencies: Vec<String>,
+    /// The globals the game saves between sessions (`## SavedVariables` and
+    /// `## SavedVariablesPerCharacter`)
+    pub saved_variables: Vec<String>,
     /// What only other game versions load, whose files are in `files` and
     /// `xml`, in load order, analysed only if they don't clash with the rest
     pub variants: Vec<Variant>,
@@ -119,7 +122,7 @@ impl Addon {
             }
         }
         let name = directory.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        Ok(Addon { name, toc: normalise(toc), files, xml, dependencies: toc_dependencies(&text), variants })
+        Ok(Addon { name, toc: normalise(toc), files, xml, dependencies: toc_dependencies(&text), saved_variables: toc_saved_variables(&text), variants })
     }
 
     /// The addons this one names as dependencies that can be found: among
@@ -197,7 +200,7 @@ impl Addon {
                 scripts.push(PathBuf::from(format!("{}#{}", path.display(), script.start)));
             }
         }
-        (Analysis::analyse_over(&sources, definitions, layer), paths, scripts)
+        (Analysis::analyse_over(&sources, definitions, layer, &self.saved_variables), paths, scripts)
     }
 }
 
@@ -584,6 +587,25 @@ fn loads_here(condition: &str) -> bool {
 
 /// The addons a `.toc` says this one needs or uses: `## Dependencies`,
 /// `## RequiredDeps` (or any `## Dep...`), and `## OptionalDeps`
+/// The globals a toc's `## SavedVariables` lines (per account, per character
+/// and any other kind) name
+pub fn toc_saved_variables(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let Some(metadata) = line.trim_start_matches('\u{feff}').trim().strip_prefix("##") else { continue };
+        let Some((key, value)) = metadata.split_once(':') else { continue };
+        if !key.trim().to_ascii_lowercase().starts_with("savedvariables") {
+            continue
+        }
+        for name in value.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            if !names.iter().any(|n: &String| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
 pub fn toc_dependencies(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in text.lines() {
@@ -799,6 +821,8 @@ mod tests {
     fn reads_toc_dependencies() {
         let toc = "## Interface: 110000\n## OptionalDeps: Syndicator, Masque\n## RequiredDeps: LibA\n## Dependencies: LibB, liba\n## DepsExtra: LibC\n## SavedVariables: X\nCore.lua\n";
         assert_eq!(toc_dependencies(toc), ["Syndicator", "Masque", "LibA", "LibB", "LibC"]);
+        let toc = "## SavedVariables: A, B\n## SavedVariablesPerCharacter: C\n## SavedVariables: A\n";
+        assert_eq!(toc_saved_variables(toc), ["A", "B", "C"]);
         // With loading conditions, as Blizzard's have
         let toc = "## Dep: Blizzard_EditMode [AllowLoadGameType mainline]\n## Dep: Blizzard_Classic [AllowLoadGameType classic]\n## Dep: Blizzard_Colors\n";
         assert_eq!(toc_dependencies(toc), ["Blizzard_EditMode", "Blizzard_Colors"]);
@@ -812,6 +836,7 @@ mod tests {
             files: Vec::new(),
             xml: Vec::new(),
             dependencies: dependencies.iter().map(|d| d.to_string()).collect(),
+            saved_variables: Vec::new(),
             variants: Vec::new(),
         };
         let known = [addon("Core", &[]), addon("Lib", &["Core"]), addon("Main", &["Lib", "core", "Missing", "Main", "Lib"])];
@@ -984,7 +1009,7 @@ mod tests {
   </Button>
 </Ui>"#.to_string());
         open.insert(lua.clone(), "M = {} function M:Get() return self end C = {} function C:Get() return self end".to_string());
-        let addon = Addon { name: "Inline".into(), toc: "/nowhere/Inline/Inline.toc".into(), files: vec![lua.clone()], xml: vec![xml.clone()], dependencies: Vec::new(), variants: Vec::new() };
+        let addon = Addon { name: "Inline".into(), toc: "/nowhere/Inline/Inline.toc".into(), files: vec![lua.clone()], xml: vec![xml.clone()], dependencies: Vec::new(), saved_variables: Vec::new(), variants: Vec::new() };
         let (definitions, errors) = with_xml(&definitions, std::slice::from_ref(&xml), &open, &mut HashMap::new());
         assert!(errors.is_empty());
         let analysed = analyse_addon(&addon, &[], &open, &definitions, &mut HashMap::new());

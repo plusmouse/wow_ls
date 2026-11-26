@@ -31,6 +31,9 @@
 //!   any time. Unless no assignment can come after the closure is made (every
 //!   one is earlier in the declaring function, with no loop around the closure
 //!   but not the declaration): then it's the type where the closure is made.
+//! * Tables the game saves between sessions (`## SavedVariables`, and the
+//!   tables stored in them) hold what the addon writes, not tables of unknown
+//!   shape it stores there from outside, like an import.
 //! * Globals start as unknown, because other files (or the WoW API) may set them.
 //!
 //! * Loop bodies are walked until the types flowing back to the top of the loop
@@ -1788,6 +1791,8 @@ pub struct Analysis {
     /// (see `Definitions::xml_mixins`), as the files or those they depend on
     /// assign it
     pub lua_mixins: HashMap<String, Type>,
+    /// The tables the game saves between sessions (see `tables_saved_in`)
+    saved_tables: HashSet<TableId>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -1800,21 +1805,23 @@ impl Analysis {
     /// Files in the order they load, as one program. The `FileId`s in the
     /// result are positions in `files`
     pub fn analyse(files: &[SourceFile], definitions: &Arc<Definitions>) -> Analysis {
-        Analysis::analyse_over(files, definitions, Arc::default())
+        Analysis::analyse_over(files, definitions, Arc::default(), &[])
     }
 
     /// `analyse`, for files loaded after the addons `layer` comes from
-    pub fn analyse_over(files: &[SourceFile], definitions: &Arc<Definitions>, layer: Arc<Layer>) -> Analysis {
+    /// `saved` names the globals the game saves between sessions
+    pub fn analyse_over(files: &[SourceFile], definitions: &Arc<Definitions>, layer: Arc<Layer>, saved: &[String]) -> Analysis {
         // Replaying is only ever faster; turning it off is for checking it
         let replay = std::env::var_os("WOW_LS_NO_REPLAY").is_none();
-        Analysis::analyse_replaying(files, definitions, layer, replay)
+        Analysis::analyse_replaying(files, definitions, layer, saved, replay)
     }
 
     /// `analyse`, replaying function bodies whose inputs haven't changed
     /// since the walk before, or walking every one every time
-    fn analyse_replaying(files: &[SourceFile], definitions: &Arc<Definitions>, layer: Arc<Layer>, replay: bool) -> Analysis {
+    fn analyse_replaying(files: &[SourceFile], definitions: &Arc<Definitions>, layer: Arc<Layer>, saved: &[String], replay: bool) -> Analysis {
         let _analysing = Analysing::with(definitions);
         let mut result = Walker::new(None, definitions, &layer, Default::default(), replay).walk(files);
+        result.saved_tables = result.tables_saved_in(saved);
         // Nothing to compare the first walk with, but no body it recorded can
         // be replayed anyway, as it walked without a previous walk
         let mut changed = HashSet::default();
@@ -1835,6 +1842,11 @@ impl Analysis {
             if combining {
                 next.combine_inputs(&result);
             }
+            // Once found, still saved: leaving out a write can take away the
+            // field a table was found through, and keeping it again would put
+            // it back, forever
+            next.saved_tables = next.tables_saved_in(saved);
+            next.saved_tables.extend(result.saved_tables.iter().copied());
             changed = next.changed_reads(&result);
             // Nothing the next walk would read has changed
             let settled = changed.is_empty();
@@ -1905,10 +1917,34 @@ impl Analysis {
         }
     }
 
+    /// The tables the globals named `saved` hold, and those stored in them,
+    /// however deep: what the game saves between sessions
+    fn tables_saved_in(&self, saved: &[String]) -> HashSet<TableId> {
+        let mut found = HashSet::default();
+        let mut pending: Vec<TableId> = self.bindings.iter()
+            .filter(|b| b.kind == BindingKind::Global && saved.iter().any(|name| **name == *b.name))
+            .flat_map(|b| b.types.named.identities())
+            .collect();
+        while let Some(at) = pending.pop() {
+            if !found.insert(at) {
+                continue
+            }
+            let fields = self.fields.get(&at).into_iter().flat_map(|fields| fields.values());
+            let entries = self.entries.get(&at).map(|entries| entries.values);
+            for value in fields.copied().chain(entries) {
+                pending.extend(value.named.identities());
+            }
+        }
+        found
+    }
+
     /// What a walk from `self` would read differently from one from `older`.
     /// Empty when the walks have settled
     fn changed_reads(&self, older: &Analysis) -> HashSet<Read> {
         let mut changed = HashSet::default();
+        for &at in self.saved_tables.symmetric_difference(&older.saved_tables) {
+            changed.insert(Read::Saved(at));
+        }
         fn keys<K: std::hash::Hash + Eq + Copy, V>(a: &HashMap<K, V>, b: &HashMap<K, V>) -> HashSet<K> {
             a.keys().chain(b.keys()).copied().collect()
         }
@@ -2820,6 +2856,8 @@ enum Read {
     ParameterTypes(FunctionId),
     /// What the globals XML names as mixins are
     LuaMixins,
+    /// Whether a table is one the game saves between sessions
+    Saved(TableId),
 }
 
 /// A name's hash, for `Read`
@@ -3103,6 +3141,8 @@ impl<'a> Walker<'a> {
             walks: 1,
             roots: self.roots,
             layer: self.layer,
+            // Found once the walk is done
+            saved_tables: HashSet::default(),
         }
     }
 
@@ -4421,7 +4461,12 @@ impl<'a> Walker<'a> {
             self.apply(Write::StoredInField(function, name.to_string()));
         }
         match base.named {
-            NamedRef::Table(id) | NamedRef::Instance { at: id, .. } => self.apply(Write::Field(id, name.to_string(), value)),
+            NamedRef::Table(id) => {
+                if let Some(value) = self.stored_in(id, value) {
+                    self.apply(Write::Field(id, name.to_string(), value));
+                }
+            }
+            NamedRef::Instance { at: id, .. } => self.apply(Write::Field(id, name.to_string(), value)),
             // Could be any table, or shared by every object of a WoW type
             NamedRef::One(_) | NamedRef::Extended(_) | NamedRef::Unknown => self.apply(Write::AnyTableField(name.to_string(), value)),
             // Whichever object it is gets it, so each may have it. Also kept
@@ -4438,7 +4483,9 @@ impl<'a> Walker<'a> {
             // Whichever table it is gets it
             NamedRef::Tables(_) => {
                 for at in base.named.identities() {
-                    self.apply(Write::Field(at, name.to_string(), value));
+                    if let Some(value) = self.stored_in(at, value) {
+                        self.apply(Write::Field(at, name.to_string(), value));
+                    }
                 }
             }
             NamedRef::None => {}
@@ -6445,7 +6492,7 @@ impl<'a> Walker<'a> {
     }
 
     /// `CopyTable(t)` (and `CopyTableSafe`): a new table, made at the call,
-    /// with what `t` holds: its fields, contents and mixins, and a copy of each
+    /// with what `t` (or any of the tables it may be) holds: its fields, contents and mixins, and a copy of each
     /// table among them, as the copy is deep. `CopyTable(t, true)` copies
     /// only `t`, sharing the tables it holds
     fn copy_table(&mut self, call: &FunctionCall, callee: Type, expressions: &[Expression], arguments: &Values) -> Option<Values> {
@@ -6454,10 +6501,16 @@ impl<'a> Walker<'a> {
             return None
         }
         let source = arguments.get(0);
-        let NamedRef::Table(from) = source.named else { return None };
+        // Any of several tables: a copy of whichever it is, so what any holds
+        let sources = match source.named {
+            NamedRef::Table(_) | NamedRef::Tables(_) => source.named.identities(),
+            _ => return None,
+        };
         let shallow = matches!(expressions.get(1), Some(Expression::Literal(literal)) if literal.get_bool().as_deref() == Some("true"));
         let at = self.location(call.syntax().text_range().start());
-        self.copy_into(from, at, shallow, &mut vec![from]);
+        for from in sources {
+            self.copy_into(from, at, shallow, &mut vec![from]);
+        }
         let mut copy = Type::table(at);
         // `CopyTableSafe(nil)` gives nil
         if safe && source.set.intersection(TypeSet::NIL | TypeSet::FALSE) != TypeSet::NEVER {
@@ -6482,14 +6535,21 @@ impl<'a> Walker<'a> {
             }
         }
         fields.sort_by(|a, b| a.0.cmp(&b.0));
+        // A copy into a saved table leaves out values of unknown shape, as a
+        // write does (see `stored_in`). A profile copied into itself would
+        // otherwise keep one forever once it got in
         for (name, ty) in fields {
             let ty = self.copied(ty, to, &name, shallow, within);
-            self.apply(Write::Field(to, name, ty));
+            if let Some(ty) = self.stored_in(to, ty) {
+                self.apply(Write::Field(to, name, ty));
+            }
         }
         self.note(Read::Entries(from));
         if let Some(entries) = prior.entries.get(&from).or_else(|| self.layer.entries.get(&from)).cloned() {
             let values = self.copied(entries.values, to, "[]", shallow, within);
-            self.apply(Write::Entry(to, entries.keys, values));
+            if let Some(values) = self.stored_in(to, values) {
+                self.apply(Write::Entry(to, entries.keys, values));
+            }
         }
         // Mixins' fields were copied into it, so they're the copy's too
         self.note(Read::Mixins(from));
@@ -6831,7 +6891,42 @@ impl<'a> Walker<'a> {
         }
         // Whichever table it is gets it
         for at in base.named.identities() {
-            self.apply(Write::Entry(at, key.without(TypeSet::NIL), value));
+            if let Some(value) = self.stored_in(at, value) {
+                self.apply(Write::Entry(at, key.without(TypeSet::NIL), value));
+            }
+        }
+    }
+
+    /// What of `value` a write into table `at` stores: all of it, unless `at`
+    /// is one the game saves between sessions and `value` may be a table of
+    /// unknown shape. That's a table the addon stores there from outside it,
+    /// like a profile deserialized from an import string, which isn't taken
+    /// as what the table holds: what saved data comes back as is what the
+    /// addon writes into it, and a table of any shape would hide all of that.
+    /// Such a table is one of no known identity, or only a variable's
+    /// stand-in for one (as a parameter holding an import has). The rest of
+    /// the value is kept, so more stored never leaves less, and walks settle.
+    /// None when nothing's left
+    fn stored_in(&self, at: TableId, value: Type) -> Option<Type> {
+        if !value.set.contains(TypeSet::TABLE) {
+            return Some(value)
+        }
+        let identities = value.named.identities();
+        let known: Vec<TableId> = identities.iter().copied().filter(|table| table.slot & PSEUDO == 0).collect();
+        if !known.is_empty() && known.len() == identities.len() {
+            return Some(value)
+        }
+        self.note(Read::Saved(at));
+        if !self.prior.is_some_and(|prior| prior.saved_tables.contains(&at)) {
+            return Some(value)
+        }
+        // Its tables made in the files, without the stand-ins
+        let tables = known.into_iter().map(Type::table).reduce(Type::union);
+        let rest = value.without(TypeSet::TABLE);
+        match (rest.set != TypeSet::NEVER, tables) {
+            (true, Some(tables)) => Some(rest | tables),
+            (true, None) => Some(rest),
+            (false, tables) => tables,
         }
     }
 
@@ -8499,8 +8594,8 @@ mod tests {
         assert!(programs.len() > 10);
         let mut replays = 0;
         for (name, files) in &programs {
-            let replaying = Analysis::analyse_replaying(files, &library(), Arc::default(), true);
-            let walking = Analysis::analyse_replaying(files, &library(), Arc::default(), false);
+            let replaying = Analysis::analyse_replaying(files, &library(), Arc::default(), &[], true);
+            let walking = Analysis::analyse_replaying(files, &library(), Arc::default(), &[], false);
             replays += replaying.replayed;
             assert_eq!(walking.replayed, 0);
             assert_eq!(everything_shown(&replaying), everything_shown(&walking), "{name}");
@@ -9405,6 +9500,51 @@ mod tests {
         assert_eq!(widget_types_of("local t = c and { n = 1 } or nil local s = CopyTableSafe(t)", "s"), ["table?"]);
         // Not a table made in the files: as the definitions say
         assert_eq!(widget_types_of("local c = CopyTable(unknown)", "c"), ["table"]);
+        // Any of several tables: what any of them holds
+        assert_eq!(widget_types_of("local t = x and { n = 1 } or { s = 'a' } local c = CopyTable(t) local n, s = c.n, c.s", "n"), ["number"]);
+        assert_eq!(widget_types_of("local t = x and { n = 1 } or { s = 'a' } local c = CopyTable(t) local s = c.s", "s"), ["string"]);
+    }
+
+    /// Types at each use of `name` in `source`, with `saved` the globals the
+    /// game saves between sessions
+    fn saved_types_of(source: &str, saved: &[&str], name: &str) -> Vec<String> {
+        let root = SyntaxNode::new_root(Generator::new(source).process_all());
+        let saved: Vec<String> = saved.iter().map(|s| s.to_string()).collect();
+        let files = [SourceFile { root, addon: None, handler: None }];
+        describe_uses(&Analysis::analyse_over(&files, &library(), Arc::default(), &saved), name)
+    }
+
+    #[test]
+    fn saved_variables_hold_what_the_addon_writes() {
+        // A profile filled with defaults, which an imported table of any shape
+        // may replace
+        let source = "local Defaults = { a = 1, b = 'x' }
+            function Init()
+              if SV == nil then SV = { Profiles = { DEFAULT = {} } } end
+              local profile = SV.Profiles[Current] or SV.Profiles.DEFAULT
+              for k, v in pairs(Defaults) do
+                if profile[k] == nil then profile[k] = v end
+              end
+              Profile = profile
+            end
+            function Import(data, name) if type(data) == 'table' then SV.Profiles[name] = data end end
+            function Get(name) return Profile[name] end
+            local got = Get('a')";
+        assert_eq!(saved_types_of(source, &["SV"], "got"), ["number|string|nil"]);
+        // Not saved: the import may hold anything, so what's read from it may be
+        assert_eq!(saved_types_of(source, &[], "got"), ["unknown"]);
+        // Of a value that may also be such a table, the rest is kept
+        let source = "SV = { list = {} }
+            function Add(t) if type(t) == 'table' then SV.list[#SV.list + 1] = x and t or 1 end end
+            local got = SV.list[1]";
+        assert_eq!(saved_types_of(source, &["SV"], "got"), ["number?"]);
+        assert_eq!(saved_types_of(source, &[], "got"), ["number|table|nil"]);
+        // A copy of a saved table into itself doesn't keep what was left out
+        let source = "SV = { p = { a = 1 } }
+            function Copy() SV.p = CopyTable(SV.p) end
+            function Import(data, k) if type(data) == 'table' then SV.p[k] = data end end
+            local got = SV.p['a']";
+        assert_eq!(saved_types_of(source, &["SV"], "got"), ["number"]);
     }
 
     #[test]
