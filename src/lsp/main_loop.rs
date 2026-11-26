@@ -16,6 +16,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use crate::syntax::{
     syntax, SyntaxNode, SyntaxKind
 };
@@ -118,6 +119,98 @@ struct Workspace {
     previous: HashMap<PathBuf, Previous>,
     /// XML files with errors published, which need clearing once fixed
     xml_published: Vec<PathBuf>,
+    /// Where addon analyses for diagnostics are sent to be made on the
+    /// worker thread, so requests are answered meanwhile
+    jobs: Option<Sender<Job>>,
+    /// The analysis the worker is making, if any. One at a time
+    in_flight: Option<InFlight>,
+    /// Counts changes to documents, so what an analysis begun before one
+    /// read can be told from what's there now
+    generation: u64,
+    /// The generation each file last changed at
+    changed_at: HashMap<PathBuf, u64>,
+    /// The generation addons or definitions were last found again at, which
+    /// puts every analysis begun before out of date
+    reset_at: u64,
+}
+
+/// An addon's analysis, to be made on the worker thread from what the
+/// workspace was when it was asked for
+struct Job {
+    addon: Addon,
+    known: Vec<Addon>,
+    open: HashMap<PathBuf, String>,
+    definitions: Arc<Definitions>,
+    /// The analyses already made, which it adds to
+    cache: HashMap<PathBuf, Arc<project::Analysed>>,
+    generation: u64,
+}
+
+/// What the worker made of a `Job`
+struct Done {
+    toc: PathBuf,
+    open: HashMap<PathBuf, String>,
+    cache: HashMap<PathBuf, Arc<project::Analysed>>,
+    generation: u64,
+}
+
+/// The job the worker is on, and the file whose diagnostics asked for it
+struct InFlight {
+    path: PathBuf,
+    toc: PathBuf,
+    generation: u64,
+}
+
+/// Makes each job's analysis, until the main loop is gone
+fn worker(jobs: Receiver<Job>, events: Sender<Event>) {
+    for mut job in jobs {
+        project::analyse_addon(&job.addon, &job.known, &job.open, &job.definitions, &mut job.cache);
+        let done = Done { toc: job.addon.toc, open: job.open, cache: job.cache, generation: job.generation };
+        if events.send(Event::Analysed(done)).is_err() {
+            break
+        }
+    }
+}
+
+/// What the main loop is told of: a message from the editor, or that the
+/// worker has finished an analysis
+enum Event {
+    Message(Message),
+    Analysed(Done),
+}
+
+/// The events arriving, with those taken early to see what's waiting
+struct Queue {
+    inbox: Receiver<Event>,
+    /// Messages taken to see what's waiting, in order
+    pending: VecDeque<Message>,
+    /// The worker's analysis, taken while seeing what's waiting
+    finished: Option<Done>,
+}
+
+impl Queue {
+    /// Takes everything waiting, without waiting for more
+    fn drain(&mut self) {
+        while let Ok(event) = self.inbox.try_recv() {
+            self.hold(event);
+        }
+    }
+
+    fn hold(&mut self, event: Event) {
+        match event {
+            Event::Message(msg) => self.pending.push_back(msg),
+            Event::Analysed(done) => self.finished = Some(done),
+        }
+    }
+
+    /// Waits for the worker's analysis, holding the messages that come first
+    fn wait_for_analysis(&mut self) -> Option<Done> {
+        while self.finished.is_none() {
+            let event = self.inbox.recv().ok()?;
+            self.hold(event);
+        }
+        self.finished.take()
+    }
 }
 
 /// An analysis covering an open document, and the document's text it was made from
@@ -125,6 +218,8 @@ struct Previous {
     analysed: Analysed,
     file: FileId,
     text: String,
+    /// The generation of the text
+    generation: u64,
 }
 
 impl Workspace {
@@ -253,6 +348,8 @@ impl Workspace {
             self.addons = None;
             self.analyses.clear();
             self.definitions = None;
+            self.generation += 1;
+            self.reset_at = self.generation;
         }
         let path = project::normalise(&path);
         // Opening a file as it is on disk changes nothing analysed
@@ -261,6 +358,8 @@ impl Workspace {
             self.open.insert(path, text);
             return Vec::new()
         }
+        self.generation += 1;
+        self.changed_at.insert(path.clone(), self.generation);
         // Templates and frames are in every addon's namespace, so every open
         // document is analysed again over its new definitions
         if project::is_xml(&path) {
@@ -268,6 +367,7 @@ impl Workspace {
             self.addons = None;
             self.definitions = None;
             self.analyses.clear();
+            self.reset_at = self.generation;
             self.open.insert(path.clone(), text);
             return self.open.keys().filter(|p| **p != path && !project::is_xml(p)).cloned().collect()
         }
@@ -300,30 +400,103 @@ impl Workspace {
             if let Some(addon) = project::addon_for(self.addons(), &path).cloned() {
                 let known = self.addons.as_deref().unwrap_or_default();
                 let analysed = project::analyse_addon(&addon, known, &self.open, definitions, &mut self.analyses);
-                self.keep(&analysed);
+                self.keep(&analysed, None, self.generation);
                 if let Some(index) = analysed.paths.iter().position(|p| *p == path) {
                     return (Analysed::Addon(analysed), FileId(index as u32))
                 }
             }
             let analysis = Analysed::File(Arc::new(Analysis::analyse_file(root, definitions)));
             if self.open.contains_key(&path) {
-                self.previous.insert(path, Previous { analysed: analysis.clone(), file: FileId(0), text: root.text().to_string() });
+                self.previous.insert(path, Previous { analysed: analysis.clone(), file: FileId(0), text: root.text().to_string(), generation: self.generation });
             }
             return (analysis, FileId(0))
         }
         (Analysed::File(Arc::new(Analysis::analyse_file(root, definitions))), FileId(0))
     }
 
-    /// Keeps `analysed` as the latest analysis of each of its open documents
-    fn keep(&mut self, analysed: &Arc<project::Analysed>) {
+    /// Keeps `analysed` as the latest analysis of each of its open documents,
+    /// made from `texts` (the open documents now, if not given) as they were
+    /// at `generation`. Not over one made from later texts
+    fn keep(&mut self, analysed: &Arc<project::Analysed>, texts: Option<&HashMap<PathBuf, String>>, generation: u64) {
         for (index, path) in analysed.paths.iter().enumerate() {
-            let Some(text) = self.open.get(path) else { continue };
-            let kept = self.previous.get(path).is_some_and(|p| matches!(&p.analysed, Analysed::Addon(a) if Arc::ptr_eq(a, analysed)));
+            if !self.open.contains_key(path) {
+                continue
+            }
+            let Some(text) = texts.unwrap_or(&self.open).get(path) else { continue };
+            let kept = self.previous.get(path).is_some_and(|p| p.generation > generation
+                || matches!(&p.analysed, Analysed::Addon(a) if Arc::ptr_eq(a, analysed)));
             if !kept {
-                let previous = Previous { analysed: Analysed::Addon(analysed.clone()), file: FileId(index as u32), text: text.clone() };
+                let previous = Previous { analysed: Analysed::Addon(analysed.clone()), file: FileId(index as u32), text: text.clone(), generation };
                 self.previous.insert(path.clone(), previous);
             }
         }
+    }
+
+    /// Starts analysing `path`'s addon on the worker, if it's in one whose
+    /// analysis isn't made. Returns whether it did
+    fn start(&mut self, path: &Path, base: &Arc<Definitions>) -> bool {
+        let path = project::normalise(path);
+        if self.in_flight.is_some() || self.jobs.is_none() || project::is_xml(&path) {
+            return false
+        }
+        let definitions = self.definitions(base);
+        let Some(addon) = project::addon_for(self.addons(), &path).cloned() else { return false };
+        if self.analyses.contains_key(&addon.toc) {
+            return false
+        }
+        let job = Job {
+            known: self.addons.clone().unwrap_or_default(),
+            open: self.open.clone(),
+            definitions,
+            cache: self.analyses.clone(),
+            generation: self.generation,
+            addon,
+        };
+        self.in_flight = Some(InFlight { path, toc: job.addon.toc.clone(), generation: job.generation });
+        if self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_err()) {
+            // No worker, so analysed here when asked for
+            self.jobs = None;
+            self.in_flight = None;
+            return false
+        }
+        true
+    }
+
+    /// Whether the worker is making the analysis `path` needs, from texts
+    /// that are still the latest, so it's quicker to wait than make another
+    fn analysing(&mut self, path: Option<&Path>) -> bool {
+        let Some(in_flight) = &self.in_flight else { return false };
+        if in_flight.generation != self.generation {
+            return false
+        }
+        let toc = in_flight.toc.clone();
+        path.map(project::normalise)
+            .and_then(|path| project::addon_for(self.addons(), &path).map(|addon| addon.toc == toc))
+            .unwrap_or(false)
+    }
+
+    /// Takes what the worker made: the analyses nothing has changed under
+    /// into the cache, and each as the latest of its open documents. Then
+    /// publishes the diagnostics it was for. Returns the files published
+    /// for, or the file to owe diagnostics again if what it was made from
+    /// has changed since
+    fn finish(&mut self, done: Done, connection: &Connection, base: &Arc<Definitions>) -> Result<Vec<PathBuf>, PathBuf> {
+        let Some(in_flight) = self.in_flight.take() else { return Ok(Vec::new()) };
+        for (toc, analysed) in &done.cache {
+            let current = done.generation >= self.reset_at
+                && analysed.involves.iter().all(|p| self.changed_at.get(p).is_none_or(|&at| at <= done.generation));
+            if current && !self.analyses.contains_key(toc) {
+                self.analyses.insert(toc.clone(), analysed.clone());
+            }
+        }
+        if let Some(analysed) = done.cache.get(&done.toc) {
+            self.keep(analysed, Some(&done.open), done.generation);
+        }
+        if !self.analyses.contains_key(&done.toc) {
+            return Err(in_flight.path)
+        }
+        // Made already, so quick
+        Ok(self.publish_diagnostics(connection, &in_flight.path, base))
     }
 
     /// The analysis covering `path` if there's one up to date, without
@@ -331,7 +504,7 @@ impl Workspace {
     fn analysed_now(&mut self, path: &Path) -> Option<(Analysed, FileId)> {
         let toc = project::addon_for(self.addons(), path)?.toc.clone();
         let analysed = self.analyses.get(&toc)?.clone();
-        self.keep(&analysed);
+        self.keep(&analysed, None, self.generation);
         let index = analysed.paths.iter().position(|p| p == path)?;
         Some((Analysed::Addon(analysed), FileId(index as u32)))
     }
@@ -365,54 +538,78 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
     let mut loaded_definitions: Option<Arc<Definitions>> = None;
     let mut language: HashMap<String, String> = HashMap::new();
     let mut text: HashMap<String, String> = HashMap::new();
-    let mut workspace = Workspace { roots, ..Workspace::default() };
+    // The transport hands over one message at a time, and only when asked, so
+    // a thread asks for them as they come and queues them here. Otherwise
+    // keystrokes typed during an analysis would wait in the transport, out of
+    // sight, and each would be analysed in turn. The worker's analyses
+    // arrive here too
+    let (events, inbox) = std::sync::mpsc::channel::<Event>();
+    let transport = connection.receiver.clone();
+    let messages = events.clone();
+    std::thread::spawn(move || {
+        for msg in transport {
+            if messages.send(Event::Message(msg)).is_err() {
+                break
+            }
+        }
+    });
+    // Addons are analysed for diagnostics on a thread of their own, as that
+    // takes up to a second or so, and requests can be answered meanwhile
+    let (jobs, work) = std::sync::mpsc::channel::<Job>();
+    std::thread::spawn(move || worker(work, events));
+    let mut workspace = Workspace { roots, jobs: Some(jobs), ..Workspace::default() };
+    let mut queue = Queue { inbox, pending: VecDeque::new(), finished: None };
 
     // Files whose diagnostics are out of date. They're published once no
     // messages are waiting, so a burst of keystrokes is analysed once, for the
     // last of them, rather than once each
     let mut owed: Vec<PathBuf> = Vec::new();
-    // The transport hands over one message at a time, and only when asked, so
-    // a thread asks for them as they come and queues them here. Otherwise
-    // keystrokes typed during an analysis would wait in the transport, out of
-    // sight, and each would be analysed in turn
-    let (queue, inbox) = std::sync::mpsc::channel::<Message>();
-    let transport = connection.receiver.clone();
-    std::thread::spawn(move || {
-        for msg in transport {
-            if queue.send(msg).is_err() {
-                break
-            }
-        }
-    });
-    // Messages taken from the queue to see what's waiting, in order
-    let mut pending: VecDeque<Message> = VecDeque::new();
     let mut shutting_down = false;
     loop {
-        let msg = match pending.pop_front().map(Ok).unwrap_or_else(|| inbox.try_recv()) {
-            Ok(msg) => msg,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                if !owed.is_empty() {
+        if let Some(done) = queue.finished.take() {
+            let definitions = loaded_definitions.get_or_insert_with(load_definitions).clone();
+            owe(&mut owed, workspace.finish(done, &connection, &definitions));
+            continue
+        }
+        let event = match queue.pending.pop_front().map(|msg| Ok(Event::Message(msg))).unwrap_or_else(|| queue.inbox.try_recv()) {
+            Ok(event) => event,
+            Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {
+                if !owed.is_empty() && workspace.in_flight.is_none() {
                     let definitions = loaded_definitions
                         .get_or_insert_with(load_definitions)
                         .clone();
                     while let Some(path) = owed.first().cloned() {
                         owed.remove(0);
+                        // An addon not analysed yet is analysed on the worker,
+                        // and published when it's done
+                        if workspace.start(&path, &definitions) {
+                            break
+                        }
+                        // Others are quick: analysed already, XML, or a file
+                        // on its own
                         let published = workspace.publish_diagnostics(&connection, &path, &definitions);
                         // Each addon's published once, whichever of its files asked
                         owed.retain(|owed| !published.contains(owed));
                         // Something arrived meanwhile: handle it before the rest
-                        if let Ok(msg) = inbox.try_recv() {
-                            pending.push_back(msg);
+                        if let Ok(event) = queue.inbox.try_recv() {
+                            queue.hold(event);
                             break
                         }
                     }
                     continue
                 }
-                match inbox.recv() {
-                    Ok(msg) => msg,
+                match queue.inbox.recv() {
+                    Ok(event) => event,
                     Err(_) => break,
                 }
+            }
+        };
+        let msg = match event {
+            Event::Message(msg) => msg,
+            Event::Analysed(done) => {
+                queue.finished = Some(done);
+                continue
             }
         };
         //eprintln!("got msg: {msg:?}");
@@ -427,8 +624,8 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                 }
                 // Not answered if the editor no longer wants it, as the
                 // analysis answering needs can take a second or so
-                pending.extend(inbox.try_iter());
-                if let Some(code) = superseded(&req, &pending) {
+                queue.drain();
+                if let Some(code) = superseded(&req, &queue.pending) {
                     let resp = Response::new_err(req.id.clone(), code as i32, String::from("superseded"));
                     connection.sender.send(Message::Response(resp))?;
                     continue;
@@ -473,6 +670,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                                 .clone();
                             let uri = params.text_document_position_params.text_document.uri.to_string();
                             let path = project::uri_to_path(&uri);
+                            await_analysis(&mut workspace, &mut queue, &mut owed, &connection, &definitions, path.as_deref());
                             let (analysis, file) = workspace.analysis(path.as_deref(), &all, &definitions);
                             let analysis = analysis.analysis();
                             let (output, text_range) = match analysis.hover(file, offset) {
@@ -506,7 +704,10 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                                     let definitions = loaded_definitions
                                         .get_or_insert_with(load_definitions)
                                         .clone();
-                                    Some(complete(&mut workspace, &uri, s, position, &definitions))
+                                    let mut wait = |workspace: &mut Workspace, path: Option<&Path>| {
+                                        await_analysis(workspace, &mut queue, &mut owed, &connection, &definitions, path)
+                                    };
+                                    Some(complete(&mut workspace, &uri, s, position, &definitions, &mut wait))
                                 }
                                 None => None,
                             };
@@ -523,6 +724,8 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                                     let definitions = loaded_definitions
                                         .get_or_insert_with(load_definitions)
                                         .clone();
+                                    let path = project::uri_to_path(uri.as_str());
+                                    await_analysis(&mut workspace, &mut queue, &mut owed, &connection, &definitions, path.as_deref());
                                     go_to_definition(&mut workspace, &uri, s, position, &definitions)
                                 }
                                 None => None,
@@ -619,6 +822,17 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
     Ok(())
 }
 
+/// Owes diagnostics for what `finish` says: the files published for are owed
+/// no more, and a file whose analysis came out of date is owed again
+fn owe(owed: &mut Vec<PathBuf>, finished: Result<Vec<PathBuf>, PathBuf>) {
+    match finished {
+        Ok(published) => owed.retain(|owed| !published.contains(owed)),
+        Err(path) => if !owed.contains(&path) {
+            owed.insert(0, path)
+        },
+    }
+}
+
 /// Why `req` needn't be answered, given the messages after it: the editor
 /// cancelled it, or for a completion, the document has changed again. Each
 /// keystroke asks for completions anew
@@ -633,8 +847,20 @@ fn superseded(req: &Request, pending: &VecDeque<Message>) -> Option<ErrorCode> {
     })
 }
 
-/// The completion list at `position` in the open document `uri`, whose text is `s`
-fn complete(workspace: &mut Workspace, uri: &str, s: &str, position: Position, definitions: &Arc<Definitions>) -> CompletionResponse {
+/// Waits for the worker if it's making the analysis `path` needs, and takes it
+fn await_analysis(workspace: &mut Workspace, queue: &mut Queue, owed: &mut Vec<PathBuf>, connection: &Connection, definitions: &Arc<Definitions>, path: Option<&Path>) {
+    if !workspace.analysing(path) {
+        return
+    }
+    if let Some(done) = queue.wait_for_analysis() {
+        owe(owed, workspace.finish(done, connection, definitions));
+    }
+}
+
+/// The completion list at `position` in the open document `uri`, whose text
+/// is `s`. `wait` is called before analysing, to wait for the worker's
+/// analysis instead if it's making it
+fn complete(workspace: &mut Workspace, uri: &str, s: &str, position: Position, definitions: &Arc<Definitions>, wait: &mut dyn FnMut(&mut Workspace, Option<&Path>)) -> CompletionResponse {
     let offset = position::offset_of(s, position);
     let root = SyntaxNode::new_root(syntax::Generator::new(s).process_all());
     let path = project::uri_to_path(uri).map(|p| project::normalise(&p));
@@ -654,6 +880,7 @@ fn complete(workspace: &mut Workspace, uri: &str, s: &str, position: Position, d
     let (analysed, completions) = match answered {
         Some(answered) => answered,
         None => {
+            wait(workspace, path.as_deref());
             let (analysed, file) = workspace.analysis(path.as_deref(), &root, definitions);
             let completions = completion::complete(analysed.analysis(), file, &root, s, offset, &completion::Edit::none());
             (analysed, completions)

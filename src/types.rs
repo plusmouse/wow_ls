@@ -1052,7 +1052,7 @@ impl fmt::Display for BindingKind {
 #[derive(Debug, Clone)]
 pub struct Binding {
     /// Shared, as replaying a body copies its bindings
-    pub name: std::rc::Rc<str>,
+    pub name: Arc<str>,
     pub kind: BindingKind,
     /// None for globals, which have no single declaration
     pub declaration: Option<TextRange>,
@@ -1143,8 +1143,9 @@ impl FieldReference {
 
     /// How the field was reached, without whitespace or comments, like
     /// `addonTable.hiddenTable` or `addonTable["hiddenTable"]`
-    fn path(&self, roots: &[SyntaxNode]) -> String {
-        let Some(access) = roots.get(self.file.0 as usize).and_then(|root| self.access.try_to_node(root)) else {
+    /// `root` is its file's tree
+    fn path(&self, root: Option<&SyntaxNode>) -> String {
+        let Some(access) = root.and_then(|root| self.access.try_to_node(root)) else {
             return String::new()
         };
         let end = self.range.end();
@@ -1738,8 +1739,9 @@ pub struct Analysis {
     pub vararg_values: HashMap<FunctionId, Values>,
     /// How many walks it took to settle
     pub walks: usize,
-    /// Each file's tree, for what field references point to
-    roots: Vec<SyntaxNode>,
+    /// Each file's tree, for what field references point to. The green tree,
+    /// which can go to another thread, unlike a `SyntaxNode`
+    roots: Vec<rowan::GreenNode>,
     /// What the addons this one depends on make visible to it
     pub layer: Arc<Layer>,
     /// References that read an upvalue, given the binding's final type by
@@ -1906,8 +1908,9 @@ impl Analysis {
         let variables = self.references.iter()
             .filter(|r| r.write && is_table(r.types) && self.bindings[r.binding].kind != BindingKind::Parameter)
             .map(|r| (r.file, r.range.start(), r.types, self.bindings[r.binding].name.to_string()));
+        let roots = self.syntax_roots();
         let fields = self.field_references.iter().filter(|f| f.write && is_table(f.types))
-            .map(|f| (f.file, f.range.start(), f.types, f.path(&self.roots)));
+            .map(|f| (f.file, f.range.start(), f.types, f.path(roots.get(f.file.0 as usize))));
         let mut named: Vec<_> = variables.chain(fields).collect();
         named.sort_by_key(|&(file, start, ..)| (file, start));
         for (_, _, types, name) in named {
@@ -2555,7 +2558,13 @@ impl Analysis {
     /// How a field was reached, without whitespace or comments, like
     /// `addonTable.hiddenTable`
     pub fn field_path(&self, field: &FieldReference) -> String {
-        field.path(&self.roots)
+        let root = self.roots.get(field.file.0 as usize).map(|green| SyntaxNode::new_root(green.clone()));
+        field.path(root.as_ref())
+    }
+
+    /// Each file's tree, to find nodes in
+    fn syntax_roots(&self) -> Vec<SyntaxNode> {
+        self.roots.iter().map(|green| SyntaxNode::new_root(green.clone())).collect()
     }
 
     /// What each file assigns that other files can see: globals, and fields
@@ -3139,7 +3148,7 @@ impl<'a> Walker<'a> {
             metatables: self.metatables,
             vararg_values: self.vararg_values,
             walks: 1,
-            roots: self.roots,
+            roots: self.roots.iter().map(|root| root.green().into_owned()).collect(),
             layer: self.layer,
             // Found once the walk is done
             saved_tables: HashSet::default(),
