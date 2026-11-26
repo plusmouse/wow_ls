@@ -2221,7 +2221,7 @@
     "AuctionHouseCategoriesListMixin": {"functions": {
         "GetAuctionHouseFrame": {"returns":["ScriptObject"]},
         "GetCategoryData": {"returns":["table|nil"]},
-        "GetCategoryFilterData": {"returns":["nil","unknown"]},
+        "GetCategoryFilterData": {"returns":["table|nil","unknown"]},
         "GetSelectedCategory": {"returned_fields":[{"field":"selectedCategoryIndex","on":"self"},{"field":"selectedSubCategoryIndex","on":"self"},{"field":"selectedSubSubCategoryIndex","on":"self"}],"returns":["unknown","unknown","unknown"]},
         "IsWoWTokenCategorySelected": {"returns":["boolean|nil"]},
         "OnFilterClicked": {"method_calls":[{"arguments":["unknown","unknown","unknown"],"method":"SetSelectedCategory","on":["self"]}],"parameters":["button","buttonName"]},
@@ -3923,19 +3923,22 @@
         "revealSwirlPool": "unknown"
     }},
     "AzeriteIslandsToastMixin": {"functions": {
-        "AcquireToastFrame": {"parameters":["isPlayer"]},
+        "AcquireToastFrame": {"parameters":["isPlayer"],"rest":"unknown"},
         "AreAnyAnimationsActive": {"returns":["boolean"]},
         "CreateAccumulator": {"field_writes":[{"field":"accumulationDeferralTimeSec","on":{"returned":0},"value":["number"]}],"fresh_returns":[{"mixins":["AzeriteIslandsToastAccumulatorMixin"]}],"returns":["table"]},
-        "GetAccumulator": {"method_calls":[{"arguments":[],"method":"CreateAccumulator","on":["self"]}],"parameters":["isPlayer"],"returns":["nil"]},
-        "GetToastPool": {"parameters":["isPlayer"],"returns":["nil"]},
+        "GetAccumulator": {"method_calls":[{"arguments":[],"method":"CreateAccumulator","on":["self"]}],"parameters":["isPlayer"],"returns":["table"]},
+        "GetToastPool": {"parameters":["isPlayer"],"returns":["unknown"]},
         "OnAnimationFinished": {"parameters":["toastFrame"]},
         "OnEvent": {"method_calls":[{"arguments":["unknown"],"method":"GetAccumulator","on":["self"]}],"parameters":["event","..."]},
         "OnLoad": {},
-        "OnUpdate": {"method_calls":[{"arguments":["true","nil"],"method":"ShowToast","on":["self"]},{"arguments":["false","nil"],"method":"ShowToast","on":["self"]}],"parameters":["elapsed"]},
-        "ReleaseToastFrame": {"parameters":["isPlayer","toastFrame"]},
-        "SetupTextFrame": {"parameters":["frame","amount"]},
+        "OnUpdate": {"method_calls":[{"arguments":["true","number"],"method":"ShowToast","on":["self"]},{"arguments":["false","number"],"method":"ShowToast","on":["self"]}],"parameters":["elapsed"]},
+        "ReleaseToastFrame": {"parameters":["isPlayer","toastFrame"],"rest":"unknown"},
+        "SetupTextFrame": {"method_calls":[{"arguments":[],"method":"Show","on":[0]}],"parameters":["frame","amount"]},
         "ShowToast": {"parameters":["isPlayer","amount"]},
         "ShowWidgetGlow": {"parameters":["isHorde"]}
+    }, "values": {
+        "partyToastPool": "unknown",
+        "playerToastPool": "unknown"
     }},
     "AzeriteItemLevelUpToastMixin": {"functions": {
         "OnAnimFinished": {},
@@ -5751,11 +5754,11 @@
     }},
     "CallbackRegistrantMixin": {"functions": {
         "AddDynamicEventMethod": {"parameters":["callbackRegistry","event","handlerMethod"]},
-        "AddEventMethodInternal": {"fresh_returns":[{"values":{"callbackRegistry":"unknown","event":"unknown","handlerMethod":"unknown","registered":"false"}}],"parameters":["handlersTable","callbackRegistry","event","handlerMethod"],"returns":["table"]},
+        "AddEventMethodInternal": {"fresh_returns":[{"values":{"callbackRegistry":"unknown","event":"unknown","handlerMethod":"unknown","registered":"boolean"}}],"parameters":["handlersTable","callbackRegistry","event","handlerMethod"],"returns":["table"]},
         "AddStaticEventMethod": {"parameters":["callbackRegistry","event","handlerMethod"]},
         "CreateEventRegistrationInfo": {"fresh_returns":[{"values":{"callbackRegistry":"unknown","event":"unknown","handlerMethod":"unknown","registered":"false"}}],"parameters":["callbackRegistry","event","handlerMethod"],"returns":["table"]},
-        "GetDynamicCallbackRegistrantHandlers": {"returned_fields":[{"field":"callbackRegistrantHandlers","on":"self"}],"returns":["nil"]},
-        "GetStaticCallbackRegistrantHandlers": {"returned_fields":[{"field":"staticCallbackRegistrantHandlers","on":"self"}],"returns":["nil"]},
+        "GetDynamicCallbackRegistrantHandlers": {"returned_fields":[{"field":"callbackRegistrantHandlers","on":"self"}],"returns":["table"]},
+        "GetStaticCallbackRegistrantHandlers": {"returned_fields":[{"field":"staticCallbackRegistrantHandlers","on":"self"}],"returns":["table"]},
         "OnHide": {},
         "OnShow": {},
         "RegisterFromRegistrationInfo": {"parameters":["eventRegistrationInfo"]},
@@ -22020,7 +22023,8 @@
         "OnEvent": {"method_calls":[{"arguments":[],"method":"Init","on":["self"]}],"parameters":["event","..."]},
         "OnLoad": {},
         "SetModelScene": {"parameters":["sceneID","partyCategory","forceUpdate"]},
-        "SetupPartyMemberFrame": {"method_calls":[{"arguments":["nil"],"method":"SetOnSizeChangedCallback","on":[0]}],"parameters":["actor"]}
+        "SetupPartyMemberFrame": {"method_calls":[{"arguments":["function"],"method":"SetOnSizeChangedCallback","on":[0]}],"parameters":["actor"]},
+        "onActorSizeChangedCallback": {"method_calls":[{"arguments":[],"method":"GetActiveBoundingBox","on":[0]},{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]}
     }, "values": {
         "partyMemberFramePool": "unknown"
     }},
@@ -27881,9 +27885,10 @@
         "ResumeRewardAnimation": {},
         "SetLeaveButtonText": {},
         "SetModelScene": {"parameters":["sceneID","partyCategory","forceUpdate"]},
-        "SetupShadow": {"method_calls":[{"arguments":["nil"],"method":"SetOnSizeChangedCallback","on":[0]},{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]},
+        "SetupShadow": {"method_calls":[{"arguments":["function"],"method":"SetOnSizeChangedCallback","on":[0]},{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]},
         "SetupTheme": {},
-        "UpdateShadow": {"method_calls":[{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]}
+        "UpdateShadow": {"method_calls":[{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]},
+        "onActorSizeChangedCallback": {"method_calls":[{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]}
     }},
     "MatchDetailFrameMixin": {"functions": {
         "Init": {"parameters":["type","description","value","iconAtlas"]}
@@ -33310,7 +33315,7 @@
     }},
     "PrivateRaidBossEmoteFrameMixin": {"functions": {
         "AcquireOrEvictSlot": {"method_calls":[{"arguments":[],"method":"AcquireString","on":["self"]}],"parameters":["messageType"],"returns":["unknown"]},
-        "AcquireString": {"field_writes":[{"field":"fadeInTime","on":{"returned":0},"value":["number"]},{"field":"holdTime","on":{"returned":0},"value":["number"]},{"field":"fadeOutTime","on":{"returned":0},"value":["number"]},{"field":"textScalingMinHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingMaxHeight","on":{"returned":0},"value":["unknown"]},{"field":"textScalingUpTime","on":{"returned":0},"value":["number"]},{"field":"textScalingDownTime","on":{"returned":0},"value":["number"]}],"returns":["unknown"]},
+        "AcquireString": {"field_writes":[{"field":"fadeInTime","on":{"returned":0},"value":["number"]},{"field":"holdTime","on":{"returned":0},"value":["number"]},{"field":"fadeOutTime","on":{"returned":0},"value":["number"]},{"field":"textScalingMinHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingMaxHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingUpTime","on":{"returned":0},"value":["number"]},{"field":"textScalingDownTime","on":{"returned":0},"value":["number"]}],"returns":["unknown"]},
         "AddMessage": {"method_calls":[{"arguments":["unknown"],"method":"AcquireOrEvictSlot","on":["self"]},{"arguments":[],"method":"UpdateLayout","on":["self"]}],"parameters":["textString","colorInfo","displayTime","messageType"]},
         "ClearMessages": {"method_calls":[{"arguments":["true"],"method":"UpdateShownState","on":["self"]},{"arguments":[],"method":"UpdateLayout","on":["self"]}],"parameters":["messageType"]},
         "EnforceLineLimits": {"method_calls":[{"arguments":[],"method":"GetNumLines","on":[0]},{"arguments":["number"],"method":"SetMaxLines","on":[0]}],"parameters":["newestFontString"]},
@@ -34788,7 +34793,7 @@
         "CallAccessor": {"parameters":["..."],"rest":"unknown"},
         "CallMutator": {"parameters":["..."],"rest":"unknown"},
         "CallVisibilityQuery": {"rest":"unknown","returns":["unknown"]},
-        "GetStateTooltipString": {"parameters":["stateValue"],"returns":["nil"]},
+        "GetStateTooltipString": {"parameters":["stateValue"],"returns":["unknown"]},
         "GetTooltipFunction": {"returned_fields":[{"field":"tooltipFunction","on":"self"}],"returns":["unknown"]},
         "OnEnter": {"method_calls":[{"arguments":["unknown"],"method":"SetTooltip","on":["self"]}]},
         "OnEvent": {"parameters":["event","..."]},
@@ -36061,7 +36066,7 @@
     }},
     "RaidWarningFrameMixin": {"functions": {
         "AcquireOrEvictSlot": {"method_calls":[{"arguments":[],"method":"AcquireString","on":["self"]}],"parameters":["messageType"],"returns":["unknown"]},
-        "AcquireString": {"field_writes":[{"field":"fadeInTime","on":{"returned":0},"value":["number"]},{"field":"holdTime","on":{"returned":0},"value":["number"]},{"field":"fadeOutTime","on":{"returned":0},"value":["number"]},{"field":"textScalingMinHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingMaxHeight","on":{"returned":0},"value":["unknown"]},{"field":"textScalingUpTime","on":{"returned":0},"value":["number"]},{"field":"textScalingDownTime","on":{"returned":0},"value":["number"]}],"returns":["unknown"]},
+        "AcquireString": {"field_writes":[{"field":"fadeInTime","on":{"returned":0},"value":["number"]},{"field":"holdTime","on":{"returned":0},"value":["number"]},{"field":"fadeOutTime","on":{"returned":0},"value":["number"]},{"field":"textScalingMinHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingMaxHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingUpTime","on":{"returned":0},"value":["number"]},{"field":"textScalingDownTime","on":{"returned":0},"value":["number"]}],"returns":["unknown"]},
         "AddMessage": {"method_calls":[{"arguments":["unknown"],"method":"AcquireOrEvictSlot","on":["self"]},{"arguments":[],"method":"UpdateLayout","on":["self"]}],"parameters":["textString","colorInfo","displayTime","messageType"]},
         "ClearMessages": {"method_calls":[{"arguments":["true"],"method":"UpdateShownState","on":["self"]},{"arguments":[],"method":"UpdateLayout","on":["self"]}],"parameters":["messageType"]},
         "EnforceLineLimits": {"method_calls":[{"arguments":[],"method":"GetNumLines","on":[0]},{"arguments":["number"],"method":"SetMaxLines","on":[0]}],"parameters":["newestFontString"]},
@@ -47310,7 +47315,7 @@
         "OnVoiceChannelMemberSpeakingStateChanged": {"method_calls":[{"arguments":[0,1],"method":"ShowNotifications","on":["self"]}],"parameters":["memberID","channelID","isSpeaking"]},
         "OnVoiceChatChannelMemberEnergyChanged": {"parameters":["memberID","channelID","speakingEnergy"]},
         "OnVoiceChatChannelTransmitChanged": {"method_calls":[{"arguments":["number",0],"method":"ShowNotifications","on":["self"]}],"parameters":["channelID","isTransmitting"]},
-        "OnVoiceChatCommunicationModeChanged": {"method_calls":[{"arguments":["nil","nil"],"method":"ShowNotifications","on":["self"]}],"parameters":["communicationMode"]},
+        "OnVoiceChatCommunicationModeChanged": {"method_calls":[{"arguments":["unknown","unknown"],"method":"ShowNotifications","on":["self"]}],"parameters":["communicationMode"]},
         "RegisterExternalNotificationTemplate": {"parameters":["notificationTemplate","frameType"],"returns":["boolean"]},
         "RegisterFrameForVoiceActivityNotifications": {"method_calls":[{"arguments":["unknown","unknown",3,"unknown",0],"method":"CreateNotification","on":["self"]}],"parameters":["frame","guid","voiceChannelID","notificationTemplate","frameType","notificationCreatedCallback"]},
         "ReleaseNotification": {"parameters":["notification"]},
@@ -47409,7 +47414,7 @@
     "VoiceChatHeadsetButtonMixin": {"functions": {
         "ClearPendingState": {},
         "ClearVoiceChannel": {},
-        "GetChannelName": {"returns":["nil"]},
+        "GetChannelName": {"returns":["string"]},
         "GetChannelType": {"returned_fields":[{"field":"channelType","on":"self"}],"returns":["Enum.ChatChannelType"]},
         "GetClubErrorReason": {"returns":["Enum.VoiceChannelErrorReason|nil"]},
         "GetClubID": {"returned_fields":[{"field":"clubId","on":"self"}],"returns":["string"]},
@@ -57590,7 +57595,7 @@
     "CoinPickupFrame_OnHide": {},
     "CoinPickupFrame_OnKeyDown": {"parameters":["key"]},
     "CoinPickupFrame_OnKeyUp": {"parameters":["key"]},
-    "CollectTableDifferences": {"parameters":["actual","expected","path","differences","depth"],"returns":["nil"]},
+    "CollectTableDifferences": {"parameters":["actual","expected","path","differences","depth"],"returns":["table"]},
     "CollectionItemListButton_SetRedOverlayShown": {"parameters":["showRedOverlay"]},
     "CollectionsButton_OnEvent": {"method_calls":[{"arguments":["string"],"method":"GetScript","on":["self"]}],"parameters":["event","..."]},
     "CollectionsJournal_CheckAndDisplayTabs": {},
@@ -58205,7 +58210,7 @@
     "DevTools_CreateDumpContext": {"fresh_returns":[{"values":{"GetFunctionName":"function","GetTableName":"function","GetThreadName":"function","GetUserdataName":"function","Write":"function","depth":"number","key":"string|nil"}}],"parameters":["startKey"],"returns":["table"]},
     "DevTools_Dump": {"parameters":["value","startKey"]},
     "DevTools_DumpCommand": {"parameters":["msg","editBox"]},
-    "DevTools_RunDump": {"method_calls":[{"arguments":[0,"unknown"],"method":"GetTableName","on":[1]},{"arguments":["unknown"],"method":"GetFunctionName","on":[1]},{"arguments":["unknown"],"method":"GetUserdataName","on":[1]},{"arguments":["unknown"],"method":"GetThreadName","on":[1]},{"arguments":["unknown"],"method":"GetTableName","on":[1]},{"arguments":["string"],"method":"Write","on":[1]},{"arguments":["table","string"],"method":"GetUserdataName","on":[1]},{"arguments":["table","string"],"method":"GetFunctionName","on":[1]},{"arguments":["table","string"],"method":"GetThreadName","on":[1]},{"arguments":["table"],"method":"GetTableName","on":[1]},{"arguments":["table","nil"],"method":"GetTableName","on":[1]},{"arguments":["table","unknown"],"method":"GetTableName","on":[1]},{"arguments":[],"method":"Result","on":[1]},{"arguments":[0,"string"],"method":"GetUserdataName","on":[1]},{"arguments":[0,"string"],"method":"GetFunctionName","on":[1]},{"arguments":[0,"string"],"method":"GetThreadName","on":[1]},{"arguments":[0],"method":"GetTableName","on":[1]}],"parameters":["value","context"],"rest":"unknown"},
+    "DevTools_RunDump": {"method_calls":[{"arguments":[0,"unknown"],"method":"GetTableName","on":[1]},{"arguments":["unknown"],"method":"GetFunctionName","on":[1]},{"arguments":["unknown"],"method":"GetUserdataName","on":[1]},{"arguments":["unknown"],"method":"GetThreadName","on":[1]},{"arguments":["unknown"],"method":"GetTableName","on":[1]},{"arguments":["string"],"method":"Write","on":[1]},{"arguments":["table","string"],"method":"GetUserdataName","on":[1]},{"arguments":["table","string"],"method":"GetFunctionName","on":[1]},{"arguments":["table","string"],"method":"GetThreadName","on":[1]},{"arguments":["table"],"method":"GetTableName","on":[1]},{"arguments":["table","string"],"method":"GetTableName","on":[1]},{"arguments":["table","unknown"],"method":"GetTableName","on":[1]},{"arguments":[],"method":"Result","on":[1]},{"arguments":[0,"string"],"method":"GetUserdataName","on":[1]},{"arguments":[0,"string"],"method":"GetFunctionName","on":[1]},{"arguments":[0,"string"],"method":"GetThreadName","on":[1]},{"arguments":[0],"method":"GetTableName","on":[1]}],"parameters":["value","context"],"rest":"unknown"},
     "DeveloperConsole_GetLastCommand": {"returns":["unknown"]},
     "DeveloperConsole_RepeatLastCommand": {},
     "DigsiteCompleteToastFrame_SetUp": {"parameters":["frame","raceName","raceTexture"]},
@@ -58255,7 +58260,7 @@
     "DumpGamepadBindingsToWindow": {},
     "DungeonCompletionAlertFrameReward_OnEnter": {"method_calls":[{"arguments":[],"method":"GetParent","on":["self"]}]},
     "DungeonCompletionAlertFrameReward_OnLeave": {"method_calls":[{"arguments":[],"method":"GetParent","on":[0]}],"parameters":["frame"]},
-    "DungeonCompletionAlertFrameReward_SetReward": {"field_writes":[{"field":"rewardID","on":0,"value":["unknown"]},{"field":"reward","on":0,"value":[1]}],"parameters":["frame","reward"]},
+    "DungeonCompletionAlertFrameReward_SetReward": {"field_writes":[{"field":"rewardID","on":0,"value":["number|nil"]},{"field":"reward","on":0,"value":[1]}],"parameters":["frame","reward"]},
     "DungeonCompletionAlertFrameReward_SetRewardItem": {"field_writes":[{"field":"rewardID","on":0,"value":["nil"]},{"field":"itemLink","on":0,"value":[1]}],"parameters":["frame","itemLink","texture"]},
     "DungeonCompletionAlertFrameReward_SetRewardMoney": {"field_writes":[{"field":"rewardID","on":0,"value":["number"]},{"field":"money","on":0,"value":[1]}],"parameters":["frame","optionalMoney"]},
     "DungeonCompletionAlertFrameReward_SetRewardXP": {"field_writes":[{"field":"rewardID","on":0,"value":["number"]},{"field":"xp","on":0,"value":[1]}],"parameters":["frame","optionalXP"]},
@@ -59689,7 +59694,7 @@
     "HybridScrollFrame_OnMouseWheel": {"parameters":["delta","stepSize"]},
     "HybridScrollFrame_OnValueChanged": {"method_calls":[{"arguments":[],"method":"GetParent","on":["self"]}],"parameters":["value"]},
     "HybridScrollFrame_ScrollToIndex": {"method_calls":[{"arguments":[],"method":"GetHeight","on":["self"]}],"parameters":["index","getHeightFunc"]},
-    "HybridScrollFrame_SetDoNotHideScrollBar": {"field_writes":[{"field":"totalHeight","on":"self","value":["unknown"]}],"method_calls":[{"arguments":[],"method":"GetHeight","on":["self"]},{"arguments":[],"method":"update","on":["self"]},{"arguments":["unknown"],"method":"SetVerticalScroll","on":["self"]},{"arguments":[],"method":"UpdateScrollChildRect","on":["self"]}],"parameters":["doNotHide"]},
+    "HybridScrollFrame_SetDoNotHideScrollBar": {"field_writes":[{"field":"totalHeight","on":"self","value":["number"]}],"method_calls":[{"arguments":[],"method":"GetHeight","on":["self"]},{"arguments":[],"method":"update","on":["self"]},{"arguments":["unknown"],"method":"SetVerticalScroll","on":["self"]},{"arguments":[],"method":"UpdateScrollChildRect","on":["self"]}],"parameters":["doNotHide"]},
     "HybridScrollFrame_SetOffset": {"method_calls":[{"arguments":[],"method":"update","on":["self"]},{"arguments":["unknown"],"method":"SetVerticalScroll","on":["self"]}],"parameters":["offset"]},
     "HybridScrollFrame_SetPercentageHeight": {"method_calls":[{"arguments":[],"method":"update","on":["self"]},{"arguments":["unknown"],"method":"SetVerticalScroll","on":["self"]}],"parameters":["percentageHeight"]},
     "HybridScrollFrame_Update": {"field_writes":[{"field":"totalHeight","on":"self","value":[0]}],"method_calls":[{"arguments":[],"method":"GetHeight","on":["self"]},{"arguments":[],"method":"update","on":["self"]},{"arguments":["unknown"],"method":"SetVerticalScroll","on":["self"]},{"arguments":[],"method":"UpdateScrollChildRect","on":["self"]}],"parameters":["totalHeight","displayedHeight"]},
@@ -64371,9 +64376,7 @@
       "tables": {
         "events": {},
         "heightModifiers": {},
-        "timedCriteria": {
-          "open": true
-        },
+        "timedCriteria": {},
         "usedBlocks": {},
         "usedProgressBars": {
           "open": true
@@ -66121,7 +66124,7 @@
         "ContainFrame": {"method_calls":[{"arguments":["AlertContainerTemplate"],"method":"SetAlertContainer","on":[0]}],"parameters":["containedAlertFrame"]},
         "CreateQueuedData": {"fresh_returns":[{"values":{"numElements":"number"}}],"parameters":["..."],"returns":["table"]},
         "GetAlertContainer": {"returned_fields":[{"field":"alertContainer","on":"self"}],"returns":["AlertContainerTemplate"]},
-        "GetNumQueuedAlerts": {"returns":["nil"]},
+        "GetNumQueuedAlerts": {"returns":["number"]},
         "GetNumVisibleAlerts": {"rest":"unknown"},
         "OnFrameHide": {"method_calls":[{"arguments":[],"method":"OnRelease","on":[0]}],"parameters":["frame"]},
         "OnLoad": {"field_writes":[{"field":"setUpFunction","on":"self","value":[1]},{"field":"coalesceFunction","on":"self","value":[4]},{"field":"maxAlerts","on":"self","value":[{"truthy":2},"number"]},{"field":"maxQueue","on":"self","value":[{"truthy":3},"number"]}],"parameters":["alertFrameTemplate","setUpFunction","maxAlerts","maxQueue","coalesceFunction"]},
@@ -66144,9 +66147,11 @@
         "alwaysReplace": "true",
         "coalesceFunction": "function|nil",
         "maxAlerts": "number",
-        "maxQueue": "number",
-        "queuedAlerts": "nil",
-        "queuedCoalesceData": "nil"
+        "maxQueue": "number"
+      },
+      "tables": {
+        "queuedAlerts": {},
+        "queuedCoalesceData": {}
       }
     },
     "AlertMountEquipmentFeatureMixin": {
@@ -67454,11 +67459,11 @@
         "AddBulkInventoryTypeCategories": {"method_calls":[{"arguments":[0,1,"nil","Enum.AuctionHouseFilter","true"],"method":"CreateSubCategoryAndFilter","on":["self"]},{"arguments":[0,1,"Enum.InventoryType"],"method":"CreateSubCategoryAndFilter","on":["self"]}],"parameters":["classID","subClassID","inventoryTypes"]},
         "AddFilter": {"field_writes":[{"field":"implicitFilter","on":"self","value":[3]}],"parameters":["classID","subClassID","inventoryType","implicitFilter"]},
         "ClearFlag": {"parameters":["flag"]},
-        "CreateNamedSubCategory": {"field_writes":[{"field":"name","on":{"returned":0},"value":[0]}],"fresh_returns":[{"mixins":["AuctionCategoryMixin"],"values":{"parent":"table","sortIndex":"number"}}],"parameters":["name"],"returns":["table"]},
-        "CreateNamedSubCategoryAndFilter": {"field_writes":[{"field":"name","on":{"returned":0},"value":[0]},{"field":"filters","on":{"returned":0},"value":["nil"]},{"field":"implicitFilter","on":{"returned":0},"value":[4]}],"fresh_returns":[{"mixins":["AuctionCategoryMixin"],"values":{"parent":"table","sortIndex":"number"}}],"method_calls":[{"arguments":[0],"method":"CreateNamedSubCategory","on":["self"]}],"parameters":["name","classID","subClassID","inventoryType","implicitFilter","useParentFilters"],"returns":["table"]},
-        "CreateSubCategory": {"field_writes":[{"field":"name","on":{"returned":0},"value":["string"]}],"fresh_returns":[{"mixins":["AuctionCategoryMixin"],"values":{"parent":"table","sortIndex":"number"}}],"method_calls":[{"arguments":["string"],"method":"CreateNamedSubCategory","on":["self"]}],"parameters":["classID","subClassID","inventoryType","implicitFilter"],"returns":["table"]},
-        "CreateSubCategoryAndFilter": {"field_writes":[{"field":"name","on":{"returned":0},"value":["string"]},{"field":"filters","on":{"returned":0},"value":["nil"]},{"field":"implicitFilter","on":{"returned":0},"value":[3]}],"fresh_returns":[{"mixins":["AuctionCategoryMixin"],"values":{"parent":"table","sortIndex":"number"}}],"method_calls":[{"arguments":[0,1,2,3],"method":"CreateSubCategory","on":["self"]}],"parameters":["classID","subClassID","inventoryType","implicitFilter","useParentFilters"],"returns":["table"]},
-        "FindSubCategoryByName": {"parameters":["name"],"returns":["unknown"]},
+        "CreateNamedSubCategory": {"field_writes":[{"field":"name","on":{"returned":0},"value":[0]}],"fresh_returns":[{"mixins":["AuctionCategoryMixin"],"values":{"implicitFilter":"nil","parent":"table","sortIndex":"number"}}],"parameters":["name"],"returns":["table"]},
+        "CreateNamedSubCategoryAndFilter": {"field_writes":[{"field":"name","on":{"returned":0},"value":[0]},{"field":"filters","on":{"returned":0},"value":["table"]},{"field":"implicitFilter","on":{"returned":0},"value":[4]}],"fresh_returns":[{"mixins":["AuctionCategoryMixin"],"values":{"parent":"table","sortIndex":"number"}}],"method_calls":[{"arguments":[0],"method":"CreateNamedSubCategory","on":["self"]}],"parameters":["name","classID","subClassID","inventoryType","implicitFilter","useParentFilters"],"returns":["table"]},
+        "CreateSubCategory": {"field_writes":[{"field":"name","on":{"returned":0},"value":["string"]}],"fresh_returns":[{"mixins":["AuctionCategoryMixin"],"values":{"implicitFilter":"nil","parent":"table","sortIndex":"number"}}],"method_calls":[{"arguments":["string"],"method":"CreateNamedSubCategory","on":["self"]}],"parameters":["classID","subClassID","inventoryType","implicitFilter"],"returns":["table"]},
+        "CreateSubCategoryAndFilter": {"field_writes":[{"field":"name","on":{"returned":0},"value":["string"]},{"field":"filters","on":{"returned":0},"value":["table"]},{"field":"implicitFilter","on":{"returned":0},"value":[3]}],"fresh_returns":[{"mixins":["AuctionCategoryMixin"],"values":{"parent":"table","sortIndex":"number"}}],"method_calls":[{"arguments":[0,1,2,3],"method":"CreateSubCategory","on":["self"]}],"parameters":["classID","subClassID","inventoryType","implicitFilter","useParentFilters"],"returns":["table"]},
+        "FindSubCategoryByName": {"parameters":["name"],"returns":["table|nil"]},
         "GenerateSubCategoriesAndFiltersFromSubClass": {"parameters":["classID"]},
         "GetDetailColumnString": {"rest":"unknown","returns":["unknown"]},
         "GetDetailColumnStringUnsafe": {"rest":"unknown","returns":["unknown"]},
@@ -67471,11 +67476,13 @@
       },
       "values": {
         "detailColumnString": "string",
-        "filters": "nil",
-        "flags": "nil",
+        "filters": "table",
         "implicitFilter": "unknown",
-        "sortIndex": "unknown",
-        "subCategories": "nil"
+        "sortIndex": "number"
+      },
+      "tables": {
+        "flags": {},
+        "subCategories": {}
       }
     },
     "AuctionHouseAlignedDurationMixin": {
@@ -67778,7 +67785,7 @@
       "functions": {
         "GetAuctionHouseFrame": {"returns":["ScriptObject"]},
         "GetCategoryData": {"returns":["table|nil"]},
-        "GetCategoryFilterData": {"returns":["nil","unknown"]},
+        "GetCategoryFilterData": {"returns":["table|nil","unknown"]},
         "GetSelectedCategory": {"returned_fields":[{"field":"selectedCategoryIndex","on":"self"},{"field":"selectedSubCategoryIndex","on":"self"},{"field":"selectedSubSubCategoryIndex","on":"self"}],"returns":["unknown","unknown","unknown"]},
         "IsWoWTokenCategorySelected": {"returns":["boolean|nil"]},
         "OnFilterClicked": {"method_calls":[{"arguments":["unknown","unknown","unknown"],"method":"SetSelectedCategory","on":["self"]}],"parameters":["button","buttonName"]},
@@ -71214,25 +71221,53 @@
     },
     "AzeriteIslandsToastMixin": {
       "functions": {
-        "AcquireToastFrame": {"parameters":["isPlayer"]},
+        "AcquireToastFrame": {"parameters":["isPlayer"],"rest":"unknown"},
         "AreAnyAnimationsActive": {"returns":["boolean"]},
         "CreateAccumulator": {"field_writes":[{"field":"accumulationDeferralTimeSec","on":{"returned":0},"value":["number"]}],"fresh_returns":[{"mixins":["AzeriteIslandsToastAccumulatorMixin"]}],"returns":["table"]},
-        "GetAccumulator": {"method_calls":[{"arguments":[],"method":"CreateAccumulator","on":["self"]}],"parameters":["isPlayer"],"returns":["nil"]},
-        "GetToastPool": {"parameters":["isPlayer"],"returns":["nil"]},
+        "GetAccumulator": {"method_calls":[{"arguments":[],"method":"CreateAccumulator","on":["self"]}],"parameters":["isPlayer"],"returns":["table"]},
+        "GetToastPool": {"parameters":["isPlayer"],"returns":["unknown"]},
         "OnAnimationFinished": {"parameters":["toastFrame"]},
         "OnEvent": {"method_calls":[{"arguments":["unknown"],"method":"GetAccumulator","on":["self"]}],"parameters":["event","..."]},
         "OnLoad": {},
-        "OnUpdate": {"method_calls":[{"arguments":["true","nil"],"method":"ShowToast","on":["self"]},{"arguments":["false","nil"],"method":"ShowToast","on":["self"]}],"parameters":["elapsed"]},
-        "ReleaseToastFrame": {"parameters":["isPlayer","toastFrame"]},
-        "SetupTextFrame": {"parameters":["frame","amount"]},
+        "OnUpdate": {"method_calls":[{"arguments":["true","number"],"method":"ShowToast","on":["self"]},{"arguments":["false","number"],"method":"ShowToast","on":["self"]}],"parameters":["elapsed"]},
+        "ReleaseToastFrame": {"parameters":["isPlayer","toastFrame"],"rest":"unknown"},
+        "SetupTextFrame": {"method_calls":[{"arguments":[],"method":"Show","on":[0]}],"parameters":["frame","amount"]},
         "ShowToast": {"parameters":["isPlayer","amount"]},
         "ShowWidgetGlow": {"parameters":["isHorde"]}
       },
       "values": {
-        "partyAccumulator": "nil",
-        "partyToastPool": "nil",
-        "playerAccumulator": "nil",
-        "playerToastPool": "nil"
+        "partyToastPool": "unknown",
+        "playerToastPool": "unknown"
+      },
+      "tables": {
+        "partyAccumulator": {
+          "functions": {
+            "AddAzerite": {"parameters":["amount"]},
+            "Consume": {"returns":["number"]},
+            "HasPendingAzerite": {"returns":["boolean"]},
+            "IsTimeToDisplay": {"returns":["boolean"]},
+            "OnLoad": {"field_writes":[{"field":"accumulationDeferralTimeSec","on":"self","value":[0]}],"parameters":["accumulationDeferralTimeSec"]}
+          },
+          "values": {
+            "accumulationDeferralTimeSec": "number",
+            "lastAddedTimestamp": "number|nil",
+            "pendingAzerite": "number|nil"
+          }
+        },
+        "playerAccumulator": {
+          "functions": {
+            "AddAzerite": {"parameters":["amount"]},
+            "Consume": {"returns":["number"]},
+            "HasPendingAzerite": {"returns":["boolean"]},
+            "IsTimeToDisplay": {"returns":["boolean"]},
+            "OnLoad": {"field_writes":[{"field":"accumulationDeferralTimeSec","on":"self","value":[0]}],"parameters":["accumulationDeferralTimeSec"]}
+          },
+          "values": {
+            "accumulationDeferralTimeSec": "number",
+            "lastAddedTimestamp": "number|nil",
+            "pendingAzerite": "number|nil"
+          }
+        }
       }
     },
     "AzeriteItemLevelUpToastMixin": {
@@ -73628,15 +73663,15 @@
           "functions": {
             "EnumerateUnitPinSizes": {"returns":["function","table"]},
             "GetUnitPinSizesTable": {"fresh_returns":[{"values":{"party":"number","player":"number","raid":"number"}}],"returned_fields":[{"field":"unitPinSizes","on":"self"}],"returns":["table"]},
-            "OnAdded": {"method_calls":[{"arguments":["nil"],"method":"AddCanvasClickHandler","on":[0]}],"parameters":["mapCanvas"]},
+            "OnAdded": {"method_calls":[{"arguments":["function"],"method":"AddCanvasClickHandler","on":[0]}],"parameters":["mapCanvas"]},
             "OnMapChanged": {},
-            "OnRemoved": {"method_calls":[{"arguments":["nil"],"method":"RemoveCanvasClickHandler","on":[0]}],"parameters":["mapCanvas"]},
+            "OnRemoved": {"method_calls":[{"arguments":["function"],"method":"RemoveCanvasClickHandler","on":[0]}],"parameters":["mapCanvas"]},
             "RefreshAllData": {"parameters":["fromOnShow"]},
             "SetUnitPinSize": {"parameters":["unit","size"]},
-            "ShouldShowUnit": {"parameters":["unit"],"returns":["boolean"]}
+            "ShouldShowUnit": {"parameters":["unit"],"returns":["boolean"]},
+            "onClickHandler": {"parameters":["mapCanvas","button","cursorX","cursorY"],"rest":"unknown"}
           },
           "values": {
-            "onClickHandler": "nil",
             "pin": "unknown"
           },
           "tables": {
@@ -76289,11 +76324,11 @@
     "CallbackRegistrantMixin": {
       "functions": {
         "AddDynamicEventMethod": {"parameters":["callbackRegistry","event","handlerMethod"]},
-        "AddEventMethodInternal": {"fresh_returns":[{"values":{"callbackRegistry":"unknown","event":"unknown","handlerMethod":"unknown","registered":"false"}}],"parameters":["handlersTable","callbackRegistry","event","handlerMethod"],"returns":["table"]},
+        "AddEventMethodInternal": {"fresh_returns":[{"values":{"callbackRegistry":"unknown","event":"unknown","handlerMethod":"unknown","registered":"boolean"}}],"parameters":["handlersTable","callbackRegistry","event","handlerMethod"],"returns":["table"]},
         "AddStaticEventMethod": {"parameters":["callbackRegistry","event","handlerMethod"]},
         "CreateEventRegistrationInfo": {"fresh_returns":[{"values":{"callbackRegistry":"unknown","event":"unknown","handlerMethod":"unknown","registered":"false"}}],"parameters":["callbackRegistry","event","handlerMethod"],"returns":["table"]},
-        "GetDynamicCallbackRegistrantHandlers": {"returned_fields":[{"field":"callbackRegistrantHandlers","on":"self"}],"returns":["nil"]},
-        "GetStaticCallbackRegistrantHandlers": {"returned_fields":[{"field":"staticCallbackRegistrantHandlers","on":"self"}],"returns":["nil"]},
+        "GetDynamicCallbackRegistrantHandlers": {"returned_fields":[{"field":"callbackRegistrantHandlers","on":"self"}],"returns":["table"]},
+        "GetStaticCallbackRegistrantHandlers": {"returned_fields":[{"field":"staticCallbackRegistrantHandlers","on":"self"}],"returns":["table"]},
         "OnHide": {},
         "OnShow": {},
         "RegisterFromRegistrationInfo": {"parameters":["eventRegistrationInfo"]},
@@ -76302,9 +76337,9 @@
         "UnregisterAllInternal": {"parameters":["handlersTable"]},
         "UnregisterFromRegistrationInfo": {"parameters":["eventRegistrationInfo"]}
       },
-      "values": {
-        "callbackRegistrantHandlers": "nil",
-        "staticCallbackRegistrantHandlers": "nil"
+      "tables": {
+        "callbackRegistrantHandlers": {},
+        "staticCallbackRegistrantHandlers": {}
       }
     },
     "CallbackRegistryMixin": {
@@ -78661,8 +78696,8 @@
         "UpdateHighlightTexture": {}
       },
       "values": {
-        "checkedAtlas": "nil",
-        "highlightAtlas": "nil",
+        "checkedAtlas": "string",
+        "highlightAtlas": "string",
         "isAlteredForm": "unknown",
         "layoutIndex": "unknown",
         "raceData": "unknown",
@@ -78766,8 +78801,8 @@
         "UpdateHighlightTexture": {}
       },
       "values": {
-        "checkedAtlas": "nil",
-        "highlightAtlas": "nil",
+        "checkedAtlas": "string",
+        "highlightAtlas": "string",
         "layoutIndex": "unknown",
         "sexID": "unknown",
         "tooltipLines": "table|nil"
@@ -78807,9 +78842,9 @@
       "values": {
         "categoryData": "unknown",
         "categoryID": "unknown",
-        "checkedAtlas": "nil",
+        "checkedAtlas": "string",
         "customizationFrame": "unknown",
-        "highlightAtlas": "nil",
+        "highlightAtlas": "string",
         "layoutIndex": "unknown",
         "tooltipLines": "table|nil"
       }
@@ -78910,8 +78945,8 @@
         "firstChrModelID": "unknown",
         "hasChrModels": "boolean",
         "hasShapeshiftForms": "boolean",
-        "maxAxisRotateSpeed": "nil",
-        "maxAxisZoomSpeed": "nil",
+        "maxAxisRotateSpeed": "number",
+        "maxAxisZoomSpeed": "number",
         "missingOptions": "table|nil",
         "needsNativeFormCategory": "boolean",
         "numSubcategories": "number",
@@ -78985,9 +79020,9 @@
       "values": {
         "categoryData": "unknown",
         "categoryID": "unknown",
-        "checkedAtlas": "nil",
+        "checkedAtlas": "string",
         "customizationFrame": "unknown",
-        "highlightAtlas": "nil",
+        "highlightAtlas": "string",
         "layoutIndex": "unknown",
         "tooltipLines": "table|nil"
       }
@@ -79026,9 +79061,9 @@
       "values": {
         "categoryData": "unknown",
         "categoryID": "unknown",
-        "checkedAtlas": "nil",
+        "checkedAtlas": "string",
         "customizationFrame": "unknown",
-        "highlightAtlas": "nil",
+        "highlightAtlas": "string",
         "layoutIndex": "unknown",
         "tooltipLines": "table|nil"
       }
@@ -79099,9 +79134,9 @@
         "UpdateHighlightTexture": {}
       },
       "values": {
-        "checkedAtlas": "nil",
+        "checkedAtlas": "string",
         "classData": "unknown",
-        "highlightAtlas": "nil",
+        "highlightAtlas": "string",
         "layoutIndex": "number|nil",
         "tooltipAnchor": "string",
         "tooltipLines": "table|nil"
@@ -79415,9 +79450,9 @@
       },
       "values": {
         "allowSelectionOnDisable": "boolean",
-        "checkedAtlas": "nil",
+        "checkedAtlas": "string",
         "expandedTooltipFrame": "unknown",
-        "highlightAtlas": "nil",
+        "highlightAtlas": "string",
         "layoutIndex": "unknown",
         "postTooltipLines": "table|nil",
         "raceData": "unknown",
@@ -79479,8 +79514,8 @@
         "UpdateHighlightTexture": {}
       },
       "values": {
-        "checkedAtlas": "nil",
-        "highlightAtlas": "nil",
+        "checkedAtlas": "string",
+        "highlightAtlas": "string",
         "layoutIndex": "unknown",
         "specData": "unknown",
         "tooltipLines": "table|nil"
@@ -79734,6 +79769,7 @@
       },
       "values": {
         "activeCamera": "table|nil",
+        "actorDropShadows": "table",
         "actorPool": "unknown",
         "actorTemplate": "string",
         "cameraModificationType": "unknown",
@@ -79741,7 +79777,7 @@
         "cameras": "table",
         "dropShadowFrame": "Frame",
         "dropShadowPool": "unknown",
-        "dropShadowProjection": "nil",
+        "dropShadowProjection": "table",
         "dropShadowUpdateID": "number",
         "forceEvenIfSame": "unknown",
         "gamepadRotSpeed": "unknown",
@@ -79754,11 +79790,6 @@
         "tagToActor": "table",
         "tagToCamera": "table",
         "yawDirection": "unknown"
-      },
-      "tables": {
-        "actorDropShadows": {
-          "open": true
-        }
       }
     },
     "CharacterProgressionLineMixin": {
@@ -82515,7 +82546,7 @@
         "classResourceButtonTable": "table",
         "hiddenByPersonalResourceDisplay": "unknown",
         "maxUsablePoints": "number",
-        "unit": "nil",
+        "unit": "string",
         "xOffset": "number|nil"
       }
     },
@@ -88186,9 +88217,7 @@
       "tables": {
         "broadcastSent": {},
         "eventsSent": {},
-        "pendingMemberInfo": {
-          "open": true
-        }
+        "pendingMemberInfo": {}
       }
     },
     "CommunitiesChatTabMixin": {
@@ -90298,10 +90327,8 @@
         "UpdateTrackingCheckmark": {}
       },
       "values": {
-        "ContentTrackingCheckmark": "ContentTrackingCheckmarkTemplate"
-      },
-      "tables": {
-        "trackables": {}
+        "ContentTrackingCheckmark": "ContentTrackingCheckmarkTemplate",
+        "trackables": "table"
       }
     },
     "ContentTrackingPinMixin": {
@@ -91627,13 +91654,13 @@
       "values": {
         "PandemicIcon": "unknown",
         "alertsByEvent": "table",
-        "allowAvailableAlert": "nil",
+        "allowAvailableAlert": "boolean",
         "allowOnCooldownAlert": "boolean|nil",
         "auraDataCached": "unknown",
         "auraDataUnit": "string|nil",
         "auraInstanceID": "unknown",
         "auraSpellID": "unknown",
-        "availableAlertTriggerTime": "nil",
+        "availableAlertTriggerTime": "number|nil",
         "cachedChargeSource": "number|nil",
         "cachedSpellCastCount": "number|nil",
         "cachedSpellChargeInfo": "SpellChargeInfo|nil",
@@ -92062,13 +92089,13 @@
       "values": {
         "PandemicIcon": "unknown",
         "alertsByEvent": "table",
-        "allowAvailableAlert": "nil",
+        "allowAvailableAlert": "boolean",
         "allowOnCooldownAlert": "boolean|nil",
         "auraDataCached": "unknown",
         "auraDataUnit": "string|nil",
         "auraInstanceID": "unknown",
         "auraSpellID": "unknown",
-        "availableAlertTriggerTime": "nil",
+        "availableAlertTriggerTime": "number|nil",
         "cachedChargeSource": "number|nil",
         "cachedSpellCastCount": "number|nil",
         "cachedSpellChargeInfo": "SpellChargeInfo|nil",
@@ -94085,13 +94112,13 @@
       "values": {
         "PandemicIcon": "unknown",
         "alertsByEvent": "table",
-        "allowAvailableAlert": "nil",
+        "allowAvailableAlert": "boolean",
         "allowOnCooldownAlert": "boolean|nil",
         "auraDataCached": "unknown",
         "auraDataUnit": "string|nil",
         "auraInstanceID": "unknown",
         "auraSpellID": "unknown",
-        "availableAlertTriggerTime": "nil",
+        "availableAlertTriggerTime": "number|nil",
         "cachedChargeSource": "number|nil",
         "cachedSpellCastCount": "number|nil",
         "cachedSpellChargeInfo": "SpellChargeInfo|nil",
@@ -96276,9 +96303,9 @@
       "values": {
         "categoryData": "unknown",
         "categoryID": "unknown",
-        "checkedAtlas": "nil",
+        "checkedAtlas": "string",
         "customizationFrame": "unknown",
-        "highlightAtlas": "nil",
+        "highlightAtlas": "string",
         "layoutIndex": "unknown",
         "tooltipLines": "table|nil"
       }
@@ -96489,8 +96516,8 @@
       "values": {
         "categories": "nil",
         "dropdownPool": "unknown",
-        "maxAxisRotateSpeed": "nil",
-        "maxAxisZoomSpeed": "nil",
+        "maxAxisRotateSpeed": "number",
+        "maxAxisZoomSpeed": "number",
         "missingOptions": "table|nil",
         "numSubcategories": "number",
         "parentFrame": "unknown",
@@ -96558,8 +96585,8 @@
         "UpdateHighlightTexture": {}
       },
       "values": {
-        "checkedAtlas": "nil",
-        "highlightAtlas": "nil",
+        "checkedAtlas": "string",
+        "highlightAtlas": "string",
         "tooltipLines": "table|nil"
       }
     },
@@ -99025,7 +99052,7 @@
         "UpdatePaginatedButtonDisplay": {}
       },
       "values": {
-        "buttonHeight": "nil",
+        "buttonHeight": "number",
         "configID": "number|nil"
       },
       "tables": {
@@ -115070,7 +115097,7 @@
       },
       "values": {
         "buttonFrames": "unknown",
-        "buttons": "nil",
+        "buttons": "table",
         "extraMenuHeight": "unknown",
         "extraMenuWidth": "unknown",
         "newbuttonAnchor": "unknown",
@@ -115216,11 +115243,11 @@
         "OnEvent": {"method_calls":[{"arguments":[],"method":"Init","on":["self"]}],"parameters":["event","..."]},
         "OnLoad": {},
         "SetModelScene": {"parameters":["sceneID","partyCategory","forceUpdate"]},
-        "SetupPartyMemberFrame": {"method_calls":[{"arguments":["nil"],"method":"SetOnSizeChangedCallback","on":[0]}],"parameters":["actor"]}
+        "SetupPartyMemberFrame": {"method_calls":[{"arguments":["function"],"method":"SetOnSizeChangedCallback","on":[0]}],"parameters":["actor"]},
+        "onActorSizeChangedCallback": {"method_calls":[{"arguments":[],"method":"GetActiveBoundingBox","on":[0]},{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]}
       },
       "values": {
         "characterIndex": "number",
-        "onActorSizeChangedCallback": "nil",
         "partyMemberFramePool": "unknown"
       }
     },
@@ -115912,7 +115939,7 @@
         "ApplyGridLayout": {"method_calls":[{"arguments":["unknown","true","number","number"],"method":"SetPointWithExtraOffset","on":[1]}],"parameters":["regions","initialAnchor","gridLayout"]},
         "CreateCellSizeGridLayout": {"field_writes":[{"field":"stride","on":{"returned":0},"value":[0]},{"field":"cellSizeCalculator","on":{"returned":0},"value":[5]}],"fresh_returns":[{"values":{"crossSectionStrategy":"function","isColumnBased":"false","primaryMultiplier":"unknown","primaryPaddingStrategy":"function","primarySizeCalculator":"nil","primarySizePadding":"unknown","secondaryMultiplier":"unknown","secondaryPaddingStrategy":"function","secondarySizeCalculator":"nil","secondarySizePadding":"unknown","sectionStrategy":"unknown"}}],"parameters":["stride","xPadding","yPadding","xMultiplier","yMultiplier","cellSizeCalculator"],"returns":["table"]},
         "CreateGridLayout": {"fresh_returns":[{"values":{"isColumnBased":"false","primaryMultiplier":"number","primaryPaddingStrategy":"function","primarySizeCalculator":"nil","primarySizePadding":"number","secondaryMultiplier":"number","secondaryPaddingStrategy":"function","secondarySizeCalculator":"nil","secondarySizePadding":"number"}}],"returns":["table"]},
-        "CreateNaturalGridLayout": {"field_writes":[{"field":"stride","on":{"returned":0},"value":[0]}],"fresh_returns":[{"values":{"crossSectionStrategy":"function","isColumnBased":"false","primaryMultiplier":"number","primaryPaddingStrategy":"function","primarySizeCalculator":"nil","primarySizePadding":"number","secondaryMultiplier":"number","secondaryPaddingStrategy":"function","secondarySizeCalculator":"nil","secondarySizePadding":"number","sectionStrategy":"unknown"}}],"parameters":["stride","xPadding","yPadding","xMultiplier","yMultiplier"],"returns":["table"]},
+        "CreateNaturalGridLayout": {"field_writes":[{"field":"stride","on":{"returned":0},"value":[0]}],"fresh_returns":[{"values":{"crossSectionStrategy":"function","isColumnBased":"false","primaryMultiplier":"unknown","primaryPaddingStrategy":"function","primarySizeCalculator":"nil","primarySizePadding":"number","secondaryMultiplier":"unknown","secondaryPaddingStrategy":"function","secondarySizeCalculator":"nil","secondarySizePadding":"number","sectionStrategy":"unknown"}}],"parameters":["stride","xPadding","yPadding","xMultiplier","yMultiplier"],"returns":["table"]},
         "CreateStandardGridLayout": {"field_writes":[{"field":"stride","on":{"returned":0},"value":[0]},{"field":"isColumnBased","on":{"returned":0},"value":[5]}],"fresh_returns":[{"values":{"crossSectionStrategy":"function","primaryMultiplier":"number","primaryPaddingStrategy":"function","primarySizeCalculator":"nil","primarySizePadding":"unknown","secondaryMultiplier":"number","secondaryPaddingStrategy":"function","secondarySizeCalculator":"nil","secondarySizePadding":"unknown","sectionStrategy":"unknown"}}],"parameters":["stride","xPadding","yPadding","xMultiplier","yMultiplier","isColumnBased"],"returns":["table"]},
         "CreateVerticalGridLayout": {"field_writes":[{"field":"stride","on":{"returned":0},"value":[0]},{"field":"isColumnBased","on":{"returned":0},"value":["true"]}],"fresh_returns":[{"values":{"crossSectionStrategy":"function","primaryMultiplier":"number","primaryPaddingStrategy":"function","primarySizeCalculator":"nil","primarySizePadding":"unknown","secondaryMultiplier":"number","secondaryPaddingStrategy":"function","secondarySizeCalculator":"nil","secondarySizePadding":"unknown","sectionStrategy":"unknown"}}],"parameters":["stride","xPadding","yPadding","xMultiplier","yMultiplier"],"returns":["table"]},
         "GridLayoutRegions": {"method_calls":[{"arguments":["unknown","true","number","number"],"method":"SetPointWithExtraOffset","on":[1]}],"parameters":["regions","initialAnchor","layout"]}
@@ -116094,15 +116121,15 @@
       "functions": {
         "EnumerateUnitPinSizes": {"returns":["function","table"]},
         "GetUnitPinSizesTable": {"fresh_returns":[{"values":{"party":"number","player":"number","raid":"number"}}],"returned_fields":[{"field":"unitPinSizes","on":"self"}],"returns":["table"]},
-        "OnAdded": {"method_calls":[{"arguments":["nil"],"method":"AddCanvasClickHandler","on":[0]}],"parameters":["mapCanvas"]},
+        "OnAdded": {"method_calls":[{"arguments":["function"],"method":"AddCanvasClickHandler","on":[0]}],"parameters":["mapCanvas"]},
         "OnMapChanged": {},
-        "OnRemoved": {"method_calls":[{"arguments":["nil"],"method":"RemoveCanvasClickHandler","on":[0]}],"parameters":["mapCanvas"]},
+        "OnRemoved": {"method_calls":[{"arguments":["function"],"method":"RemoveCanvasClickHandler","on":[0]}],"parameters":["mapCanvas"]},
         "RefreshAllData": {"parameters":["fromOnShow"]},
         "SetUnitPinSize": {"parameters":["unit","size"]},
-        "ShouldShowUnit": {"parameters":["unit"],"returns":["boolean"]}
+        "ShouldShowUnit": {"parameters":["unit"],"returns":["boolean"]},
+        "onClickHandler": {"parameters":["mapCanvas","button","cursorX","cursorY"],"rest":"unknown"}
       },
       "values": {
-        "onClickHandler": "nil",
         "pin": "unknown"
       },
       "tables": {
@@ -120883,7 +120910,7 @@
         "maxItemsToShow": "number",
         "prevBalance": "number|nil",
         "selectionBehavior": "unknown",
-        "spacingSize": "nil"
+        "spacingSize": "number"
       },
       "tables": {
         "CartDataManager": {
@@ -129159,12 +129186,12 @@
         "ResumeRewardAnimation": {},
         "SetLeaveButtonText": {},
         "SetModelScene": {"parameters":["sceneID","partyCategory","forceUpdate"]},
-        "SetupShadow": {"method_calls":[{"arguments":["nil"],"method":"SetOnSizeChangedCallback","on":[0]},{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]},
+        "SetupShadow": {"method_calls":[{"arguments":["function"],"method":"SetOnSizeChangedCallback","on":[0]},{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]},
         "SetupTheme": {},
-        "UpdateShadow": {"method_calls":[{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]}
+        "UpdateShadow": {"method_calls":[{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]},
+        "onActorSizeChangedCallback": {"method_calls":[{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]}
       },
       "values": {
-        "onActorSizeChangedCallback": "nil",
         "partyPoseData": "table"
       }
     },
@@ -129787,6 +129814,7 @@
         "UpdateScale": {}
       },
       "values": {
+        "addedButtons": "table",
         "isHorizontal": "true",
         "isStacked": "unknown",
         "layoutFramesGoingRight": "true",
@@ -129795,9 +129823,6 @@
         "numButtons": "number",
         "overrideScale": "number|nil",
         "stride": "number"
-      },
-      "tables": {
-        "addedButtons": {}
       }
     },
     "MicroMenuUtil": {
@@ -130571,6 +130596,7 @@
       },
       "values": {
         "activeCamera": "table|nil",
+        "actorDropShadows": "table",
         "actorPool": "unknown",
         "actorTemplate": "string",
         "cameraModificationType": "unknown",
@@ -130578,7 +130604,7 @@
         "cameras": "table",
         "dropShadowFrame": "Frame",
         "dropShadowPool": "unknown",
-        "dropShadowProjection": "nil",
+        "dropShadowProjection": "table",
         "dropShadowUpdateID": "number",
         "forceEvenIfSame": "unknown",
         "gamepadRotSpeed": "unknown",
@@ -130591,11 +130617,6 @@
         "tagToActor": "table",
         "tagToCamera": "table",
         "yawDirection": "unknown"
-      },
-      "tables": {
-        "actorDropShadows": {
-          "open": true
-        }
       }
     },
     "ModelSceneResetButtonMixin": {
@@ -135949,6 +135970,7 @@
       },
       "values": {
         "activeCamera": "table|nil",
+        "actorDropShadows": "table",
         "actorPool": "unknown",
         "actorTemplate": "string",
         "cameraModificationType": "unknown",
@@ -135956,7 +135978,7 @@
         "cameras": "table",
         "dropShadowFrame": "Frame",
         "dropShadowPool": "unknown",
-        "dropShadowProjection": "nil",
+        "dropShadowProjection": "table",
         "dropShadowUpdateID": "number",
         "forceEvenIfSame": "unknown",
         "gamepadRotSpeed": "unknown",
@@ -135969,11 +135991,6 @@
         "tagToActor": "table",
         "tagToCamera": "table",
         "yawDirection": "unknown"
-      },
-      "tables": {
-        "actorDropShadows": {
-          "open": true
-        }
       }
     },
     "NoZoomModelSceneMixin": {
@@ -136027,6 +136044,7 @@
       },
       "values": {
         "activeCamera": "table|nil",
+        "actorDropShadows": "table",
         "actorPool": "unknown",
         "actorTemplate": "string",
         "cameraModificationType": "unknown",
@@ -136034,7 +136052,7 @@
         "cameras": "table",
         "dropShadowFrame": "Frame",
         "dropShadowPool": "unknown",
-        "dropShadowProjection": "nil",
+        "dropShadowProjection": "table",
         "dropShadowUpdateID": "number",
         "forceEvenIfSame": "unknown",
         "gamepadRotSpeed": "unknown",
@@ -136047,11 +136065,6 @@
         "tagToActor": "table",
         "tagToCamera": "table",
         "yawDirection": "unknown"
-      },
-      "tables": {
-        "actorDropShadows": {
-          "open": true
-        }
       }
     },
     "NotificationUtil": {
@@ -141404,6 +141417,7 @@
       },
       "values": {
         "activeCamera": "table|nil",
+        "actorDropShadows": "table",
         "actorPool": "unknown",
         "actorTemplate": "string",
         "cameraModificationType": "unknown",
@@ -141411,7 +141425,7 @@
         "cameras": "table",
         "dropShadowFrame": "Frame",
         "dropShadowPool": "unknown",
-        "dropShadowProjection": "nil",
+        "dropShadowProjection": "table",
         "dropShadowUpdateID": "number",
         "forceEvenIfSame": "unknown",
         "gamepadRotSpeed": "unknown",
@@ -141424,11 +141438,6 @@
         "tagToActor": "table",
         "tagToCamera": "table",
         "yawDirection": "unknown"
-      },
-      "tables": {
-        "actorDropShadows": {
-          "open": true
-        }
       }
     },
     "PaperDollEquipmentManagerPaneMixin": {},
@@ -141931,12 +141940,12 @@
         "ReloadPartyPose": {"method_calls":[{"arguments":["table","true"],"method":"LoadPartyPose","on":["self"]}]},
         "ResumeRewardAnimation": {},
         "SetModelScene": {"parameters":["sceneID","partyCategory","forceUpdate"]},
-        "SetupShadow": {"method_calls":[{"arguments":["nil"],"method":"SetOnSizeChangedCallback","on":[0]},{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]},
+        "SetupShadow": {"method_calls":[{"arguments":["function"],"method":"SetOnSizeChangedCallback","on":[0]},{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]},
         "SetupTheme": {},
-        "UpdateShadow": {"method_calls":[{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]}
+        "UpdateShadow": {"method_calls":[{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]},
+        "onActorSizeChangedCallback": {"method_calls":[{"arguments":[],"method":"GetPosition","on":[0]},{"arguments":[],"method":"GetScale","on":[0]}],"parameters":["actor"]}
       },
       "values": {
-        "onActorSizeChangedCallback": "nil",
         "partyPoseData": "table"
       }
     },
@@ -142032,8 +142041,8 @@
       "values": {
         "allItemsSelectionTypeOther": "boolean",
         "data": "unknown",
-        "maxItemsToShow": "nil",
-        "spacingSize": "nil"
+        "maxItemsToShow": "number",
+        "spacingSize": "number"
       },
       "tables": {
         "itemList": {},
@@ -142156,9 +142165,9 @@
         "allItemsSelectionTypeOther": "boolean",
         "data": "unknown",
         "itemList": "table",
-        "maxItemsToShow": "nil",
+        "maxItemsToShow": "number",
         "selectedItems": "table",
-        "spacingSize": "nil"
+        "spacingSize": "number"
       }
     },
     "PerksProgramMixin": {
@@ -142465,7 +142474,7 @@
         "data": "unknown",
         "isSetList": "true",
         "itemList": "unknown",
-        "maxItemsToShow": "nil",
+        "maxItemsToShow": "number",
         "selectedItems": "table",
         "spacingSize": "number"
       }
@@ -145367,7 +145376,7 @@
     "PrivateRaidBossEmoteFrameMixin": {
       "functions": {
         "AcquireOrEvictSlot": {"method_calls":[{"arguments":[],"method":"AcquireString","on":["self"]}],"parameters":["messageType"],"returns":["unknown"]},
-        "AcquireString": {"field_writes":[{"field":"fadeInTime","on":{"returned":0},"value":["number"]},{"field":"holdTime","on":{"returned":0},"value":["number"]},{"field":"fadeOutTime","on":{"returned":0},"value":["number"]},{"field":"textScalingMinHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingMaxHeight","on":{"returned":0},"value":["unknown"]},{"field":"textScalingUpTime","on":{"returned":0},"value":["number"]},{"field":"textScalingDownTime","on":{"returned":0},"value":["number"]}],"returns":["unknown"]},
+        "AcquireString": {"field_writes":[{"field":"fadeInTime","on":{"returned":0},"value":["number"]},{"field":"holdTime","on":{"returned":0},"value":["number"]},{"field":"fadeOutTime","on":{"returned":0},"value":["number"]},{"field":"textScalingMinHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingMaxHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingUpTime","on":{"returned":0},"value":["number"]},{"field":"textScalingDownTime","on":{"returned":0},"value":["number"]}],"returns":["unknown"]},
         "AddMessage": {"method_calls":[{"arguments":["unknown"],"method":"AcquireOrEvictSlot","on":["self"]},{"arguments":[],"method":"UpdateLayout","on":["self"]}],"parameters":["textString","colorInfo","displayTime","messageType"]},
         "ClearMessages": {"method_calls":[{"arguments":["true"],"method":"UpdateShownState","on":["self"]},{"arguments":[],"method":"UpdateLayout","on":["self"]}],"parameters":["messageType"]},
         "EnforceLineLimits": {"method_calls":[{"arguments":[],"method":"GetNumLines","on":[0]},{"arguments":["number"],"method":"SetMaxLines","on":[0]}],"parameters":["newestFontString"]},
@@ -145388,13 +145397,15 @@
       "values": {
         "fontStringPool": "unknown",
         "isInEditMode": "unknown",
-        "maxMessageSlots": "nil",
-        "maxTextHeight": "nil",
-        "maxTotalLines": "nil",
+        "maxMessageSlots": "number",
+        "maxTextHeight": "number",
+        "maxTotalLines": "number",
         "messageCounter": "number",
-        "messageTypes": "nil",
-        "minReservedSlots": "nil",
+        "minReservedSlots": "number",
         "privateRaidBossMessageCallback": "unknown"
+      },
+      "tables": {
+        "messageTypes": {}
       }
     },
     "ProductCardBuyButtonMixin": {
@@ -148147,8 +148158,7 @@
         "moreActionsMenuOwnerRegion": "unknown",
         "onClosedCallback": "unknown",
         "onOpenedCallback": "unknown",
-        "onOpeningCallback": "unknown",
-        "overboundCallbacks": "nil"
+        "onOpeningCallback": "unknown"
       },
       "tables": {
         "VISIBILITY_TYPE": {
@@ -148176,7 +148186,8 @@
             "displayKeys": {},
             "moreActionsMenuEntries": {}
           }
-        }
+        },
+        "overboundCallbacks": {}
       }
     },
     "PropertyBindingMixin": {
@@ -148185,7 +148196,7 @@
         "CallAccessor": {"parameters":["..."],"rest":"unknown"},
         "CallMutator": {"parameters":["..."],"rest":"unknown"},
         "CallVisibilityQuery": {"rest":"unknown","returns":["unknown"]},
-        "GetStateTooltipString": {"parameters":["stateValue"],"returns":["nil"]},
+        "GetStateTooltipString": {"parameters":["stateValue"],"returns":["unknown"]},
         "GetTooltipFunction": {"returned_fields":[{"field":"tooltipFunction","on":"self"}],"returns":["unknown"]},
         "OnEnter": {"method_calls":[{"arguments":["unknown"],"method":"SetTooltip","on":["self"]}]},
         "OnEvent": {"parameters":["event","..."]},
@@ -148209,12 +148220,20 @@
       "values": {
         "accessor": "unknown",
         "mutator": "unknown",
-        "propertyChangeEvents": "nil",
         "shouldPassSelfToAccessor": "boolean",
         "shouldPassSelfToMutator": "boolean",
-        "stateUpdateEvents": "nil",
-        "tooltipFunction": "unknown",
-        "tooltipStrings": "nil"
+        "tooltipFunction": "unknown"
+      },
+      "tables": {
+        "propertyChangeEvents": {
+          "open": true
+        },
+        "stateUpdateEvents": {
+          "open": true
+        },
+        "tooltipStrings": {
+          "open": true
+        }
       }
     },
     "PropertyButtonMixin": {
@@ -148241,8 +148260,12 @@
         "iconStateQuery": "unknown",
         "needsHighlightAnchorUpdate": "true|nil",
         "stateAtlasFallback": "unknown",
-        "stateAtlases": "nil",
         "useIconAsHighlight": "unknown"
+      },
+      "tables": {
+        "stateAtlases": {
+          "open": true
+        }
       }
     },
     "PropertyFontStringMixin": {
@@ -151643,7 +151666,7 @@
     "RaidWarningFrameMixin": {
       "functions": {
         "AcquireOrEvictSlot": {"method_calls":[{"arguments":[],"method":"AcquireString","on":["self"]}],"parameters":["messageType"],"returns":["unknown"]},
-        "AcquireString": {"field_writes":[{"field":"fadeInTime","on":{"returned":0},"value":["number"]},{"field":"holdTime","on":{"returned":0},"value":["number"]},{"field":"fadeOutTime","on":{"returned":0},"value":["number"]},{"field":"textScalingMinHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingMaxHeight","on":{"returned":0},"value":["unknown"]},{"field":"textScalingUpTime","on":{"returned":0},"value":["number"]},{"field":"textScalingDownTime","on":{"returned":0},"value":["number"]}],"returns":["unknown"]},
+        "AcquireString": {"field_writes":[{"field":"fadeInTime","on":{"returned":0},"value":["number"]},{"field":"holdTime","on":{"returned":0},"value":["number"]},{"field":"fadeOutTime","on":{"returned":0},"value":["number"]},{"field":"textScalingMinHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingMaxHeight","on":{"returned":0},"value":["number"]},{"field":"textScalingUpTime","on":{"returned":0},"value":["number"]},{"field":"textScalingDownTime","on":{"returned":0},"value":["number"]}],"returns":["unknown"]},
         "AddMessage": {"method_calls":[{"arguments":["unknown"],"method":"AcquireOrEvictSlot","on":["self"]},{"arguments":[],"method":"UpdateLayout","on":["self"]}],"parameters":["textString","colorInfo","displayTime","messageType"]},
         "ClearMessages": {"method_calls":[{"arguments":["true"],"method":"UpdateShownState","on":["self"]},{"arguments":[],"method":"UpdateLayout","on":["self"]}],"parameters":["messageType"]},
         "EnforceLineLimits": {"method_calls":[{"arguments":[],"method":"GetNumLines","on":[0]},{"arguments":["number"],"method":"SetMaxLines","on":[0]}],"parameters":["newestFontString"]},
@@ -151664,12 +151687,14 @@
       "values": {
         "fontStringPool": "unknown",
         "isInEditMode": "unknown",
-        "maxMessageSlots": "nil",
-        "maxTextHeight": "nil",
-        "maxTotalLines": "nil",
+        "maxMessageSlots": "number",
+        "maxTextHeight": "number",
+        "maxTotalLines": "number",
         "messageCounter": "number",
-        "messageTypes": "nil",
-        "minReservedSlots": "nil"
+        "minReservedSlots": "number"
+      },
+      "tables": {
+        "messageTypes": {}
       }
     },
     "RaidWarningUtil": {
@@ -153466,8 +153491,8 @@
         "UpdateHighlightTexture": {}
       },
       "values": {
-        "checkedAtlas": "nil",
-        "highlightAtlas": "nil",
+        "checkedAtlas": "string",
+        "highlightAtlas": "string",
         "tooltipLines": "table|nil"
       }
     },
@@ -159470,13 +159495,13 @@
         "controlWidthRight": "unknown",
         "controlsUpdateFunc": "unknown",
         "framePool": "unknown",
-        "frameSpacing": "nil",
+        "frameSpacing": "number",
         "headIndex": "number",
         "initializer": "unknown",
-        "leftPadding": "nil",
-        "rightPadding": "nil",
+        "leftPadding": "number",
+        "rightPadding": "number",
         "tabs": "table",
-        "verticalOffset": "nil"
+        "verticalOffset": "number"
       }
     },
     "ScrollingEditBoxMixin": {
@@ -162717,7 +162742,7 @@
         "ScrollBox": "WowScrollBoxList",
         "maxItemsToShow": "number",
         "selectionBehavior": "unknown",
-        "spacingSize": "nil"
+        "spacingSize": "number"
       },
       "tables": {
         "Events": {},
@@ -166700,7 +166725,6 @@
         "UpdateStackText": {}
       },
       "values": {
-        "down": "nil",
         "isMultiStack": "boolean",
         "maxStack": "unknown",
         "minSplit": "unknown",
@@ -166709,6 +166733,7 @@
         "typing": "unknown"
       },
       "tables": {
+        "down": {},
         "footer": {
           "functions": {
             "AddFunctionBinding": {"parameters":["key","func"],"returns":["table"]},
@@ -191945,7 +191970,7 @@
         "OnVoiceChannelMemberSpeakingStateChanged": {"method_calls":[{"arguments":[0,1],"method":"ShowNotifications","on":["self"]}],"parameters":["memberID","channelID","isSpeaking"]},
         "OnVoiceChatChannelMemberEnergyChanged": {"parameters":["memberID","channelID","speakingEnergy"]},
         "OnVoiceChatChannelTransmitChanged": {"method_calls":[{"arguments":["number",0],"method":"ShowNotifications","on":["self"]}],"parameters":["channelID","isTransmitting"]},
-        "OnVoiceChatCommunicationModeChanged": {"method_calls":[{"arguments":["nil","nil"],"method":"ShowNotifications","on":["self"]}],"parameters":["communicationMode"]},
+        "OnVoiceChatCommunicationModeChanged": {"method_calls":[{"arguments":["unknown","unknown"],"method":"ShowNotifications","on":["self"]}],"parameters":["communicationMode"]},
         "RegisterExternalNotificationTemplate": {"parameters":["notificationTemplate","frameType"],"returns":["boolean"]},
         "RegisterFrameForVoiceActivityNotifications": {"method_calls":[{"arguments":["unknown","unknown",3,"unknown",0],"method":"CreateNotification","on":["self"]}],"parameters":["frame","guid","voiceChannelID","notificationTemplate","frameType","notificationCreatedCallback"]},
         "ReleaseNotification": {"parameters":["notification"]},
@@ -192124,7 +192149,7 @@
       "functions": {
         "ClearPendingState": {},
         "ClearVoiceChannel": {},
-        "GetChannelName": {"returns":["nil"]},
+        "GetChannelName": {"returns":["string"]},
         "GetChannelType": {"returned_fields":[{"field":"channelType","on":"self"}],"returns":["Enum.ChatChannelType"]},
         "GetClubErrorReason": {"returns":["Enum.VoiceChannelErrorReason|nil"]},
         "GetClubID": {"returned_fields":[{"field":"clubId","on":"self"}],"returns":["string"]},
@@ -193151,22 +193176,22 @@
         "CanPlacePin": {"returns":["unknown"]},
         "GetPinTemplate": {"returns":["string"]},
         "HandleClick": {},
-        "OnAdded": {"method_calls":[{"arguments":["nil","number"],"method":"AddCanvasClickHandler","on":[0]},{"arguments":["nil","number"],"method":"AddGlobalPinMouseActionHandler","on":[0]},{"arguments":["nil","number"],"method":"AddCursorHandler","on":[0]}],"parameters":["mapCanvas"]},
+        "OnAdded": {"method_calls":[{"arguments":["function","number"],"method":"AddCanvasClickHandler","on":[0]},{"arguments":["function","number"],"method":"AddGlobalPinMouseActionHandler","on":[0]},{"arguments":["function","number"],"method":"AddCursorHandler","on":[0]}],"parameters":["mapCanvas"]},
         "OnCanvasClickHandler": {"parameters":["button","cursorX","cursorY"],"returns":["boolean"]},
         "OnEvent": {"method_calls":[{"arguments":[],"method":"RefreshAllData","on":["self"]}],"parameters":["event","..."]},
         "OnHide": {},
         "OnPinMouseActionHandler": {"parameters":["mouseAction","button"],"returns":["boolean"]},
         "OnPingWaypointLocation": {},
-        "OnRemoved": {"method_calls":[{"arguments":["nil"],"method":"RemoveCursorHandler","on":[0]}],"parameters":["mapCanvas"]},
+        "OnRemoved": {"method_calls":[{"arguments":["function"],"method":"RemoveCursorHandler","on":[0]}],"parameters":["mapCanvas"]},
         "OnShow": {},
         "OnWayPointLocationToggleUpdate": {"field_writes":[{"field":"toggleActive","on":"self","value":[0]}],"parameters":["isActive"]},
         "RefreshAllData": {"parameters":["fromOnShow"]},
-        "RemoveAllData": {}
+        "RemoveAllData": {},
+        "cursorHandler": {"returns":["string|nil"]},
+        "onCanvasClickHandler": {"parameters":["mapCanvas","button","cursorX","cursorY"],"returns":["boolean"]},
+        "onPinMouseActionHandler": {"parameters":["mapCanvas","mouseAction","button"],"returns":["boolean"]}
       },
       "values": {
-        "cursorHandler": "nil",
-        "onCanvasClickHandler": "nil",
-        "onPinMouseActionHandler": "nil",
         "pin": "unknown",
         "toggleActive": "unknown"
       }
@@ -193804,9 +193829,11 @@
       },
       "values": {
         "coordsByTenths": "unknown",
-        "neighbors": "nil",
         "showCursorCoords": "unknown",
         "showPlayerCoords": "unknown"
+      },
+      "tables": {
+        "neighbors": {}
       }
     },
     "WorldMapFloorNavigationFrameMixin": {
@@ -194108,7 +194135,7 @@
     },
     "WorldMap_DebugDataProviderMixin": {
       "functions": {
-        "OnAdded": {"method_calls":[{"arguments":["nil","number"],"method":"AddCanvasClickHandler","on":[0]},{"arguments":["nil","number"],"method":"AddGlobalPinMouseActionHandler","on":[0]},{"arguments":["nil","number"],"method":"AddCursorHandler","on":[0]}],"parameters":["mapCanvas"]},
+        "OnAdded": {"method_calls":[{"arguments":["function","number"],"method":"AddCanvasClickHandler","on":[0]},{"arguments":["function","number"],"method":"AddGlobalPinMouseActionHandler","on":[0]},{"arguments":["function","number"],"method":"AddCursorHandler","on":[0]}],"parameters":["mapCanvas"]},
         "OnCanvasClickHandler": {"parameters":["button","cursorX","cursorY"],"returns":["boolean"]},
         "OnEvent": {"method_calls":[{"arguments":[],"method":"RefreshAllData","on":["self"]}],"parameters":["event","..."]},
         "OnHide": {},
@@ -194118,12 +194145,10 @@
         "RefreshDebugObjects": {"parameters":["mapID"]},
         "RefreshPortLocs": {"parameters":["mapID"]},
         "RemoveAllData": {},
-        "Teleport": {}
-      },
-      "values": {
-        "cursorHandler": "nil",
-        "onCanvasClickHandler": "nil",
-        "onPinMouseActionHandler": "nil"
+        "Teleport": {},
+        "cursorHandler": {"returns":["string|nil"]},
+        "onCanvasClickHandler": {"parameters":["mapCanvas","button","cursorX","cursorY"],"returns":["boolean"]},
+        "onPinMouseActionHandler": {"parameters":["mapCanvas","mouseAction","button"],"returns":["boolean"]}
       }
     },
     "WorldMap_DebugObjectPinMixin": {
@@ -194953,13 +194978,13 @@
         "OnFadeInFinished": {},
         "OnFadeOutFinished": {},
         "RefreshAllData": {"parameters":["fromOnShow"]},
-        "RemoveAllData": {}
+        "RemoveAllData": {},
+        "evaluateBestAreaTriggerCallback": {}
       },
       "values": {
         "ZoneLabel": "ZoneLabelDataProvider_ZoneLabelTemplate",
         "activeAreas": "table|nil",
         "bestAreaTrigger": "unknown",
-        "evaluateBestAreaTriggerCallback": "nil",
         "labelDirty": "boolean",
         "numActiveAreas": "number"
       }
@@ -195312,7 +195337,7 @@
     "Blizzard_CombatLog_Filter_Version": "unknown",
     "Blizzard_CombatLog_Filters": "table",
     "Blizzard_Console_SavedVars": "unknown",
-    "Blizzard_PTRIssueReporter_Saved": "nil",
+    "Blizzard_PTRIssueReporter_Saved": "table",
     "CACHE_WAIT_TIME": "number",
     "CALENDAR_FIRST_WEEKDAY": "unknown",
     "CALENDAR_FRAME_EXTRA_WIDTH": "number",

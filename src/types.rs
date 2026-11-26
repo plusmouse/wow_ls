@@ -7278,8 +7278,11 @@ fn precedence(op: Operator) -> u8 {
 
 fn combine(op: Operator, left: Type, right: Type) -> Type {
     match op {
-        // The right side only runs if the left can be falsy (`or`) or truthy (`and`)
-        Operator::Or if left.set.falsy() == TypeSet::NEVER => left,
+        // The right side only runs if the left can be falsy (`or`) or truthy
+        // (`and`). A left side not known yet may be, so `x or default` is the
+        // default until it is: `t.list = t.list or {}` gives a table, where
+        // nothing would go round to the read and stay nothing for good
+        Operator::Or if left.set.falsy() == TypeSet::NEVER && left.set != TypeSet::NEVER => left,
         Operator::Or => left.truthy() | right,
         Operator::And if left.set.truthy() == TypeSet::NEVER => left,
         Operator::And => left.falsy() | right,
@@ -8416,6 +8419,9 @@ mod tests {
     #[test]
     fn assigned_fields() {
         assert_eq!(types_of("local t = {} t.extra = true local a = t.extra", "a"), ["true"]);
+        // Defaulted from itself: the default, rather than nothing for good
+        assert_eq!(types_of("local t = {} t.list = t.list or {} local a = t.list", "a"), ["table"]);
+        assert_eq!(types_of("local t = {} t.n = (t.n or 0) + 1 local a = t.n", "a"), ["number"]);
         // Every assignment counts, wherever it is
         assert_eq!(types_of("local t = { n = 1 } if c then t.n = 's' end local a = t.n", "a"), ["number|string"]);
         assert_eq!(types_of("local t = {} local function set() t.x = 1 end local a = t.x", "a"), ["number"]);
