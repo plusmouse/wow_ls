@@ -177,6 +177,10 @@ fn worker(jobs: Receiver<Job>, events: Sender<Event>) {
 enum Event {
     Message(Message),
     Analysed(Done),
+    /// The editor's end of the connection is gone, so nothing more will
+    /// come. The worker still holds a sender, so the channel itself never
+    /// says so
+    Closed,
 }
 
 /// The events arriving, with those taken early to see what's waiting
@@ -186,6 +190,8 @@ struct Queue {
     pending: VecDeque<Message>,
     /// The worker's analysis, taken while seeing what's waiting
     finished: Option<Done>,
+    /// Whether the editor's end of the connection is gone
+    closed: bool,
 }
 
 impl Queue {
@@ -200,12 +206,17 @@ impl Queue {
         match event {
             Event::Message(msg) => self.pending.push_back(msg),
             Event::Analysed(done) => self.finished = Some(done),
+            Event::Closed => self.closed = true,
         }
     }
 
     /// Waits for the worker's analysis, holding the messages that come first
     fn wait_for_analysis(&mut self) -> Option<Done> {
         while self.finished.is_none() {
+            // Nothing will ask for it now
+            if self.closed {
+                return None
+            }
             let event = self.inbox.recv().ok()?;
             self.hold(event);
         }
@@ -552,13 +563,14 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                 break
             }
         }
+        let _ = messages.send(Event::Closed);
     });
     // Addons are analysed for diagnostics on a thread of their own, as that
     // takes up to a second or so, and requests can be answered meanwhile
     let (jobs, work) = std::sync::mpsc::channel::<Job>();
     std::thread::spawn(move || worker(work, events));
     let mut workspace = Workspace { roots, jobs: Some(jobs), ..Workspace::default() };
-    let mut queue = Queue { inbox, pending: VecDeque::new(), finished: None };
+    let mut queue = Queue { inbox, pending: VecDeque::new(), finished: None, closed: false };
 
     // Files whose diagnostics are out of date. They're published once no
     // messages are waiting, so a burst of keystrokes is analysed once, for the
@@ -566,6 +578,11 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
     let mut owed: Vec<PathBuf> = Vec::new();
     let mut shutting_down = false;
     loop {
+        // The editor is gone, and everything it sent is handled: an analysis
+        // the worker is making would be for no one
+        if queue.closed && queue.pending.is_empty() {
+            break
+        }
         if let Some(done) = queue.finished.take() {
             let definitions = loaded_definitions.get_or_insert_with(load_definitions).clone();
             owe(&mut owed, workspace.finish(done, &connection, &definitions));
@@ -609,6 +626,10 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
             Event::Message(msg) => msg,
             Event::Analysed(done) => {
                 queue.finished = Some(done);
+                continue
+            }
+            Event::Closed => {
+                queue.closed = true;
                 continue
             }
         };
