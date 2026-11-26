@@ -13,7 +13,7 @@
 //You should have received a copy of the GNU General Public License
 //along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crate::syntax::{
@@ -27,7 +27,7 @@ use lsp_types::{
 };
 use lsp_types::{TextDocumentSyncCapability, TextDocumentSyncKind};
 
-use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
+use lsp_server::{Connection, ErrorCode, ExtractError, Message, Notification, Request, RequestId, Response};
 use rowan::TokenAtOffset;
 
 use crate::lsp::{diagnostics, position};
@@ -112,8 +112,19 @@ struct Workspace {
     xml_valid: HashMap<PathBuf, String>,
     /// Why XML files don't parse, as of the latest `definitions`
     xml_errors: Vec<project::XmlError>,
+    /// The latest analysis of each open Lua document, kept after it's out of
+    /// date, so completion can answer from it at once rather than wait for a
+    /// new one. Analysing a whole addon takes up to a second or so
+    previous: HashMap<PathBuf, Previous>,
     /// XML files with errors published, which need clearing once fixed
     xml_published: Vec<PathBuf>,
+}
+
+/// An analysis covering an open document, and the document's text it was made from
+struct Previous {
+    analysed: Analysed,
+    file: FileId,
+    text: String,
 }
 
 impl Workspace {
@@ -219,6 +230,7 @@ impl Workspace {
     /// `changed` gives
     fn closed(&mut self, path: &Path) -> Vec<PathBuf> {
         let path = project::normalise(path);
+        self.previous.remove(&path);
         let Some(text) = self.open.remove(&path) else { return Vec::new() };
         self.uris.remove(&path);
         let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
@@ -288,19 +300,48 @@ impl Workspace {
             if let Some(addon) = project::addon_for(self.addons(), &path).cloned() {
                 let known = self.addons.as_deref().unwrap_or_default();
                 let analysed = project::analyse_addon(&addon, known, &self.open, definitions, &mut self.analyses);
+                self.keep(&analysed);
                 if let Some(index) = analysed.paths.iter().position(|p| *p == path) {
                     return (Analysed::Addon(analysed), FileId(index as u32))
                 }
             }
+            let analysis = Analysed::File(Arc::new(Analysis::analyse_file(root, definitions)));
+            if self.open.contains_key(&path) {
+                self.previous.insert(path, Previous { analysed: analysis.clone(), file: FileId(0), text: root.text().to_string() });
+            }
+            return (analysis, FileId(0))
         }
-        (Analysed::File(Analysis::analyse_file(root, definitions)), FileId(0))
+        (Analysed::File(Arc::new(Analysis::analyse_file(root, definitions))), FileId(0))
+    }
+
+    /// Keeps `analysed` as the latest analysis of each of its open documents
+    fn keep(&mut self, analysed: &Arc<project::Analysed>) {
+        for (index, path) in analysed.paths.iter().enumerate() {
+            let Some(text) = self.open.get(path) else { continue };
+            let kept = self.previous.get(path).is_some_and(|p| matches!(&p.analysed, Analysed::Addon(a) if Arc::ptr_eq(a, analysed)));
+            if !kept {
+                let previous = Previous { analysed: Analysed::Addon(analysed.clone()), file: FileId(index as u32), text: text.clone() };
+                self.previous.insert(path.clone(), previous);
+            }
+        }
+    }
+
+    /// The analysis covering `path` if there's one up to date, without
+    /// making one
+    fn analysed_now(&mut self, path: &Path) -> Option<(Analysed, FileId)> {
+        let toc = project::addon_for(self.addons(), path)?.toc.clone();
+        let analysed = self.analyses.get(&toc)?.clone();
+        self.keep(&analysed);
+        let index = analysed.paths.iter().position(|p| p == path)?;
+        Some((Analysed::Addon(analysed), FileId(index as u32)))
     }
 }
 
 /// An analysis of an addon, or of a file in none
+#[derive(Clone)]
 enum Analysed {
     Addon(Arc<project::Analysed>),
-    File(Analysis),
+    File(Arc<Analysis>),
 }
 
 impl Analysed {
@@ -343,11 +384,11 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
             }
         }
     });
-    // A message taken from the queue while checking whether any were waiting
-    let mut next: Option<Message> = None;
+    // Messages taken from the queue to see what's waiting, in order
+    let mut pending: VecDeque<Message> = VecDeque::new();
     let mut shutting_down = false;
     loop {
-        let msg = match next.take().map(Ok).unwrap_or_else(|| inbox.try_recv()) {
+        let msg = match pending.pop_front().map(Ok).unwrap_or_else(|| inbox.try_recv()) {
             Ok(msg) => msg,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -362,7 +403,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                         owed.retain(|owed| !published.contains(owed));
                         // Something arrived meanwhile: handle it before the rest
                         if let Ok(msg) = inbox.try_recv() {
-                            next = Some(msg);
+                            pending.push_back(msg);
                             break
                         }
                     }
@@ -382,6 +423,14 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                 if req.method == "shutdown" {
                     connection.sender.send(Message::Response(Response::new_ok(req.id.clone(), ())))?;
                     shutting_down = true;
+                    continue;
+                }
+                // Not answered if the editor no longer wants it, as the
+                // analysis answering needs can take a second or so
+                pending.extend(inbox.try_iter());
+                if let Some(code) = superseded(&req, &pending) {
+                    let resp = Response::new_err(req.id.clone(), code as i32, String::from("superseded"));
+                    connection.sender.send(Message::Response(resp))?;
                     continue;
                 }
                 //eprint!("got req {}", &*req.method);
@@ -570,14 +619,47 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
     Ok(())
 }
 
+/// Why `req` needn't be answered, given the messages after it: the editor
+/// cancelled it, or for a completion, the document has changed again. Each
+/// keystroke asks for completions anew
+fn superseded(req: &Request, pending: &VecDeque<Message>) -> Option<ErrorCode> {
+    let id = serde_json::to_value(&req.id).ok()?;
+    let uri = &req.params["textDocument"]["uri"];
+    pending.iter().find_map(|msg| match msg {
+        Message::Notification(not) if not.method == "$/cancelRequest" && not.params["id"] == id => Some(ErrorCode::RequestCanceled),
+        Message::Notification(not) if req.method == "textDocument/completion" && not.method == "textDocument/didChange"
+            && !uri.is_null() && not.params["textDocument"]["uri"] == *uri => Some(ErrorCode::ContentModified),
+        _ => None,
+    })
+}
+
 /// The completion list at `position` in the open document `uri`, whose text is `s`
 fn complete(workspace: &mut Workspace, uri: &str, s: &str, position: Position, definitions: &Arc<Definitions>) -> CompletionResponse {
     let offset = position::offset_of(s, position);
     let root = SyntaxNode::new_root(syntax::Generator::new(s).process_all());
-    let path = project::uri_to_path(uri);
-    let (analysis, file) = workspace.analysis(path.as_deref(), &root, definitions);
-    let analysis = analysis.analysis();
-    let completions = completion::complete(analysis, file, &root, s, offset);
+    let path = project::uri_to_path(uri).map(|p| project::normalise(&p));
+    // An analysis up to date if there is one, else the latest, which is
+    // usually only a few keystrokes behind. Only if that can't answer, as
+    // what's asked about was typed since, is the document analysed again
+    let up_to_date = path.as_deref().and_then(|p| workspace.analysed_now(p));
+    let latest = up_to_date.map(|(analysed, file)| (analysed, file, completion::Edit::none()))
+        .or_else(|| {
+            let previous = workspace.previous.get(path.as_deref()?)?;
+            Some((previous.analysed.clone(), previous.file, completion::Edit::between(&previous.text, s)))
+        });
+    let answered = latest.and_then(|(analysed, file, edit)| {
+        let completions = completion::complete(analysed.analysis(), file, &root, s, offset, &edit);
+        (!edit.missed()).then_some((analysed, completions))
+    });
+    let (analysed, completions) = match answered {
+        Some(answered) => answered,
+        None => {
+            let (analysed, file) = workspace.analysis(path.as_deref(), &root, definitions);
+            let completions = completion::complete(analysed.analysis(), file, &root, s, offset, &completion::Edit::none());
+            (analysed, completions)
+        }
+    };
+    let analysis = analysed.analysis();
     let items = completions.candidates.iter().map(|candidate| {
         let (kind, order) = match candidate.kind {
             CandidateKind::Local | CandidateKind::Parameter => (CompletionItemKind::VARIABLE, 0),

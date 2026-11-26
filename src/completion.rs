@@ -16,9 +16,10 @@
 //! What could be typed at a position: the names in scope, or after `a.` and
 //! `a:`, the members of whatever `a` is
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
-use rowan::{NodeOrToken, TextSize};
+use rowan::{NodeOrToken, TextRange, TextSize};
 
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use crate::types::{Analysis, BindingKind, FileId, TableId, Type, TypeSet, Values};
@@ -57,9 +58,90 @@ pub struct Completions {
     pub incomplete: bool,
 }
 
-/// What could be typed at `offset` in `file`. `root` and `text` must be the
-/// text `analysis` was made from
-pub fn complete(analysis: &Analysis, file: FileId, root: &SyntaxNode, text: &str, offset: TextSize) -> Completions {
+/// How the text being completed differs from the text the analysis was made
+/// from, so an analysis that's a few keystrokes old can still answer: one
+/// span replaced, what's left between their common start and common end.
+/// Positions outside it map back to the analysis's text; those inside it are
+/// text the analysis never saw
+#[derive(Debug)]
+pub struct Edit {
+    /// Where the span starts, in both texts
+    start: usize,
+    /// Where it ends in the analysis's text
+    old_end: usize,
+    /// Where it ends in the text now
+    new_end: usize,
+    /// Whether something the completion needed was inside the span, so the
+    /// analysis couldn't say what it is
+    missed: Cell<bool>,
+}
+
+impl Edit {
+    /// No change: the analysis was made from the text being completed
+    pub fn none() -> Edit {
+        Edit { start: usize::MAX, old_end: usize::MAX, new_end: usize::MAX, missed: Cell::new(false) }
+    }
+
+    /// The change from `old`, which the analysis was made from, to `new`
+    pub fn between(old: &str, new: &str) -> Edit {
+        let (o, n) = (old.as_bytes(), new.as_bytes());
+        let mut start = o.iter().zip(n).take_while(|(a, b)| a == b).count();
+        while !(old.is_char_boundary(start) && new.is_char_boundary(start)) {
+            start -= 1;
+        }
+        // The common end can't reach back into the common start
+        let most = o.len().min(n.len()) - start;
+        let mut end = o.iter().rev().zip(n.iter().rev()).take(most).take_while(|(a, b)| a == b).count();
+        while !(old.is_char_boundary(o.len() - end) && new.is_char_boundary(n.len() - end)) {
+            end -= 1;
+        }
+        Edit { start, old_end: o.len() - end, new_end: n.len() - end, missed: Cell::new(false) }
+    }
+
+    /// Whether the texts differ
+    fn is_change(&self) -> bool {
+        !(self.start == self.old_end && self.start == self.new_end)
+    }
+
+    /// Whether the analysis couldn't answer, as what was asked about is newer
+    /// than it. Then only a new analysis can
+    pub fn missed(&self) -> bool {
+        self.missed.get()
+    }
+
+    /// The cursor's place in the analysis's text. Inside the span it's where
+    /// the span starts, which is in the same scopes as far as the analysis knows
+    fn cursor(&self, offset: TextSize) -> TextSize {
+        let offset = usize::from(offset);
+        let mapped = if offset <= self.start {
+            offset
+        } else if offset >= self.new_end {
+            offset - self.new_end + self.old_end
+        } else {
+            self.start
+        };
+        TextSize::from(mapped as u32)
+    }
+
+    /// Where the code at `range` was in the analysis's text, unless it's
+    /// changed since: overlaps the span
+    fn range(&self, range: TextRange) -> Option<TextRange> {
+        let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+        if end <= self.start {
+            Some(range)
+        } else if start >= self.new_end {
+            let shift = |at: usize| TextSize::from((at - self.new_end + self.old_end) as u32);
+            Some(TextRange::new(shift(start), shift(end)))
+        } else {
+            self.missed.set(true);
+            None
+        }
+    }
+}
+
+/// What could be typed at `offset` in `file`. `root` and `text` are the text
+/// being completed, and `edit` how it differs from what `analysis` was made from
+pub fn complete(analysis: &Analysis, file: FileId, root: &SyntaxNode, text: &str, offset: TextSize, edit: &Edit) -> Completions {
     let offset_index = usize::from(offset).min(text.len());
     if inside_string_or_comment(root, offset) {
         return Completions::default()
@@ -75,14 +157,14 @@ pub fn complete(analysis: &Analysis, file: FileId, root: &SyntaxNode, text: &str
     let separator = before[..separator_at].chars().next_back();
     match separator {
         // `..` is concatenation, so what follows is an expression
-        Some('.') if before[..separator_at - 1].ends_with('.') => names(analysis, file, offset, prefix),
+        Some('.') if before[..separator_at - 1].ends_with('.') => names(analysis, file, edit.cursor(offset), prefix),
         Some(c @ ('.' | ':')) => {
-            let candidates = base_type(analysis, file, root, TextSize::from((separator_at - 1) as u32))
+            let candidates = base_type(analysis, file, root, TextSize::from((separator_at - 1) as u32), edit)
                 .map(|base| members(analysis, base, c == ':'))
                 .unwrap_or_default();
             Completions { candidates, incomplete: false }
         }
-        _ => names(analysis, file, offset, prefix),
+        _ => names(analysis, file, edit.cursor(offset), prefix),
     }
 }
 
@@ -107,7 +189,8 @@ fn matches(name: &str, prefix: &str) -> bool {
     name.len() >= prefix.len() && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
 
-/// The locals in scope, then the globals and keywords starting with `prefix`
+/// The locals in scope, then the globals and keywords starting with
+/// `prefix`. `offset` is in the text `analysis` was made from
 fn names(analysis: &Analysis, file: FileId, offset: TextSize, prefix: &str) -> Completions {
     // The innermost declaration of each name, as it hides the others
     let mut locals: HashMap<&str, (TextSize, Candidate)> = HashMap::new();
@@ -161,23 +244,23 @@ fn names(analysis: &Analysis, file: FileId, offset: TextSize, prefix: &str) -> C
 /// The type of the code ending just before the `.` or `:` at `separator`: a
 /// name (`frame.`, `a.b.`), a call (`CreateFrame("Frame"):`) or an index
 /// (`colors[1]:`)
-fn base_type(analysis: &Analysis, file: FileId, root: &SyntaxNode, separator: TextSize) -> Option<Type> {
+fn base_type(analysis: &Analysis, file: FileId, root: &SyntaxNode, separator: TextSize, edit: &Edit) -> Option<Type> {
     let mut token = root.token_at_offset(separator).left_biased()?;
     // Whitespace (or the separator itself, if the offset is inside it) before it
     while token.text_range().end() > separator || matches!(token.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment) {
         token = token.prev_token()?;
     }
     match token.kind() {
-        SyntaxKind::Name => name_type(analysis, file, &token).map(|(ty, _)| ty),
-        SyntaxKind::RightBracket => call_type(analysis, file, &token),
-        SyntaxKind::RightSquareBracket => index_type(analysis, file, root, &token),
+        SyntaxKind::Name => name_type(analysis, file, &token, edit).map(|(ty, _)| ty),
+        SyntaxKind::RightBracket => call_type(analysis, file, &token, edit),
+        SyntaxKind::RightSquareBracket => index_type(analysis, file, root, &token, edit),
         _ => None,
     }
 }
 
 /// What indexing gives, for the index ending at `bracket`: the field a
 /// string key names (`t["name"]`), else what the table holds
-fn index_type(analysis: &Analysis, file: FileId, root: &SyntaxNode, bracket: &SyntaxToken) -> Option<Type> {
+fn index_type(analysis: &Analysis, file: FileId, root: &SyntaxNode, bracket: &SyntaxToken, edit: &Edit) -> Option<Type> {
     // Its `[`, past any brackets inside the key
     let mut depth = 0;
     let mut open = bracket.prev_token()?;
@@ -192,27 +275,34 @@ fn index_type(analysis: &Analysis, file: FileId, root: &SyntaxNode, bracket: &Sy
     }
     // A string key names a field, which the analysis recorded at the key
     let key = open.next_token().filter(|t| t.kind() == SyntaxKind::String && t.next_token().as_ref() == Some(bracket));
-    if let Some(field) = key.and_then(|key| analysis.field_reference_at(file, key.text_range().start()).filter(|f| f.range == key.text_range())) {
+    let key = key.and_then(|key| edit.range(key.text_range()));
+    if let Some(field) = key.and_then(|key| analysis.field_reference_at(file, key.start()).filter(|f| f.range == key)) {
         return Some(field.types)
     }
-    let base = base_type(analysis, file, root, open.text_range().start())?;
+    let base = base_type(analysis, file, root, open.text_range().start(), edit)?;
     let contents = analysis.contents(base.named.identity()?)?;
     Some(contents.values)
 }
 
 /// The type at a name the analysis recorded, and for a callee, what calling it there returns
-fn name_type(analysis: &Analysis, file: FileId, token: &SyntaxToken) -> Option<(Type, Option<Values>)> {
-    let range = token.text_range();
+fn name_type(analysis: &Analysis, file: FileId, token: &SyntaxToken, edit: &Edit) -> Option<(Type, Option<Values>)> {
+    let range = edit.range(token.text_range())?;
     if let Some(r) = analysis.reference_at(file, range.start()).filter(|r| r.range == range) {
         return Some((r.types, r.call_returns.clone()))
     }
-    analysis.field_reference_at(file, range.start())
+    let found = analysis.field_reference_at(file, range.start())
         .filter(|f| f.range == range)
-        .map(|f| (f.types, f.call_returns.clone()))
+        .map(|f| (f.types, f.call_returns.clone()));
+    // An older text may not have had it as an expression: a name on its own,
+    // before the `.` after it was typed, isn't a statement
+    if found.is_none() && edit.is_change() {
+        edit.missed.set(true);
+    }
+    found
 }
 
 /// The first value returned by the call whose argument list ends at `bracket`
-fn call_type(analysis: &Analysis, file: FileId, bracket: &SyntaxToken) -> Option<Type> {
+fn call_type(analysis: &Analysis, file: FileId, bracket: &SyntaxToken, edit: &Edit) -> Option<Type> {
     let arguments = bracket.parent().filter(|n| n.kind() == SyntaxKind::ArgumentList)?;
     let call = arguments.parent().filter(|n| n.kind() == SyntaxKind::FunctionCall)?;
     // The method name of `a:b()`, or the last name of the callee `a.b()`
@@ -224,7 +314,7 @@ fn call_type(analysis: &Analysis, file: FileId, bracket: &SyntaxToken) -> Option
             _ => None,
         })
         .last()?;
-    let (ty, call_returns) = name_type(analysis, file, &callee)?;
+    let (ty, call_returns) = name_type(analysis, file, &callee, edit)?;
     if let Some(returns) = call_returns {
         return Some(returns.first())
     }
@@ -338,7 +428,7 @@ mod tests {
         let text = source.replacen('|', "", 1);
         let root = SyntaxNode::new_root(Generator::new(&text).process_all());
         let analysis = Analysis::analyse_file(&root, definitions);
-        complete(&analysis, FileId(0), &root, &text, TextSize::from(offset as u32))
+        complete(&analysis, FileId(0), &root, &text, TextSize::from(offset as u32), &Edit::none())
     }
 
     fn names_of(completions: &Completions) -> Vec<&str> {
@@ -507,5 +597,61 @@ mod tests {
         assert!(complete_at("local n = 1.|").candidates.is_empty());
         let c = complete_at("local a = 1\nlocal s = 'x' .. |");
         assert!(names_of(&c).contains(&"a"));
+    }
+
+    /// Completions at `|` in `source`, from an analysis of `analysed` (the
+    /// text before the latest keystrokes), and whether it couldn't answer
+    fn complete_stale(analysed: &str, source: &str) -> (Completions, bool) {
+        let definitions = Arc::new(crate::definitions::load(None));
+        let old = SyntaxNode::new_root(Generator::new(analysed).process_all());
+        let analysis = Analysis::analyse_file(&old, &definitions);
+        let offset = source.find('|').expect("no cursor");
+        let text = source.replacen('|', "", 1);
+        let root = SyntaxNode::new_root(Generator::new(&text).process_all());
+        let edit = Edit::between(analysed, &text);
+        let c = complete(&analysis, FileId(0), &root, &text, TextSize::from(offset as u32), &edit);
+        (c, edit.missed())
+    }
+
+    #[test]
+    fn from_an_analysis_of_earlier_text() {
+        // A name being typed: the locals in scope where it is
+        let (c, missed) = complete_stale("local apple = 1\nlocal function f()\n  local banana = 2\n  a\nend\nlocal cherry = 3", "local apple = 1\nlocal function f()\n  local banana = 2\n  app|\nend\nlocal cherry = 3");
+        assert!(!missed);
+        assert!(names_of(&c).contains(&"apple") && names_of(&c).contains(&"banana"), "{:?}", names_of(&c));
+        assert!(!names_of(&c).contains(&"cherry"), "{:?}", names_of(&c));
+        // Members of what was there before
+        let (c, missed) = complete_stale("local t = { a = 1 }\nprint(t)", "local t = { a = 1 }\nprint(t.|)");
+        assert!(!missed);
+        assert_eq!(names_of(&c), ["a"]);
+        // A name on its own isn't an expression, so the analysis has nothing at it
+        let (_, missed) = complete_stale("local t = { a = 1 }\nt", "local t = { a = 1 }\nt.|");
+        assert!(missed);
+        // And after an edit above it, which moved it
+        let (c, missed) = complete_stale("local t = { a = 1 }\nlocal x = 2\nt.", "local t = { a = 1 }\nlocal xyz = 2\nt.|");
+        assert!(!missed);
+        assert_eq!(names_of(&c), ["a"]);
+        // `t` typed since, which the analysis doesn't know
+        let (_, missed) = complete_stale("local t = { a = 1 }\n", "local t = { a = 1 }\nt.|");
+        assert!(missed);
+        // Nor what `te` became
+        let (_, missed) = complete_stale("local te = { a = 1 }\nlocal tea = {}\nte", "local te = { a = 1 }\nlocal tea = {}\ntea.|");
+        assert!(missed);
+    }
+
+    #[test]
+    fn edit_between_texts() {
+        let edit = Edit::between("abcdef", "abXYdef");
+        assert_eq!((edit.start, edit.old_end, edit.new_end), (2, 3, 4));
+        assert_eq!(edit.cursor(TextSize::from(4)), TextSize::from(3));
+        assert_eq!(edit.cursor(TextSize::from(6)), TextSize::from(5));
+        assert_eq!(edit.range(TextRange::new(0.into(), 2.into())), Some(TextRange::new(0.into(), 2.into())));
+        assert_eq!(edit.range(TextRange::new(4.into(), 7.into())), Some(TextRange::new(3.into(), 6.into())));
+        assert_eq!(edit.range(TextRange::new(1.into(), 3.into())), None);
+        // Not splitting a character
+        let edit = Edit::between("aé", "aè");
+        assert_eq!((edit.start, edit.old_end, edit.new_end), (1, 3, 3));
+        let edit = Edit::between("same", "same");
+        assert_eq!(edit.range(TextRange::new(1.into(), 3.into())), Some(TextRange::new(1.into(), 3.into())));
     }
 }
