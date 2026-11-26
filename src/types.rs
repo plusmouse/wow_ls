@@ -4088,7 +4088,20 @@ impl<'a> Walker<'a> {
         // unknown identity are only a fallback: one field name is reused by many
         // unrelated tables (`entry.texts.cooldown` and `pools.cooldown`), so
         // merging them in would lose what's known about this one
-        match own {
+        // Not one of its named fields, but a table stored to under string
+        // keys (`t[key] = v`) may hold it: what it holds, as `t[name]` reads.
+        // Not a variable's stand-in for a table it doesn't know, which holds
+        // anything, as fields of that name elsewhere say more
+        let entry = match (own, base.named) {
+            (None, NamedRef::Table(id)) if id.slot & PSEUDO == 0 => {
+                self.note(Read::Entries(id));
+                self.entries_of(prior, id)
+                    .filter(|entries| entries.keys.set.contains(TypeSet::STRING) && entries.values.set != TypeSet::NEVER)
+                    .map(|entries| entries.values | Type::NIL)
+            }
+            _ => None,
+        };
+        match own.or(entry) {
             Some(own) => own,
             None => {
                 self.note(Read::AnyTableField(name_key(name)));
@@ -7960,6 +7973,11 @@ mod tests {
         assert_eq!(types_of("local t = { n = 1 } local a = t['n']", "a"), ["number"]);
         // A string key could be any named field
         assert_eq!(types_of("local t = { n = 1 } local k = 'x' .. 1 local a = t[k]", "a"), ["number?"]);
+        // And a field not named could be any entry under a string key
+        assert_eq!(types_of("local k = 'x' .. 1 local t = {} t[k] = 'v' local a = t.n", "a"), ["string?"]);
+        assert_eq!(types_of("local t = {} for k in pairs({ a = 1 }) do t[k] = 'v' end local a = t.a", "a"), ["string?"]);
+        // Number keys only: no field of a name is among them
+        assert_eq!(types_of("local t = {} t[1] = 'a' local a = t.n", "a"), ["unknown"]);
         // Storing nil removes
         assert_eq!(types_of("local t = {} t[1] = nil", "t"), ["table", "table"]);
         // Only named fields: still a plain table
