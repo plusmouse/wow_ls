@@ -28,7 +28,9 @@
 //!   Otherwise (if branch, loop, function body) it is *unioned* with it.
 //! * A read from inside a different function than the declaration (an upvalue)
 //!   gets the union of every value ever assigned, since the closure could run at
-//!   any time.
+//!   any time. Unless no assignment can come after the closure is made (every
+//!   one is earlier in the declaring function, with no loop around the closure
+//!   but not the declaration): then it's the type where the closure is made.
 //! * Globals start as unknown, because other files (or the WoW API) may set them.
 //!
 //! * Loop bodies are walked until the types flowing back to the top of the loop
@@ -1063,6 +1065,13 @@ pub struct Binding {
     assigned: bool,
     /// Written after its declaration (so far, on this walk)
     reassigned: bool,
+    /// How many loops were being walked where it was declared
+    loop_depth: usize,
+    /// The furthest place the function declaring it writes it, its
+    /// declaration included
+    last_write: TextSize,
+    /// Whether a function inside the one declaring it writes it
+    closure_written: bool,
 }
 
 impl Binding {
@@ -1906,7 +1915,8 @@ impl Analysis {
         let longest = self.bindings.len().max(older.bindings.len());
         for id in 0..longest {
             let same = match (self.bindings.get(id), older.bindings.get(id)) {
-                (Some(a), Some(b)) => a.name == b.name && a.types == b.types && a.assigned == b.assigned,
+                (Some(a), Some(b)) => a.name == b.name && a.types == b.types && a.assigned == b.assigned
+                    && a.last_write == b.last_write && a.closure_written == b.closure_written,
                 _ => false,
             };
             if !same {
@@ -2696,6 +2706,9 @@ struct Walker<'a> {
     /// The function being walked's code, to tell what it makes, for each
     /// function being walked
     function_ranges: Vec<(TextRange, usize)>,
+    /// How many loops were being walked where each function in
+    /// `function_ranges` is
+    closure_loop_depths: Vec<usize>,
     /// Per function being walked: what each return position returns new, so
     /// far (None once returns disagree)
     fresh: Vec<Option<Vec<Option<FreshObject>>>>,
@@ -2845,6 +2858,9 @@ struct Record {
     function_count: usize,
     writes: Arc<[Arc<Write>]>,
     reads: Arc<HashSet<Read>>,
+    /// Upvalues read as they were where the body is, which must be the same
+    /// to replay it
+    upvalues: Arc<[(BindingId, Type)]>,
 }
 
 /// A function body being walked, for its `Record`
@@ -2858,6 +2874,8 @@ struct Frame {
     globals_created_start: usize,
     function_count_start: usize,
     writes: Vec<Arc<Write>>,
+    /// Upvalues read as they are where the body is (see `upvalue_here`)
+    upvalues: Vec<(BindingId, Type)>,
 }
 
 /// A call passing a parameter (or `...`) of the code calling it straight on.
@@ -3415,6 +3433,9 @@ impl<'a> Walker<'a> {
             scope_depth,
             assigned: false,
             reassigned: false,
+            loop_depth: self.loop_depth,
+            last_write: declaration.map_or(TextSize::from(0), |range| range.start()),
+            closure_written: false,
         });
         self.current.push(types);
         id
@@ -3486,6 +3507,8 @@ impl<'a> Walker<'a> {
         let index = self.references.len();
         let types = if self.bindings[id].function == self.function {
             self.current[id]
+        } else if let Some(types) = self.upvalue_here(id) {
+            types
         } else {
             // An upvalue: the closure could run after any assignment
             self.deferred.push(index);
@@ -3494,6 +3517,40 @@ impl<'a> Walker<'a> {
         let types = self.builtin_global(id).unwrap_or(types);
         self.references.push(Reference { file: self.file, range: token.text_range(), binding: id, types, write: false, callee: false, call_returns: None });
         types
+    }
+
+    /// An upvalue as it is where the closure reading it is made, when no
+    /// assignment can come after: every write to it is in the function
+    /// declaring it, before the closure, with no loop around the closure that
+    /// isn't around the declaration too (which would run the writes again).
+    /// What's narrowed there holds then, as a check that it's a table does
+    /// for a callback made after it. Known from the previous walk, which saw
+    /// every write
+    fn upvalue_here(&mut self, id: BindingId) -> Option<Type> {
+        let prior = self.prior?;
+        let binding = &self.bindings[id];
+        if binding.kind == BindingKind::Global {
+            return None
+        }
+        // The closure made in the binding's function, which this is inside
+        let declaring = self.function_ranges.iter().position(|&(_, function)| function == binding.function);
+        let closure = declaring.map_or(0, |at| at + 1);
+        let (&(range, _), &loop_depth) = self.function_ranges.get(closure).zip(self.closure_loop_depths.get(closure))?;
+        self.note(Read::Binding(id));
+        let seen = prior.bindings.get(id).filter(|p| p.name == binding.name)?;
+        if seen.closure_written || seen.last_write >= range.start() || loop_depth != binding.loop_depth || binding.file != self.file {
+            return None
+        }
+        let types = self.current[id];
+        // Only ever narrower: a parameter's type there may not be settled yet,
+        // and a loop may have widened it
+        if (types | seen.types) != seen.types {
+            return None
+        }
+        for frame in self.frames.iter_mut().filter(|frame| id < frame.bindings_start) {
+            frame.upvalues.push((id, types));
+        }
+        Some(types)
     }
 
     /// Every value the previous walk saw assigned to this binding. Bindings are
@@ -3544,10 +3601,16 @@ impl<'a> Walker<'a> {
                 function.extend(kept.iter().copied());
             }
         }
+        let in_closure = self.bindings[id].function != self.function;
         let binding = &mut self.bindings[id];
         binding.types |= types;
         binding.assigned = true;
         binding.reassigned = true;
+        if in_closure {
+            binding.closure_written = true;
+        } else {
+            binding.last_write = binding.last_write.max(token.text_range().start());
+        }
         // An `if`'s branches don't count, as the `if` joins what each leaves
         let innermost_conditional = self.scopes.iter().rposition(|s| s.conditional && !s.joined);
         let replaces = binding.function == self.function
@@ -4306,6 +4369,8 @@ impl<'a> Walker<'a> {
                 binding.types |= *types;
                 binding.assigned = true;
                 binding.reassigned = true;
+                // Only a body declared inside the binding's function records it
+                binding.closure_written = true;
                 self.set_current(*id, self.current[*id] | *types);
             }
         }
@@ -4322,6 +4387,14 @@ impl<'a> Walker<'a> {
             }
         }
         innermost.writes.push(Arc::new(write));
+    }
+
+    /// Upvalues a body read as they are where it is: the parent's too, for
+    /// those declared outside it
+    fn upvalues_to_parent(&mut self, upvalues: &[(BindingId, Type)]) {
+        if let Some(parent) = self.frames.last_mut() {
+            parent.upvalues.extend(upvalues.iter().filter(|&&(id, _)| id < parent.bindings_start).copied());
+        }
     }
 
     /// A body's reads and writes become its parent's too, as the parent
@@ -4389,6 +4462,7 @@ impl<'a> Walker<'a> {
             globals_created_start: self.globals_created.len(),
             function_count_start: self.function_count,
             writes: Vec::new(),
+            upvalues: Vec::new(),
         });
         self.reads.borrow_mut().push(Default::default());
         self.walk_function_body(def, self_type, id);
@@ -4411,10 +4485,12 @@ impl<'a> Walker<'a> {
                 .collect(),
             function_count: self.function_count - frame.function_count_start,
             writes: frame.writes.into(),
+            upvalues: frame.upvalues.into(),
             reads: Arc::new(reads),
         };
         self.mark_dirty(id, &record);
         self.pass_to_parent(&record.reads, &record.writes);
+        self.upvalues_to_parent(&record.upvalues);
         self.records.insert(id, Arc::new(record));
         id
     }
@@ -4431,7 +4507,8 @@ impl<'a> Walker<'a> {
             && record.bindings_start == self.bindings.len()
             && record.function_count_start == self.function_count
             && record.globals.iter().all(|(name, _)| !self.globals.contains_key(name));
-        let unchanged = || record.reads.iter().all(|read| !self.changed.contains(read) && !self.dirty.contains(read));
+        let unchanged = || record.reads.iter().all(|read| !self.changed.contains(read) && !self.dirty.contains(read))
+            && record.upvalues.iter().all(|&(binding, types)| self.current.get(binding) == Some(&types));
         (same_place && unchanged()).then(|| record.clone())
     }
 
@@ -4477,7 +4554,9 @@ impl<'a> Walker<'a> {
             function_count: record.function_count,
             writes: Arc::clone(&record.writes),
             reads: Arc::clone(&record.reads),
+            upvalues: Arc::clone(&record.upvalues),
         };
+        self.upvalues_to_parent(&record.upvalues);
         self.records.insert(id, Arc::new(replayed));
     }
 
@@ -4530,6 +4609,7 @@ impl<'a> Walker<'a> {
         self.returns.push(None);
         self.calls.push(Vec::new());
         self.function_ranges.push((def.syntax().text_range(), self.function));
+        self.closure_loop_depths.push(self.loop_depth);
         self.function_ids.push(id);
         self.function_numbers.insert(self.function, id);
         self.fresh.push(None);
@@ -4573,6 +4653,7 @@ impl<'a> Walker<'a> {
         let returned = self.returns.pop().flatten();
         let calls = self.calls.pop().unwrap_or_default();
         self.function_ranges.pop();
+        self.closure_loop_depths.pop();
         self.function_ids.pop();
         let fresh_returns = self.fresh.pop().flatten().unwrap_or_default();
         self.kept_outside.pop();
@@ -8280,8 +8361,15 @@ mod tests {
         assert_eq!(library_types_of(&format!("{t} local x = t and t.n"), "x")[0], "number?");
         // `while`
         assert_eq!(library_types_of(&format!("{maybe} while v do local x = v v = nil end"), "x")[0], "number");
-        // Upvalues aren't narrowed: a closure can run at any time
-        assert_eq!(library_types_of(&format!("{maybe} if v then local f = function() local x = v end end"), "x")[0], "number?");
+        // An upvalue is narrowed as it is where the closure is made when
+        // nothing can assign it after
+        assert_eq!(library_types_of(&format!("{maybe} if v then local f = function() local x = v end end"), "x")[0], "number");
+        // Not when something may: the closure can run at any time
+        assert_eq!(library_types_of(&format!("{maybe} if v then local f = function() local x = v end end v = nil"), "x")[0], "number?");
+        assert_eq!(library_types_of(&format!("{maybe} local function g() v = nil end if v then local f = function() local x = v end end"), "x")[0], "number?");
+        // Nor in a loop the variable is outside of, which runs its writes again
+        // while an earlier closure lives on
+        assert_eq!(library_types_of(&format!("{maybe} while true do v = math.random() > 0.5 and 1 or nil if v then local f = function() local x = v end end end"), "x")[0], "number?");
     }
 
     #[test]
