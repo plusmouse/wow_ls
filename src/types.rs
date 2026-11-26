@@ -1917,11 +1917,17 @@ impl Analysis {
             // settle again (see `Walker::settled`). Starting from where they
             // settled, a table filled from itself already holds what it's
             // given, and a function called round a loop is passed it. Bodies
-            // reading a table nothing's been seen stored in are walked again;
+            // reading a table nothing's been seen stored in, or a field
+            // written nowhere seen, are walked again;
             // parameters change at the end of this walk, which the next sees
+            let written: HashSet<u64> = result.any_table_fields.keys().chain(layer.any_table_fields.keys()).map(|name| name_key(name)).collect();
             changed = result.records.values()
                 .flat_map(|record| record.reads.iter())
-                .filter(|read| matches!(read, Read::Entries(at) if !result.entries.contains_key(at) && !layer.entries.contains_key(at)))
+                .filter(|read| match read {
+                    Read::Entries(at) => !result.entries.contains_key(at) && !layer.entries.contains_key(at),
+                    Read::AnyTableField(name) => !written.contains(name),
+                    _ => false,
+                })
                 .cloned()
                 .collect();
             if changed.is_empty() && !result.provisional {
@@ -4806,6 +4812,14 @@ impl<'a> Walker<'a> {
                 let found = match (own, self.layer.any_table_fields.get(name).copied()) {
                     (Some(a), Some(b)) => a | b,
                     (Some(found), None) | (None, Some(found)) => found,
+                    // Written nowhere seen: nothing yet until walks settle,
+                    // as unknown would stay in what it flows round (see
+                    // `Walker::settled`), then unknown, as it may be set
+                    // where that can't be seen
+                    (None, None) if !self.settled => {
+                        self.provisional.set(true);
+                        return Type::default()
+                    }
                     (None, None) => Type::UNKNOWN,
                 };
                 // Some other table's field, perhaps, so not a type to report
@@ -6047,7 +6061,9 @@ impl<'a> Walker<'a> {
             if on.named.identity().is_none() && !matches!(on.named, NamedRef::Several(_)) && !declared {
                 continue
             }
-            returns.values[slot] = narrowed_to(self.field_read(on, &field.field), value);
+            // What it returns isn't known yet: nothing it says narrows the field
+            let held = self.field_read(on, &field.field);
+            returns.values[slot] = if value.set == TypeSet::NEVER { held } else { narrowed_to(held, value) };
         }
         if let Some(receiver) = receiver.filter(|_| is_method) {
             self.callback_registry(receiver, callee, &arguments, &argument_types);
