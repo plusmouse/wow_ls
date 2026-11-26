@@ -109,6 +109,44 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         let with = if dependency_files > 0 { format!(" (and {dependency_files} of addons it depends on, analysed first)") } else { String::new() };
         eprintln!("{} files{with}, {} bindings, {} references in {:?} ({} walks, {}% of function bodies replayed)", paths.len(), analysis.bindings.len(), analysis.references.len(), dur, analysis.walks, replayed);
         Ok(())
+    } else if args.len() > 2 && args[1] == "reach" {
+        // How far an edit to each function body of an addon would reach
+        let definitions = std::sync::Arc::new(definitions::load(None));
+        let addon = project::Addon::load(std::path::Path::new(&args[2]))?;
+        let xml = project::xml_files(std::slice::from_ref(&addon), &[]);
+        let (definitions, _) = project::with_xml(&definitions, &xml, &Default::default(), &mut Default::default());
+        let analysed = types::keeping_records(|| project::analyse_addon(&addon, &[], &Default::default(), &definitions, &mut Default::default()));
+        types::print_reach(&analysed.analysis, &analysed.paths);
+        Ok(())
+    } else if args.len() > 4 && args[1] == "edit-reach" {
+        // For a Lua file of an addon going through the texts given in turn,
+        // what each step's edit shrinks and how far a reset from that reaches
+        let definitions = std::sync::Arc::new(definitions::load(None));
+        let addon = project::Addon::load(std::path::Path::new(&args[2]))?;
+        let path = project::normalise(std::path::Path::new(&args[3]));
+        let xml = project::xml_files(std::slice::from_ref(&addon), &[]);
+        let (definitions, _) = project::with_xml(&definitions, &xml, &Default::default(), &mut Default::default());
+        let mut cache = Default::default();
+        let mut previous: Option<(String, std::sync::Arc<project::Analysed>)> = None;
+        for (step, state) in args[4..].iter().enumerate() {
+            let text = std::fs::read_to_string(state)?;
+            let open = std::collections::HashMap::from([(path.clone(), text.clone())]);
+            let cache_ref: &mut std::collections::HashMap<std::path::PathBuf, std::sync::Arc<project::Analysed>> = &mut cache;
+            cache_ref.remove(&addon.toc);
+            let analysed = types::keeping_records(|| project::analyse_addon(&addon, &[], &open, &definitions, cache_ref));
+            if let Some((before, old)) = &previous {
+                let Some(file) = analysed.paths.iter().position(|p| *p == path) else {
+                    println!("step {step}: file not in the addon");
+                    break
+                };
+                let (start, old_end, new_end) = types::span(before, &text);
+                let found = types::shrinkage(&old.analysis, &analysed.analysis, types::FileId(file as u32), start, old_end, new_end, analysed.paths.len());
+                println!("step {step}: span {start}..{old_end}->{new_end} in_function={} units={} shrunk={} signatures={} reach={}/{} cycle={}keys/{} kinds={}",
+                    found.in_function, found.units, found.shrunk.len(), found.signatures, found.reach, found.total, found.cycle_keys, found.cycle_reach, found.shrunk.join(","));
+            }
+            previous = Some((text, analysed));
+        }
+        Ok(())
     } else if args.len() > 3 && args[1] == "generate-templates" {
         // wow_ls generate-templates <wow-ui-source> <out.json> [GlobalColor.csv]
         let out = std::path::Path::new(&args[3]);

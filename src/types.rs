@@ -86,6 +86,17 @@
 //!   it did. On the next walk a body that read nothing which has changed since
 //!   is replayed from that record instead of walked: the same result, without
 //!   the work. Turning this off (`WOW_LS_NO_REPLAY`) is only for checking it
+//! * A call is recursive when its caller and callee are in one cycle of
+//!   calls, found from every function's calls once a walk is done, for the
+//!   next walk. So a call depends only on whether the two are in one cycle,
+//!   not on everything each function it reaches calls.
+//! * Each record also notes, for each key the body influences (each write,
+//!   each local it declares, its signature), what that depended on: what
+//!   the statement doing it read, and what went into the locals it used,
+//!   however indirectly. What a call passes depends on its callee and
+//!   arguments, not on what the callee returns, and which functions a body
+//!   calls on how each callee was reached. These say what an edit can
+//!   change (see `reach`), and change nothing a walk finds
 //!
 //! Known gaps: globals the file doesn't assign (like saved variables) have no
 //! table identity. Recursive calls return unknown.
@@ -1000,9 +1011,9 @@ pub struct FreshObject {
     pub fields: Vec<(String, Type)>,
 }
 
-/// What calling a function reads of it: all but what it calls, which
-/// `Read::Calls` covers, and its parameters' types, which `Read::ParameterTypes`
-/// does. Those settle walk by walk, and only its own body reads them
+/// What calling a function reads of it: all but what it calls, which only
+/// finding its cycle of calls reads (`Read::CallCycle`), and its parameters'
+/// types, which `Read::ParameterTypes` does. Those settle walk by walk, and only its own body reads them
 struct Signature<'a>(&'a FunctionInfo);
 
 impl PartialEq for Signature<'_> {
@@ -1737,6 +1748,11 @@ pub struct Analysis {
     /// What `...` is in each function taking it, when every call is seen: the
     /// arguments past its named parameters
     pub vararg_values: HashMap<FunctionId, Values>,
+    /// For each function in a cycle of calls (one calling itself, or calling
+    /// one that comes back round to it), the cycle's first function: a call
+    /// between two with the same is recursive. Found from what each function
+    /// calls once a walk is done, for the next walk
+    pub call_cycles: HashMap<FunctionId, FunctionId>,
     /// How many walks it took to settle
     pub walks: usize,
     /// Each file's tree, for what field references point to. The green tree,
@@ -1843,6 +1859,7 @@ impl Analysis {
             next.walked += result.walked;
             if combining {
                 next.combine_inputs(&result);
+                next.find_call_cycles();
             }
             // Once found, still saved: leaving out a write can take away the
             // field a table was found through, and keeping it again would put
@@ -1857,7 +1874,38 @@ impl Analysis {
             // swap between two types). From then on each walk keeps what
             // the one before had too: both sides of the cycle, which only
             // grows, so it settles
-            combining |= !seen.insert(next.fingerprint());
+            let repeat = !seen.insert(next.fingerprint());
+            if repeat && !combining && std::env::var_os("SHOW_COMBINING").is_some() {
+                eprintln!("COMBINING starts at walk {walks} (phase {}), {} keys changed:", if unstored_unknown { 2 } else { 1 }, changed.len());
+                let at = |l: &Location| -> String {
+                    let text = files.get(l.file.0 as usize).map(|f| f.root.text().to_string()).unwrap_or_default();
+                    let o = usize::from(l.offset).min(text.len());
+                    let line = text[..o].matches('\n').count() + 1;
+                    let start = text[..o].rfind('\n').map_or(0, |i| i + 1);
+                    let end = text[o..].find('\n').map_or(text.len(), |i| o + i);
+                    format!("f{}:{} slot {:x} `{}`", l.file.0, line, l.slot, text[start..end].trim())
+                };
+                let name_of = |h: u64| -> String {
+                    result.fields.values().flat_map(|m| m.keys()).chain(result.any_table_fields.keys()).chain(result.function_fields.iter())
+                        .find(|n| name_key(n) == h).cloned().unwrap_or_else(|| format!("#{h:x}"))
+                };
+                let describe = |r: &Read| -> String { match r {
+                    Read::Binding(id) => { let b = &next.bindings[*id]; format!("Binding {} {:?} f{} decl {:?}: {} -> {}  [{:?} -> {:?}]", b.name, b.kind, b.file.0, b.declaration.map(|d| at(&Location { file: b.file, offset: d.start(), slot: 0 })), result.bindings.get(*id).map(|o| next.describe(o.types)).unwrap_or_default(), next.describe(b.types), result.bindings.get(*id).map(|o| o.types), b.types) }
+                    Read::Field(l, h) => { let n = name_of(*h); let o = result.fields.get(l).and_then(|m| m.get(&n)).copied(); let v = next.fields.get(l).and_then(|m| m.get(&n)).copied(); format!("Field {} of {}: {} -> {}  [{:?} -> {:?}]", n, at(l), o.map(|t| next.describe(t)).unwrap_or_default(), v.map(|t| next.describe(t)).unwrap_or_default(), o, v) }
+                    Read::AnyTableField(h) => format!("AnyTableField {}", name_of(*h)),
+                    Read::FunctionField(h) => format!("FunctionField {}", name_of(*h)),
+                    Read::Fields(l) => format!("Fields of {}", at(l)),
+                    Read::Entries(l) => format!("Entries of {}", at(l)),
+                    Read::Parent(l) => format!("Parent of {}", at(l)),
+                    Read::Function(l) => format!("Function {}", at(l)),
+                    Read::ParameterTypes(l) => format!("ParameterTypes {}", at(l)),
+                    other => format!("{other:?}"),
+                } };
+                let mut keys: Vec<String> = changed.iter().map(describe).collect();
+                keys.sort();
+                for k in keys.iter().take(40) { eprintln!("    {k}"); }
+            }
+            combining |= repeat;
             result = next;
             if !settled {
                 continue
@@ -1891,9 +1939,11 @@ impl Analysis {
     /// What only the result shows, not needed between walks: done once, for
     /// the last walk
     fn complete(&mut self) {
-        // Only the next walk needed them
-        self.records = HashMap::default();
-        self.pending_calls = Vec::new();
+        // Only the next walk needed them, unless they're asked for
+        if !KEEP_RECORDS.with(|keep| keep.get()) {
+            self.records = HashMap::default();
+            self.pending_calls = Vec::new();
+        }
         for &index in &self.deferred {
             let binding = self.references[index].binding;
             self.references[index].types = self.bindings[binding].types;
@@ -1941,6 +1991,72 @@ impl Analysis {
         found
     }
 
+    /// Finds `call_cycles` from what each function calls: the groups of
+    /// functions that can each come round to calling the others
+    fn find_call_cycles(&mut self) {
+        let mut ids: Vec<FunctionId> = self.functions.keys().copied().collect();
+        ids.sort();
+        let index: HashMap<FunctionId, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let calls: Vec<Vec<usize>> = ids.iter()
+            .map(|id| self.functions[id].calls.iter().filter_map(|callee| index.get(callee).copied()).collect())
+            .collect();
+        let mut called_by: Vec<Vec<usize>> = vec![Vec::new(); ids.len()];
+        for (caller, callees) in calls.iter().enumerate() {
+            for &callee in callees {
+                called_by[callee].push(caller);
+            }
+        }
+        // Kosaraju: the order calls finish in, then the groups reached
+        // backwards from the last to finish
+        let mut order = Vec::with_capacity(ids.len());
+        let mut visited = vec![false; ids.len()];
+        for start in 0..ids.len() {
+            if visited[start] {
+                continue
+            }
+            visited[start] = true;
+            let mut stack = vec![(start, 0)];
+            while let Some((at, next)) = stack.pop() {
+                if let Some(&callee) = calls[at].get(next) {
+                    stack.push((at, next + 1));
+                    if !visited[callee] {
+                        visited[callee] = true;
+                        stack.push((callee, 0));
+                    }
+                } else {
+                    order.push(at);
+                }
+            }
+        }
+        let mut group = vec![usize::MAX; ids.len()];
+        let mut cycles = HashMap::default();
+        for &start in order.iter().rev() {
+            if group[start] != usize::MAX {
+                continue
+            }
+            group[start] = start;
+            let mut members = vec![start];
+            let mut pending = vec![start];
+            while let Some(at) = pending.pop() {
+                for &caller in &called_by[at] {
+                    if group[caller] == usize::MAX {
+                        group[caller] = start;
+                        members.push(caller);
+                        pending.push(caller);
+                    }
+                }
+            }
+            // One function on its own is a cycle only if it calls itself
+            if members.len() > 1 || calls[start].contains(&start) {
+                let first = members.iter().map(|&i| ids[i]).min().expect("at least one");
+                for &member in &members {
+                    cycles.insert(ids[member], first);
+                }
+            }
+        }
+        self.call_cycles = cycles;
+    }
+
     /// What a walk from `self` would read differently from one from `older`.
     /// Empty when the walks have settled
     fn changed_reads(&self, older: &Analysis) -> HashSet<Read> {
@@ -1967,8 +2083,11 @@ impl Analysis {
             if a.map(FunctionInfo::signature) != b.map(FunctionInfo::signature) {
                 changed.insert(Read::Function(id));
             }
-            if a.map(|f| &f.calls) != b.map(|f| &f.calls) {
-                changed.insert(Read::Calls(id));
+            if self.call_cycles.get(&id) != older.call_cycles.get(&id) {
+                changed.insert(Read::CallCycle(id));
+            }
+            if a.map(|f| f.method) != b.map(|f| f.method) {
+                changed.insert(Read::Method(id));
             }
             let types_differ = match (a, b) {
                 (Some(a), Some(b)) => a.parameters.iter().map(|p| p.types).ne(b.parameters.iter().map(|p| p.types)),
@@ -2644,6 +2763,16 @@ struct Walker<'a> {
     /// The function bodies being walked, innermost last, and what each has read
     frames: Vec<Frame>,
     reads: std::cell::RefCell<Vec<HashSet<Read>>>,
+    /// What each body's writes depend on, innermost body last
+    deps: std::cell::RefCell<Vec<BodyDeps>>,
+    /// For each call being walked, the depth of its level in the innermost
+    /// body's `levels` (see `Walker::call`), and what was read finding its
+    /// callee, which is all which function it calls depends on
+    call_scopes: Vec<CallScope>,
+    /// Where what finding the callee of the call whose returns are being
+    /// read is in its statement's logs, for `returns_of`: the level, then
+    /// the stretches of its reads and locals
+    callee_found: Option<(usize, std::ops::Range<usize>, std::ops::Range<usize>)>,
     records: HashMap<FunctionId, Arc<Record>>,
     replayed: usize,
     walked: usize,
@@ -2837,6 +2966,31 @@ enum Write {
     Binding(BindingId, Type),
 }
 
+impl Write {
+    /// The keys whose value this changes, as reading them sees it
+    fn keys(&self) -> Vec<Read> {
+        match self {
+            Write::Field(at, name, _) => vec![Read::Field(*at, name_key(name)), Read::Fields(*at)],
+            Write::AnyTableField(name, _) => vec![Read::AnyTableField(name_key(name))],
+            Write::Opened(id) => vec![Read::Opened(*id)],
+            Write::StoredInField(_, name) => vec![Read::FunctionField(name_key(name))],
+            Write::Entry(at, _, _) => vec![Read::Entries(*at)],
+            Write::Metatable(at, _) => vec![Read::Metatable(*at)],
+            Write::CallArguments(function, _) => vec![Read::ParameterTypes(*function), Read::Varargs(*function)],
+            Write::MixinsReplaced(at, _) | Write::MixinAdded(at, _) | Write::ParameterMixin(at, _) => vec![Read::Mixins(*at)],
+            Write::MixedInto(at, _) => vec![Read::MixedInto(*at)],
+            Write::CopiedFrom(copy, _) => vec![Read::Fields(*copy), Read::Entries(*copy), Read::MixedInto(*copy)],
+            Write::PoolCallback(function) => vec![Read::ParameterTypes(*function)],
+            Write::AssignedTo(function, _) => vec![Read::Function(*function)],
+            Write::Parent(at, _) => vec![Read::Parent(*at)],
+            Write::Triggered(at, event, _) => vec![Read::Triggered(*at, *event)],
+            Write::PoolObject(at, _) => vec![Read::PoolObject(*at)],
+            Write::Function(id, _) => vec![Read::Function(*id), Read::CallCycle(*id), Read::ParameterTypes(*id), Read::Method(*id)],
+            Write::Binding(id, _) => vec![Read::Binding(*id)],
+        }
+    }
+}
+
 /// Something a function body's walk read that a later walk could see
 /// differently: from the previous walk, or another body earlier in this one
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2859,8 +3013,16 @@ enum Read {
     Triggered(TableId, u64),
     PoolObject(TableId),
     Varargs(FunctionId),
-    /// Only the functions a function calls, which finding recursion reads
-    Calls(FunctionId),
+    /// Which cycle of calls a function is in, if any, which finding
+    /// recursion reads (see `Analysis::call_cycles`)
+    CallCycle(FunctionId),
+    /// Only whether a function is a method: all of its signature what a call
+    /// passes it depends on. Never read by a body, only depended on (see
+    /// `Walker::call`)
+    Method(FunctionId),
+    /// What a method's `self` is, which the statement defining it decides.
+    /// Never read by a body, only depended on
+    SelfType(FunctionId),
     /// Only the types of a function's parameters, as the previous walk settled them
     ParameterTypes(FunctionId),
     /// What the globals XML names as mixins are
@@ -2908,6 +3070,348 @@ struct Record {
     /// Upvalues read as they were where the body is, which must be the same
     /// to replay it
     upvalues: Arc<[(BindingId, Type)]>,
+    /// The function it's in, if it's not at a file's top level
+    parent: Option<FunctionId>,
+    /// What it wrote itself, not counting the functions inside it, which
+    /// `writes` includes as replaying it does them too. What it read itself
+    /// is in `own_influences`
+    own_writes: Arc<[Arc<Write>]>,
+    /// Each key its own writes, the bindings it declares and the calls
+    /// passing its parameters on influence, with the reads that went into
+    /// it: those of the statement doing it, and of the locals it used
+    own_influences: Arc<BodyInfluences>,
+}
+
+/// What a body did and read as it was walked, from which what each key it
+/// influences depended on is worked out when asked (see
+/// `BodyInfluences::get`): only the last walk's are ever asked for
+struct BodyInfluences {
+    function: FunctionId,
+    body: BodyDeps,
+    /// What it read outside any statement
+    top: Dep,
+    own_writes: Arc<[Arc<Write>]>,
+    /// The locals it declares itself, not those of functions inside it
+    own_bindings: Vec<BindingId>,
+    /// The function each call passing its parameters on calls, and what the
+    /// call read
+    pending: Vec<(FunctionId, Arc<Dep>)>,
+    found: std::sync::OnceLock<Arc<[(Read, Arc<[Read]>)]>>,
+}
+
+impl std::fmt::Debug for BodyInfluences {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "BodyInfluences({:?})", self.function)
+    }
+}
+
+impl BodyInfluences {
+    /// Each key it influences: each write, each local it declares, its
+    /// signature, what it passes on. With what each depended on: what the
+    /// statement doing it read, and what the locals it used read
+    fn get(&self) -> &[(Read, Arc<[Read]>)] {
+        self.found.get_or_init(|| self.work_out())
+    }
+
+    /// What it read itself, not counting the functions inside it
+    fn own_reads(&self) -> HashSet<Read> {
+        self.body.own_reads()
+    }
+
+    fn work_out(&self) -> Arc<[(Read, Arc<[Read]>)]> {
+        let (body, id) = (&self.body, self.function);
+        let closed = body.closed();
+        // What reaches these from its top (its parameters) does so through
+        // the locals the statements read, not wholesale
+        let requirements = body.final_reads(&body.requirements, &closed);
+        let mut outside = Dep::default();
+        outside.extend(&body.signature);
+        outside.extend(&body.calls);
+        outside.extend(&self.top);
+        let (signature, calls, outside) = (body.final_reads(&body.signature, &closed), body.final_reads(&body.calls, &closed), body.final_reads(&outside, &closed));
+        let mut influences: Vec<(Read, Arc<[Read]>)> = Vec::new();
+        // Writes of one statement share its reads: found once
+        let mut found: HashMap<*const Dep, Arc<[Read]>> = HashMap::default();
+        let mut reads_of = |dep: &Arc<Dep>| found.entry(Arc::as_ptr(dep)).or_insert_with(|| body.final_reads(dep, &closed)).clone();
+        for (index, write) in self.own_writes.iter().enumerate() {
+            // Its own signature: what its returns, requirements and calls read
+            if let Write::Function(written, _) = &**write {
+                if *written == id {
+                    influences.push((Read::Function(id), signature.clone()));
+                    // Its parameters' types: what calls pass (their own
+                    // influence) and what the body requires of them
+                    influences.push((Read::ParameterTypes(id), requirements.clone()));
+                    influences.push((Read::CallCycle(id), calls.clone()));
+                    // Whether it's a method is how it's written, which reads nothing
+                    influences.push((Read::Method(id), Arc::from([])));
+                    continue
+                }
+            }
+            let deps = match body.write_deps.get(index) {
+                Some(Some(dep)) => reads_of(dep),
+                // Outside any statement: as the signature and calls do
+                _ => outside.clone(),
+            };
+            for key in write.keys() {
+                influences.push((key, deps.clone()));
+            }
+        }
+        for &binding in &self.own_bindings {
+            let deps: Arc<[Read]> = body.local_numbers.get(&binding)
+                .and_then(|&number| closed.get(number as usize))
+                .map(|reads| reads.iter().map(|number| body.keys[number as usize].clone()).collect())
+                .unwrap_or_default();
+            influences.push((Read::Binding(binding), deps));
+        }
+        for (function, dep) in &body.self_type_deps {
+            influences.push((Read::SelfType(*function), reads_of(dep)));
+        }
+        for (callee, dep) in &self.pending {
+            let deps = reads_of(dep);
+            influences.push((Read::ParameterTypes(*callee), deps.clone()));
+            influences.push((Read::Varargs(*callee), deps));
+        }
+        influences.into()
+    }
+}
+
+/// A set of a body's numbers for keys or locals (see `BodyDeps`): a bit
+/// each, as a body reads few
+#[derive(Default, Clone, Debug, PartialEq)]
+struct Bits(Vec<u64>);
+
+impl Bits {
+    fn of(numbers: &[u32]) -> Bits {
+        let mut bits = Bits::default();
+        for &number in numbers {
+            bits.insert(number);
+        }
+        bits
+    }
+
+    fn insert(&mut self, number: u32) {
+        let word = number as usize / 64;
+        if self.0.len() <= word {
+            self.0.resize(word + 1, 0);
+        }
+        self.0[word] |= 1 << (number % 64);
+    }
+
+    /// Takes it out, returning whether it was there
+    fn remove(&mut self, number: u32) -> bool {
+        let Some(word) = self.0.get_mut(number as usize / 64) else { return false };
+        let bit = 1 << (number % 64);
+        let there = *word & bit != 0;
+        *word &= !bit;
+        there
+    }
+
+    /// Adds `other`'s, returning whether that added any
+    fn union(&mut self, other: &Bits) -> bool {
+        if self.0.len() < other.0.len() {
+            self.0.resize(other.0.len(), 0);
+        }
+        let mut grew = false;
+        for (mine, theirs) in self.0.iter_mut().zip(&other.0) {
+            let joined = *mine | theirs;
+            grew |= joined != *mine;
+            *mine = joined;
+        }
+        grew
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.0.iter().enumerate().flat_map(|(word, &bits)| {
+            (0..64u32).filter(move |bit| bits & (1 << bit) != 0).map(move |bit| word as u32 * 64 + bit)
+        })
+    }
+}
+
+/// What a statement read: the keys, and the body's own locals, whose own
+/// reads are added once the body is done (see `BodyDeps::closed`), as a
+/// local can be assigned after it's read, round a loop. By their numbers in
+/// the body
+#[derive(Default, Debug, Clone)]
+struct Dep {
+    reads: Bits,
+    locals: Bits,
+}
+
+impl Dep {
+    /// From stretches of a statement's logs
+    fn of(reads: &[u32], locals: &[u32]) -> Dep {
+        Dep { reads: Bits::of(reads), locals: Bits::of(locals) }
+    }
+
+    fn extend(&mut self, other: &Dep) {
+        self.reads.union(&other.reads);
+        self.locals.union(&other.locals);
+    }
+}
+
+/// A statement being walked: what it read, and what it did
+#[derive(Default)]
+struct DepLevel {
+    /// The numbers of the keys it read, in order, repeats and all: a call's
+    /// reads are a stretch of it (see `CallScope`)
+    reads: Vec<u32>,
+    /// The numbers of the body's own locals it read, likewise
+    locals: Vec<u32>,
+    /// Positions in `BodyDeps::write_deps`
+    writes: Vec<usize>,
+    /// The body's own locals it assigned or narrowed
+    bindings: Vec<BindingId>,
+    /// Positions in the walk's pending calls it made
+    pending: Vec<usize>,
+    /// Methods it defines, whose `self` it decides
+    self_types: Vec<FunctionId>,
+    /// Whether it gives the body's signature something: a return, a
+    /// requirement of a parameter, a field given what's passed, a call
+    /// passing a method on
+    signature: bool,
+    /// Whether it calls a function, which finding cycles of calls reads
+    calls: bool,
+    /// Whether it requires a type of a parameter of the body, which its
+    /// parameters' types depend on (as well as what calls pass)
+    requirement: bool,
+}
+
+/// What each thing a body does depends on, as it's walked (see
+/// `Record::own_influences`). The keys it reads and its own locals are
+/// numbered in the order it first meets them, so what a statement read is
+/// a few bits
+#[derive(Default)]
+struct BodyDeps {
+    bindings_start: usize,
+    /// The body's top, then each statement being walked, innermost last
+    levels: Vec<DepLevel>,
+    keys: Vec<Read>,
+    key_numbers: HashMap<Read, u32>,
+    /// The keys it read, which replaying it checks: not `Read::Method`,
+    /// which is only depended on
+    noted: Bits,
+    locals: Vec<BindingId>,
+    local_numbers: HashMap<BindingId, u32>,
+    /// Each write's statement's reads, once the statement is done
+    write_deps: Vec<Option<Arc<Dep>>>,
+    /// The reads of each statement assigning each local, by its number,
+    /// joined once the body is done
+    binding_deps: HashMap<u32, Vec<Arc<Dep>>>,
+    pending_deps: Vec<(usize, Arc<Dep>)>,
+    self_type_deps: Vec<(FunctionId, Arc<Dep>)>,
+    signature: Dep,
+    calls: Dep,
+    requirements: Dep,
+}
+
+impl BodyDeps {
+    fn key(&mut self, read: &Read) -> u32 {
+        if let Some(&number) = self.key_numbers.get(read) {
+            return number
+        }
+        let number = self.keys.len() as u32;
+        self.keys.push(read.clone());
+        self.key_numbers.insert(read.clone(), number);
+        number
+    }
+
+    fn local(&mut self, id: BindingId) -> u32 {
+        if let Some(&number) = self.local_numbers.get(&id) {
+            return number
+        }
+        let number = self.locals.len() as u32;
+        self.locals.push(id);
+        self.local_numbers.insert(id, number);
+        number
+    }
+
+    /// A statement is done: what it did depends on all it read
+    fn resolve(&mut self, level: DepLevel) {
+        // Most statements did nothing that depends on what they read
+        if level.writes.is_empty() && level.bindings.is_empty() && level.pending.is_empty() && level.self_types.is_empty()
+            && !level.signature && !level.calls && !level.requirement {
+            return
+        }
+        let dep = Arc::new(Dep::of(&level.reads, &level.locals));
+        for write in level.writes {
+            self.write_deps[write] = Some(dep.clone());
+        }
+        for binding in level.bindings {
+            let number = self.local(binding);
+            let deps = self.binding_deps.entry(number).or_default();
+            // Assigned again in the same statement, or narrowed and joined
+            if !deps.last().is_some_and(|last| Arc::ptr_eq(last, &dep)) {
+                deps.push(dep.clone());
+            }
+        }
+        for pending in level.pending {
+            self.pending_deps.push((pending, dep.clone()));
+        }
+        for function in level.self_types {
+            self.self_type_deps.push((function, dep.clone()));
+        }
+        if level.signature {
+            self.signature.extend(&dep);
+        }
+        if level.calls {
+            self.calls.extend(&dep);
+        }
+        if level.requirement {
+            self.requirements.extend(&dep);
+        }
+    }
+
+    /// Each of the body's locals' keys, by its number, with those of the
+    /// locals that went into it, however indirectly
+    fn closed(&self) -> Vec<Bits> {
+        let mut direct: Vec<Dep> = vec![Dep::default(); self.locals.len()];
+        for (&number, deps) in &self.binding_deps {
+            for dep in deps {
+                direct[number as usize].extend(dep);
+            }
+        }
+        let mut closed: Vec<Bits> = direct.iter().map(|dep| dep.reads.clone()).collect();
+        loop {
+            let mut grew = false;
+            for (number, dep) in direct.iter().enumerate() {
+                for local in dep.locals.iter().filter(|&local| local as usize != number) {
+                    let theirs = closed[local as usize].clone();
+                    grew |= closed[number].union(&theirs);
+                }
+            }
+            if !grew {
+                return closed
+            }
+        }
+    }
+
+    /// The keys `dep` reads, with those its locals read
+    fn final_reads(&self, dep: &Dep, closed: &[Bits]) -> Arc<[Read]> {
+        let mut reads = dep.reads.clone();
+        for local in dep.locals.iter() {
+            if let Some(theirs) = closed.get(local as usize) {
+                reads.union(theirs);
+            }
+        }
+        reads.iter().map(|number| self.keys[number as usize].clone()).collect()
+    }
+
+    /// The keys it read
+    fn own_reads(&self) -> HashSet<Read> {
+        self.noted.iter().map(|number| self.keys[number as usize].clone()).collect()
+    }
+}
+
+/// A call being walked: where its stretch of its statement's logs (and
+/// what the statement did) starts, and where finding its callee ended
+struct CallScope {
+    level: usize,
+    reads: usize,
+    locals: usize,
+    writes: usize,
+    pending: usize,
+    callee: Option<(usize, usize)>,
+    ended: bool,
 }
 
 /// A function body being walked, for its `Record`
@@ -2921,6 +3425,8 @@ struct Frame {
     globals_created_start: usize,
     function_count_start: usize,
     writes: Vec<Arc<Write>>,
+    /// The body's own, not those of the functions inside it
+    own_writes: Vec<Arc<Write>>,
     /// Upvalues read as they are where the body is (see `upvalue_here`)
     upvalues: Vec<(BindingId, Type)>,
 }
@@ -2955,6 +3461,24 @@ struct Snapshot {
     /// replaying them needs
     function_count: usize,
 }
+
+thread_local! {
+    /// Whether analyses keep the last walk's records, for `reach`
+    static KEEP_RECORDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with analyses keeping the last walk's records
+pub fn keeping_records<R>(f: impl FnOnce() -> R) -> R {
+    KEEP_RECORDS.with(|keep| keep.set(true));
+    let result = f();
+    KEEP_RECORDS.with(|keep| keep.set(false));
+    result
+}
+
+mod reach;
+mod shrink;
+pub use reach::print_reach;
+pub use shrink::{shrinkage, span};
 
 /// Every file's top level, which run one after another
 const MAIN_CHUNK: usize = 0;
@@ -2996,8 +3520,28 @@ impl<'a> Walker<'a> {
     /// Notes a read for each function body being walked
     fn note(&self, read: Read) {
         // Only the innermost: each body's reads join its parent's when it ends
-        if let Some(innermost) = self.reads.borrow_mut().last_mut() {
-            innermost.insert(read);
+        if let Some(body) = self.deps.borrow_mut().last_mut() {
+            let number = body.key(&read);
+            body.noted.insert(number);
+            // One of its own locals: what went into it, once that's all known
+            let local = match read {
+                Read::Binding(id) if id >= body.bindings_start && self.bindings.get(id).is_some_and(|b| b.kind != BindingKind::Global) => Some(body.local(id)),
+                _ => None,
+            };
+            if let Some(level) = body.levels.last_mut() {
+                match local {
+                    Some(local) => level.locals.push(local),
+                    None => level.reads.push(number),
+                }
+            }
+        }
+        // Outside any body: only a body's reads are recorded. A body's are
+        // its numbered keys, joined with those of the functions inside it
+        // once it's done (see `function_body`)
+        if self.deps.borrow().is_empty() {
+            if let Some(innermost) = self.reads.borrow_mut().last_mut() {
+                innermost.insert(read);
+            }
         }
     }
 
@@ -3018,7 +3562,16 @@ impl<'a> Walker<'a> {
                 self.pop_scope();
             }
         }
-        self.finish()
+        let prior = self.prior;
+        let mut analysis = self.finish();
+        // The same calls as the walk before, so the same cycles
+        let same_calls = prior.is_some_and(|prior| prior.functions.len() == analysis.functions.len()
+            && analysis.functions.iter().all(|(id, f)| prior.functions.get(id).is_some_and(|p| p.calls == f.calls)));
+        match prior {
+            Some(prior) if same_calls => analysis.call_cycles = prior.call_cycles.clone(),
+            _ => analysis.find_call_cycles(),
+        }
+        analysis
     }
 
     /// `self` and the other arguments of an inline XML handler, which its
@@ -3147,6 +3700,7 @@ impl<'a> Walker<'a> {
             entries: self.entries,
             metatables: self.metatables,
             vararg_values: self.vararg_values,
+            call_cycles: HashMap::default(),
             walks: 1,
             roots: self.roots.iter().map(|root| root.green().into_owned()).collect(),
             layer: self.layer,
@@ -3443,6 +3997,13 @@ impl<'a> Walker<'a> {
 
     /// Sets a binding's current type, noting the type before when in a loop
     fn set_current(&mut self, id: BindingId, types: Type) {
+        if let Some(body) = self.deps.get_mut().last_mut() {
+            if id >= body.bindings_start && self.bindings[id].kind != BindingKind::Global {
+                if let Some(level) = body.levels.last_mut() {
+                    level.bindings.push(id);
+                }
+            }
+        }
         if self.loop_depth > 0 && self.current[id] != types {
             self.loop_log.push((id, self.current[id]));
         }
@@ -3487,6 +4048,12 @@ impl<'a> Walker<'a> {
             closure_written: false,
         });
         self.current.push(types);
+        // A local starts with what its declaring statement read
+        if kind != BindingKind::Global {
+            if let Some(level) = self.deps.get_mut().last_mut().and_then(|body| body.levels.last_mut()) {
+                level.bindings.push(id);
+            }
+        }
         id
     }
 
@@ -3698,6 +4265,24 @@ impl<'a> Walker<'a> {
     }
 
     fn statement(&mut self, statement: &Statement) {
+        let tracked = !self.deps.get_mut().is_empty();
+        if tracked {
+            if let Some(body) = self.deps.get_mut().last_mut() {
+                body.levels.push(DepLevel::default());
+            }
+        }
+        self.statement_walked(statement);
+        if tracked {
+            if let Some(body) = self.deps.get_mut().last_mut() {
+                if let Some(mut level) = body.levels.pop() {
+                    level.signature |= matches!(statement, Statement::Return(_));
+                    body.resolve(level);
+                }
+            }
+        }
+    }
+
+    fn statement_walked(&mut self, statement: &Statement) {
         match statement {
             Statement::LocalAssign(s) => {
                 let names = s.name_list().map(|n| n.name_tokens()).unwrap_or_default();
@@ -4435,7 +5020,62 @@ impl<'a> Walker<'a> {
                 return
             }
         }
-        innermost.writes.push(Arc::new(write));
+        let write = Arc::new(write);
+        innermost.own_writes.push(write.clone());
+        innermost.writes.push(write);
+        if let Some(body) = self.deps.get_mut().last_mut() {
+            let index = body.write_deps.len();
+            body.write_deps.push(None);
+            if let Some(level) = body.levels.last_mut() {
+                level.writes.push(index);
+            }
+        }
+    }
+
+    /// Starts a level of its own for a declaration at the body's top, like
+    /// a parameter's, so it depends only on what it reads, not on all the
+    /// top reads
+    fn begin_declaration(&mut self) {
+        if let Some(body) = self.deps.get_mut().last_mut() {
+            body.levels.push(DepLevel::default());
+        }
+    }
+
+    /// Ends it: what it declared depends on what it read, and on `also`
+    fn end_declaration(&mut self, also: Option<Read>) {
+        if let Some(body) = self.deps.get_mut().last_mut() {
+            if body.levels.len() > 1 {
+                if let Some(mut level) = body.levels.pop() {
+                    if let Some(also) = also {
+                        let number = body.key(&also);
+                        level.reads.push(number);
+                    }
+                    body.resolve(level);
+                }
+            }
+        }
+    }
+
+    /// The statement being walked gives the body's signature something
+    fn deps_to_signature(&self) {
+        if let Some(level) = self.deps.borrow_mut().last_mut().and_then(|body| body.levels.last_mut()) {
+            level.signature = true;
+        }
+    }
+
+    /// The statement being walked requires a type of one of the body's parameters
+    fn deps_to_requirements(&self) {
+        if let Some(level) = self.deps.borrow_mut().last_mut().and_then(|body| body.levels.last_mut()) {
+            level.requirement = true;
+            level.signature = true;
+        }
+    }
+
+    /// The statement being walked calls a function
+    fn deps_to_calls(&self) {
+        if let Some(level) = self.deps.borrow_mut().last_mut().and_then(|body| body.levels.last_mut()) {
+            level.calls = true;
+        }
     }
 
     /// Upvalues a body read as they are where it is: the parent's too, for
@@ -4508,6 +5148,7 @@ impl<'a> Walker<'a> {
             return id
         }
         self.walked += 1;
+        let parent = self.function_ids.last().copied();
         self.frames.push(Frame {
             bindings_start: self.bindings.len(),
             references_start: self.references.len(),
@@ -4518,12 +5159,47 @@ impl<'a> Walker<'a> {
             globals_created_start: self.globals_created.len(),
             function_count_start: self.function_count,
             writes: Vec::new(),
+            own_writes: Vec::new(),
             upvalues: Vec::new(),
         });
         self.reads.borrow_mut().push(Default::default());
+        let bindings_start = self.bindings.len();
+        // The statement defining a method decides what its `self` is
+        if self_type.is_some() {
+            if let Some(level) = self.deps.get_mut().last_mut().and_then(|body| body.levels.last_mut()) {
+                level.self_types.push(id);
+            }
+        }
+        self.deps.get_mut().push(BodyDeps { bindings_start, levels: vec![DepLevel::default()], ..BodyDeps::default() });
         self.walk_function_body(def, self_type, id);
+        let mut body = self.deps.get_mut().pop().expect("pushed above");
+        // Its top: what's done outside any statement, like setting up its
+        // parameters and writing its signature at the end
+        let mut top = Dep::default();
+        while let Some(mut level) = body.levels.pop() {
+            top.extend(&Dep::of(&level.reads, &level.locals));
+            // Left to depend on all `top` does, below
+            level.writes.clear();
+            body.resolve(level);
+        }
         let frame = self.frames.pop().expect("pushed above");
-        let reads = self.reads.borrow_mut().pop().expect("pushed above");
+        // What the functions inside it read, and what it did
+        let mut reads = self.reads.borrow_mut().pop().expect("pushed above");
+        reads.extend(body.noted.iter().map(|number| body.keys[number as usize].clone()));
+        let own_function = frame.function_count_start + 1;
+        let own_writes: Arc<[Arc<Write>]> = frame.own_writes.into();
+        let pending: Vec<(FunctionId, Arc<Dep>)> = body.pending_deps.drain(..)
+            .filter_map(|(index, dep)| Some((self.pending_calls.get(index)?.callee, dep)))
+            .collect();
+        let influences = BodyInfluences {
+            function: id,
+            own_bindings: (frame.bindings_start..self.bindings.len()).filter(|&b| self.bindings[b].function == own_function).collect(),
+            own_writes: own_writes.clone(),
+            pending,
+            top,
+            body,
+            found: std::sync::OnceLock::new(),
+        };
         let record = Record {
             self_type,
             with_prior: self.prior.is_some(),
@@ -4543,6 +5219,9 @@ impl<'a> Walker<'a> {
             writes: frame.writes.into(),
             upvalues: frame.upvalues.into(),
             reads: Arc::new(reads),
+            parent,
+            own_writes,
+            own_influences: Arc::new(influences),
         };
         self.mark_dirty(id, &record);
         self.pass_to_parent(&record.reads, &record.writes);
@@ -4611,6 +5290,9 @@ impl<'a> Walker<'a> {
             writes: Arc::clone(&record.writes),
             reads: Arc::clone(&record.reads),
             upvalues: Arc::clone(&record.upvalues),
+            parent: record.parent,
+            own_writes: Arc::clone(&record.own_writes),
+            own_influences: Arc::clone(&record.own_influences),
         };
         self.upvalues_to_parent(&record.upvalues);
         self.records.insert(id, Arc::new(replayed));
@@ -4625,7 +5307,6 @@ impl<'a> Walker<'a> {
         enum Shared<'a> {
             Write(&'a Write),
             Signature(Signature<'a>),
-            Calls(&'a [FunctionId]),
         }
         fn shared(writes: &[Arc<Write>]) -> HashMap<Read, Vec<Shared<'_>>> {
             let mut shared: HashMap<Read, Vec<Shared>> = HashMap::default();
@@ -4633,7 +5314,6 @@ impl<'a> Walker<'a> {
                 match &**write {
                     Write::Function(id, info) => {
                         shared.entry(Read::Function(*id)).or_default().push(Shared::Signature(info.signature()));
-                        shared.entry(Read::Calls(*id)).or_default().push(Shared::Calls(&info.calls));
                     }
                     Write::Parent(at, _) => shared.entry(Read::Parent(*at)).or_default().push(Shared::Write(write)),
                     Write::Triggered(at, event, _) => shared.entry(Read::Triggered(*at, *event)).or_default().push(Shared::Write(write)),
@@ -4683,7 +5363,11 @@ impl<'a> Walker<'a> {
                 .filter(|t| t.kind() == SyntaxKind::Name)
                 .last())
                 .map(|name| name.text_range());
+            // As the statement defining the method decides
+            let function = self.function_ids.last().copied();
+            self.begin_declaration();
             let id = self.new_binding("self", BindingKind::Parameter, declaration, self_type, self.function, depth);
+            self.end_declaration(function.map(Read::SelfType));
             self.bindings[id].assigned = true;
             self.bindings[id].visible = Some(def.syntax().text_range());
             self.scopes[depth].names.insert("self".to_string(), id);
@@ -4695,8 +5379,11 @@ impl<'a> Walker<'a> {
         let parameters = params.as_ref().map(|p| p.parameter_tokens()).unwrap_or_default();
         let parameter_bindings: Vec<BindingId> = parameters.iter().enumerate()
             .map(|(i, param)| {
+                // What calls pass it, and nothing else read at the top
+                self.begin_declaration();
                 let types = self.prior_parameter_types(id, i);
                 let binding = self.declare(param, BindingKind::Parameter, types);
+                self.end_declaration(None);
                 self.parameter_index.insert(binding, i);
                 self.parameter_entry.insert(binding, self.current[binding]);
                 binding
@@ -4878,6 +5565,8 @@ impl<'a> Walker<'a> {
                 None => Some(required),
                 Some(earlier) => earlier.and_then(|earlier| self.narrower(earlier, required)),
             };
+            // Only a requirement of its own parameter says what it takes
+            self.deps_to_requirements();
             self.mandates.insert(id, merged);
         }
     }
@@ -4885,10 +5574,31 @@ impl<'a> Walker<'a> {
     fn returns_of(&mut self, id: FunctionId) -> Values {
         let returns = self.known_returns(id);
         let Some(&caller) = self.function_ids.last() else { return returns };
+        // What it calls is found from how the callee was reached, when a
+        // call says so, else from all the statement read
+        let found = self.callee_found.take();
+        let added = match (found, self.deps.get_mut().last_mut()) {
+            (Some((level, reads, locals)), Some(body)) => match body.levels.get(level) {
+                Some(level) => {
+                    for &number in &level.reads[reads] {
+                        body.calls.reads.insert(number);
+                    }
+                    for &number in &level.locals[locals] {
+                        body.calls.locals.insert(number);
+                    }
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        };
+        if !added {
+            self.deps_to_calls();
+        }
         if let Some(calls) = self.calls.last_mut().filter(|calls| !calls.contains(&id)) {
             calls.push(id);
         }
-        if !self.reaches(id, caller) {
+        if !self.recursive(caller, id) {
             return returns
         }
         // A recursive call: its results include its own, so as many values
@@ -4900,28 +5610,19 @@ impl<'a> Walker<'a> {
         Values { values: first.into_iter().collect(), rest }
     }
 
-    /// Whether calling `from` can come round to calling `to`, through the
-    /// functions each calls: on this walk for those walked already, else as
-    /// the previous walk found
-    fn reaches(&self, from: FunctionId, to: FunctionId) -> bool {
-        let mut seen = HashSet::default();
-        let mut pending = vec![from];
-        while let Some(id) = pending.pop() {
-            if id == to {
-                return true
-            }
-            if !seen.insert(id) {
-                continue
-            }
-            self.note(Read::Calls(id));
-            let function = self.functions.get(&id)
-                .or_else(|| self.layer.functions.get(&id))
-                .or_else(|| self.prior?.functions.get(&id));
-            if let Some(function) = function {
-                pending.extend(function.calls.iter().copied());
-            }
+    /// Whether `caller` calling `callee` is recursive: the same function, or
+    /// two in one cycle of calls, as the previous walk found the cycles
+    fn recursive(&self, caller: FunctionId, callee: FunctionId) -> bool {
+        if caller == callee {
+            return true
         }
-        false
+        let Some(prior) = self.prior else { return false };
+        self.note(Read::CallCycle(caller));
+        self.note(Read::CallCycle(callee));
+        match (prior.call_cycles.get(&caller), prior.call_cycles.get(&callee)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
     }
 
     fn known_returns(&self, id: FunctionId) -> Values {
@@ -5054,7 +5755,76 @@ impl<'a> Walker<'a> {
         values
     }
 
+    /// A call: what it passes depends on its callee and arguments, not on
+    /// what the callee returns, which the rest of the statement uses
     fn call(&mut self, call: &FunctionCall) -> Values {
+        let scope = self.deps.get_mut().last().and_then(|body| {
+            let level = body.levels.last()?;
+            Some(CallScope {
+                level: body.levels.len() - 1,
+                reads: level.reads.len(),
+                locals: level.locals.len(),
+                writes: level.writes.len(),
+                pending: level.pending.len(),
+                callee: None,
+                ended: false,
+            })
+        });
+        let tracked = scope.is_some();
+        if let Some(scope) = scope {
+            self.call_scopes.push(scope);
+        }
+        let values = self.call_walked(call);
+        if tracked {
+            self.end_call_scope(None);
+            self.call_scopes.pop();
+        }
+        values
+    }
+
+    /// The call being walked has written what it passes, if it hadn't
+    /// already: what it wrote depends on what it read. `callee`'s signature
+    /// was read only for whether it's a method, so that's all what's passed
+    /// depends on of it; the rest of the statement reads all of it
+    fn end_call_scope(&mut self, callee: Option<FunctionId>) {
+        let Some(scope) = self.call_scopes.last_mut() else { return };
+        let Some(body) = self.deps.get_mut().last_mut() else { return };
+        if scope.ended || scope.level + 1 != body.levels.len() {
+            return
+        }
+        scope.ended = true;
+        let level = body.levels.last_mut().expect("checked above");
+        let writes = level.writes.split_off(scope.writes.min(level.writes.len()));
+        let pending = level.pending.split_off(scope.pending.min(level.pending.len()));
+        if writes.is_empty() && pending.is_empty() {
+            return
+        }
+        let mut dep = Dep::of(&level.reads[scope.reads..], &level.locals[scope.locals..]);
+        if let Some(callee) = callee {
+            if let Some(&function) = body.key_numbers.get(&Read::Function(callee)) {
+                if dep.reads.remove(function) {
+                    let method = body.key(&Read::Method(callee));
+                    dep.reads.insert(method);
+                }
+            }
+        }
+        let dep = Arc::new(dep);
+        for write in writes {
+            body.write_deps[write] = Some(dep.clone());
+        }
+        for pending in pending {
+            body.pending_deps.push((pending, dep.clone()));
+        }
+    }
+
+    /// What finding the callee of the call being walked read
+    fn callee_found(&mut self) -> Option<(usize, std::ops::Range<usize>, std::ops::Range<usize>)> {
+        let scope = self.call_scopes.last()?;
+        let (reads, locals) = scope.callee?;
+        Some((scope.level, scope.reads..reads, scope.locals..locals))
+    }
+
+    fn call_walked(&mut self, call: &FunctionCall) -> Values {
         let is_method = call.method_name().is_some();
         // Where the callee's read was recorded, to note what this call returns
         let mut callee_read = None;
@@ -5118,6 +5888,12 @@ impl<'a> Walker<'a> {
             }
             (callee, _) => callee,
         };
+        // Which function it calls depends only on what was read so far
+        if let (Some(scope), Some(body)) = (self.call_scopes.last_mut(), self.deps.get_mut().last()) {
+            if let Some(level) = body.levels.get(scope.level).filter(|_| body.levels.len() == scope.level + 1) {
+                scope.callee = Some((level.reads.len(), level.locals.len()));
+            }
+        }
         let arguments = call.arguments();
         let argument_types = self.expression_values(&arguments);
         if let (Some(on), Some(method)) = (forward_on, call.method_name()) {
@@ -5193,9 +5969,17 @@ impl<'a> Walker<'a> {
         let mut returns = match callee.function {
             FunctionRef::One(id) => {
                 match self.pending_call(id, &arguments, &parameter_types, callee_method, is_method) {
-                    Some(pending) => self.pending_calls.push(pending),
+                    Some(pending) => {
+                        self.pending_calls.push(pending);
+                        let index = self.pending_calls.len() - 1;
+                        if let Some(level) = self.deps.get_mut().last_mut().and_then(|body| body.levels.last_mut()) {
+                            level.pending.push(index);
+                        }
+                    }
                     None => self.apply(Write::CallArguments(id, parameter_types.clone())),
                 }
+                self.end_call_scope(Some(id));
+                self.callee_found = self.callee_found();
                 let mut returns = self.returns_of(id);
                 for (slot, fresh) in fresh_returns.iter().enumerate() {
                     if let (Some(fresh), Some(&value)) = (fresh, returns.values.get(slot)) {
@@ -6079,6 +6863,7 @@ impl<'a> Walker<'a> {
     }
 
     fn add_field_write(&mut self, on: Result<On, TableId>, field: String, value: Vec<Forwarded>) {
+        self.deps_to_signature();
         if let Some(writes) = self.field_writes.last_mut() {
             let write = (on, field, value);
             if !writes.contains(&write) {
@@ -6236,6 +7021,7 @@ impl<'a> Walker<'a> {
     /// the call it already makes, which would otherwise be added again each
     /// walk, never settling
     fn add_forwarded(&mut self, call: ForwardedCall) {
+        self.deps_to_signature();
         if let Some(calls) = self.forwarded.last_mut() {
             if !calls.contains(&call) {
                 calls.push(call);
@@ -7517,6 +8303,99 @@ mod tests {
             .filter(|r| file.binding(r).name.as_ref() == name)
             .map(|r| file.describe(r.types))
             .collect()
+    }
+
+    /// With records kept: the analysis, the table each of `tables` names
+    /// holds, and the function each of `functions` holds
+    fn analyse_keeping(source: &str) -> Analysis {
+        keeping_records(|| analyse(source))
+    }
+
+    fn table_of(analysis: &Analysis, name: &str) -> TableId {
+        analysis.bindings.iter().find(|b| &*b.name == name).and_then(|b| b.types.named.identity()).expect("a table")
+    }
+
+    fn function_of(analysis: &Analysis, name: &str) -> FunctionId {
+        analysis.bindings.iter().find(|b| &*b.name == name)
+            .and_then(|b| match b.types.function { FunctionRef::One(id) => Some(id), _ => None })
+            .expect("a function")
+    }
+
+    /// What body `function`'s record says `key` depends on
+    fn depends(analysis: &Analysis, function: FunctionId, key: &Read) -> Vec<Read> {
+        let record = analysis.records.get(&function).expect("a record");
+        record.own_influences.get().iter()
+            .filter(|(k, _)| k == key)
+            .flat_map(|(_, deps)| deps.iter().cloned())
+            .collect()
+    }
+
+    #[test]
+    fn writes_depend_on_what_their_statement_and_its_locals_read() {
+        let analysis = analyse_keeping("local t, u = { x = 1 }, {}
+            local function f()
+                local x = t.x
+                u.y = x
+                u.z = 1
+            end");
+        let (t, u, f) = (table_of(&analysis, "t"), table_of(&analysis, "u"), function_of(&analysis, "f"));
+        let read_x = Read::Field(t, name_key("x"));
+        assert!(depends(&analysis, f, &Read::Field(u, name_key("y"))).contains(&read_x));
+        assert!(!depends(&analysis, f, &Read::Field(u, name_key("z"))).contains(&read_x));
+    }
+
+    #[test]
+    fn a_local_assigned_later_round_a_loop_counts() {
+        let analysis = analyse_keeping("local t, u = { x = 1 }, {}
+            local function f()
+                local v
+                for i = 1, 2 do
+                    u.a = v
+                    v = t.x
+                end
+            end");
+        let (t, u, f) = (table_of(&analysis, "t"), table_of(&analysis, "u"), function_of(&analysis, "f"));
+        assert!(depends(&analysis, f, &Read::Field(u, name_key("a"))).contains(&Read::Field(t, name_key("x"))));
+    }
+
+    #[test]
+    fn what_a_call_passes_depends_on_its_arguments_not_its_returns() {
+        let analysis = analyse_keeping("local t = { arg = 1, r = 2 }
+            local function g(p) return t.r end
+            local function f() local y = g(t.arg) return y end");
+        let (t, g, f) = (table_of(&analysis, "t"), function_of(&analysis, "g"), function_of(&analysis, "f"));
+        let passed = depends(&analysis, f, &Read::ParameterTypes(g));
+        assert!(passed.contains(&Read::Field(t, name_key("arg"))), "{passed:?}");
+        assert!(passed.contains(&Read::Method(g)), "{passed:?}");
+        assert!(!passed.contains(&Read::Function(g)), "{passed:?}");
+        // What it returns does depend on `g`'s
+        assert!(depends(&analysis, f, &Read::Function(f)).contains(&Read::Function(g)));
+    }
+
+    #[test]
+    fn a_signature_depends_only_on_what_gives_it_something() {
+        let analysis = analyse_keeping("local t, u = { w = 1 }, {}
+            local function f(a) u.q = t.w return a end");
+        let (t, f) = (table_of(&analysis, "t"), function_of(&analysis, "f"));
+        let signature = depends(&analysis, f, &Read::Function(f));
+        assert!(!signature.contains(&Read::Field(t, name_key("w"))), "{signature:?}");
+        assert!(signature.contains(&Read::ParameterTypes(f)), "{signature:?}");
+        // Its parameters' types: what it requires of them, and nothing here
+        assert!(depends(&analysis, f, &Read::ParameterTypes(f)).is_empty());
+    }
+
+    #[test]
+    fn cycles_of_calls_are_found_once_a_walk_is_done() {
+        let analysis = analyse("local a, b, c
+            function a() return b() end
+            function b() return a() end
+            function c() return a() end");
+        let cycle = |name: &str| analysis.bindings.iter().find(|b| &*b.name == name)
+            .and_then(|b| match b.types.function { FunctionRef::One(id) => analysis.call_cycles.get(&id).copied(), _ => None });
+        assert!(cycle("a").is_some());
+        assert_eq!(cycle("a"), cycle("b"));
+        // Calls into the cycle, but isn't called back
+        assert_eq!(cycle("c"), None);
     }
 
     #[test]
