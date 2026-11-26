@@ -3159,6 +3159,8 @@ impl<'a> Walker<'a> {
         let meets = |passed: Type, mandated: Type| {
             let objects = match passed.named {
                 NamedRef::Several(_) => passed.named.alternatives(),
+                // Any of several tables made in the files, each of which meets it
+                NamedRef::Tables(_) => passed.named.identities().into_iter().map(NamedRef::Table).collect(),
                 named => vec![named],
             };
             mandated.set.contains(passed.set) && objects.iter().all(|object| {
@@ -3230,7 +3232,17 @@ impl<'a> Walker<'a> {
                 }
                 for (i, parameter) in function.parameters.iter().enumerate() {
                     let ty = match (parameter.mandated, &passed) {
-                        (Some(mandated), Some(passed)) if all_seen[id] && meets(passed.get(i), mandated) => passed.get(i),
+                        // What the calls seen pass, as any parameter takes
+                        // until walks settle, when it meets the requirement
+                        (Some(mandated), Some(passed)) if trusted[id] && meets(passed.get(i), mandated) => passed.get(i),
+                        // Nothing passed yet: nothing yet, as the requirement
+                        // (a plain `table`) would stand for a table of unknown
+                        // origin, which may hold anything, round a loop that's
+                        // never rid of it (see `Walker::settled`)
+                        (Some(_), passed) if !self.settled && passed.as_ref().is_none_or(|p| p.get(i).set == TypeSet::NEVER) => {
+                            self.provisional.set(true);
+                            Type::default()
+                        }
                         (Some(mandated), _) => mandated,
                         (None, Some(passed)) if trusted[id] => passed.get(i),
                         _ => {
@@ -7780,6 +7792,9 @@ mod tests {
         assert_eq!(builtin_types_of("function F(x) local y = floor(x) end", "x"), ["number", "number"]);
         // What the body requires beats what callers pass
         assert_eq!(builtin_types_of("local function f(x) return floor(x) end f('1')", "x"), ["number", "number"]);
+        // Any of several tables meets a requirement of a table, so they're kept
+        let source = "local a = { x = 1 } local b = { y = 2 } local u = c and a or b local function g(t) local k = next(t) local v = t.x end g(u)";
+        assert_eq!(library_types_of(source, "v")[0], "number");
     }
 
     #[test]
