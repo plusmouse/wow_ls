@@ -2204,7 +2204,11 @@ impl Analysis {
                 pending.extend(self.mixins.get(&at).into_iter().flatten().filter_map(|mixin| mixin.named.identity()));
             }
             tables.sort();
-            tables.into_iter().map(|at| Node::Field(Some(at), name.to_string())).collect()
+            // A variable's stand-in for a table it can't identify: a read
+            // through it is any table's field of that name, as for a table
+            // that can't be identified at all (see `field_read`)
+            let any = tables.iter().any(|at| at.slot & PSEUDO != 0).then(|| Node::Field(None, name.to_string()));
+            tables.into_iter().map(|at| Node::Field(Some(at), name.to_string())).chain(any).collect()
         };
         let mut ids: Vec<&FunctionId> = self.functions.keys().collect();
         ids.sort();
@@ -4975,7 +4979,7 @@ impl<'a> Walker<'a> {
                 }
             }
             Statement::Return(s) => {
-                for expression in s.expressions() {
+                for expression in s.expressions().iter().flat_map(loop_operands) {
                     if let Some(index) = self.own_parameter_read(&expression) {
                         if let Some(returned) = self.returned_parameters.last_mut() {
                             returned.push(index);
@@ -7402,11 +7406,13 @@ impl<'a> Walker<'a> {
     fn note_loop_write(&mut self, on: Type, field: &str, value: Option<&Expression>) {
         let Some(value) = value else { return };
         let on = loop_tables(on.named);
-        if let Some(index) = self.own_parameter_read(value) {
-            self.add_loop_edge(LoopEdge::ParameterToField(index, on, field.to_string()));
-        } else if let Expression::FunctionCall(call) = value {
-            if let Some(&callee) = self.callees.get(&(self.file, call.syntax().text_range())) {
-                self.add_loop_edge(LoopEdge::ReturnToField(callee, on, field.to_string()));
+        for value in loop_operands(value) {
+            if let Some(index) = self.own_parameter_read(&value) {
+                self.add_loop_edge(LoopEdge::ParameterToField(index, on.clone(), field.to_string()));
+            } else if let Expression::FunctionCall(call) = &value {
+                if let Some(&callee) = self.callees.get(&(self.file, call.syntax().text_range())) {
+                    self.add_loop_edge(LoopEdge::ReturnToField(callee, on.clone(), field.to_string()));
+                }
             }
         }
     }
@@ -7417,6 +7423,8 @@ impl<'a> Walker<'a> {
         self.callees.insert((self.file, call.syntax().text_range()), callee);
         for (i, argument) in arguments.iter().enumerate() {
             let Ok(position) = usize::try_from(i as isize + offset) else { continue };
+            for argument in loop_operands(argument) {
+            let argument = &argument;
             if let Some(index) = self.own_parameter_read(argument) {
                 self.add_loop_edge(LoopEdge::ParameterToParameter(index, callee, position));
             } else if let Some((_, field)) = match argument { Expression::Identifier(identifier) => field_access(identifier.syntax()), _ => None } {
@@ -7426,6 +7434,7 @@ impl<'a> Walker<'a> {
                     .map(|reference| loop_tables(reference.base))
                     .unwrap_or_default();
                 self.add_loop_edge(LoopEdge::FieldToParameter(on, field.text().to_string(), callee, position));
+            }
             }
         }
     }
@@ -8322,6 +8331,7 @@ impl<'a> Walker<'a> {
                             (false, ..) => self.entry_write(table, Type::of(TypeSet::NUMBER), value),
                             (true, Some(name), _) => {
                                 self.field_write(table, name.text(), value);
+                                self.note_loop_write(table, name.text(), Some(&e));
                                 self.field_reference(&name.parent().unwrap_or_else(|| field.clone()), name, table, value, true);
                             }
                             (true, None, Some(Key::Name(name, token))) => {
@@ -8856,6 +8866,26 @@ fn loop_tables(named: NamedRef) -> Vec<TableId> {
     }
 }
 
+/// The values `expression` may be, for `LoopEdge`s: those of `a or b` and
+/// `a and b` are either's, and `(a)`'s are `a`'s
+fn loop_operands(expression: &Expression) -> Vec<Expression> {
+    match expression {
+        Expression::GroupedExpression(grouped) => grouped.get_expression().map(|e| loop_operands(&e)).unwrap_or_default(),
+        Expression::BinaryExpression(binary) => {
+            let parts = binary.flatten();
+            let logical = parts.iter().all(|part| !matches!(part, BinaryPart::Operator(op) if !matches!(op, Operator::Or | Operator::And)));
+            if !logical {
+                return Expression::cast(expression.syntax().clone()).into_iter().collect()
+            }
+            parts.into_iter()
+                .filter_map(|part| match part { BinaryPart::Operand(operand) => Some(operand), BinaryPart::Operator(_) => None })
+                .flat_map(|operand| loop_operands(&operand))
+                .collect()
+        }
+        _ => Expression::cast(expression.syntax().clone()).into_iter().collect(),
+    }
+}
+
 /// The group of each node of a graph, by `edges` from each: nodes in one
 /// group each reach the others (Kosaraju's algorithm)
 fn strongly_connected(edges: &[Vec<usize>]) -> Vec<usize> {
@@ -9276,6 +9306,49 @@ mod tests {
         // Only `text` is in the loop, not `cf`
         let loops: Vec<usize> = analysis.field_loops.iter().map(|&(_, i)| i).collect();
         assert_eq!(loops, [0]);
+    }
+
+    /// The parameters found in loops through fields, by name
+    fn loop_parameters(source: &str) -> Vec<String> {
+        let analysis = analyse_with(source, &library());
+        let mut names: Vec<String> = analysis.field_loops.iter()
+            .map(|(id, i)| analysis.functions[id].parameters[*i].name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn loop_through_constructor_field() {
+        // `{ rollID = rollID }` put in a list, read back and passed on
+        let source = "local M = {}
+        local waiting = {}
+        function M:Next(event)
+            local roll = waiting[1]
+            M:Start(event, roll.rollID)
+        end
+        function M:Start(event, rollID)
+            table.insert(waiting, { rollID = rollID })
+        end";
+        assert_eq!(loop_parameters(source), ["rollID"]);
+    }
+
+    #[test]
+    fn loop_through_unknown_tables_field() {
+        // `buffs.filter` of a table it can't identify is any table's
+        // `filter`, as `button.filter` of each button it can't identify is.
+        // What's written may be the parameter, through `or`
+        let source = "local function update(button, filter)
+            button.filter = filter or nil
+        end
+        local function icons(frame, filter)
+            for i = 1, 3 do update(frame.buttons[i], filter) end
+        end
+        function Update(self)
+            local buffs = self.Buffs
+            icons(buffs, buffs.filter or 'HELPFUL')
+        end";
+        assert_eq!(loop_parameters(source), ["filter", "filter"]);
     }
 
     #[test]
