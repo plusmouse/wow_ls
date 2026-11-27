@@ -2001,8 +2001,8 @@ impl Analysis {
             // the one before had too: both sides of the cycle, which only
             // grows, so it settles
             let repeat = !seen.insert(next.fingerprint());
-            if repeat && !combining && std::env::var_os("SHOW_COMBINING").is_some() {
-                eprintln!("COMBINING starts at walk {walks} (phase {}), {} keys changed:", if unstored_unknown { 2 } else { 1 }, changed.len());
+            if ((repeat && !combining) || std::env::var_os("SHOW_EVERY_WALK").is_some()) && !settled && std::env::var_os("SHOW_COMBINING").is_some() {
+                eprintln!("COMBINING{} starts at walk {walks}", if repeat && !combining { "" } else { " (every walk)" }); eprintln!("  at walk {walks} (phase {}), {} keys changed:", if unstored_unknown { 2 } else { 1 }, changed.len());
                 let at = |l: &Location| -> String {
                     let text = files.get(l.file.0 as usize).map(|f| f.root.text().to_string()).unwrap_or_default();
                     let o = usize::from(l.offset).min(text.len());
