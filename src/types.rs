@@ -1042,6 +1042,28 @@ pub struct FunctionInfo {
     /// For one of the definitions' that only some game clients have, which
     /// (`Classic`, `Classic and Forever`), shown in its signature
     pub only: Option<String>,
+    /// How what it's passed reaches fields and other functions, and what it
+    /// reads of fields reaches them (see `Analysis::field_loops`)
+    pub loop_edges: Vec<LoopEdge>,
+    /// The parameters it returns as they are, as `return text` does
+    pub returned_parameters: Vec<usize>,
+}
+
+/// A step a value takes from one function's parameter to another's
+/// through a field, for finding loops through fields (see
+/// `Analysis::field_loops`). A field is by the tables it's on, or none for
+/// one on a table that can't be identified, and its name
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LoopEdge {
+    /// `x.f = p`: parameter `p` written to field `f`
+    ParameterToField(usize, Vec<TableId>, String),
+    /// `x.f = g(...)`: what `g` returns written to field `f`, which is what
+    /// `g` was passed when it returns a parameter
+    ReturnToField(FunctionId, Vec<TableId>, String),
+    /// `g(x.f)`: field `f` passed for `g`'s parameter
+    FieldToParameter(Vec<TableId>, String, FunctionId, usize),
+    /// `g(p)`: parameter `p` passed on for `g`'s parameter
+    ParameterToParameter(usize, FunctionId, usize),
 }
 
 /// What a `FieldWrite` or `ReturnedField` is on
@@ -1794,6 +1816,16 @@ fn renumber_function(info: &FunctionInfo, file: &impl Fn(FileId) -> FileId) -> F
         returned_fields: info.returned_fields.clone(),
         iterated: info.iterated.as_ref().map(|values| renumber_values(values, file)),
         only: info.only.clone(),
+        loop_edges: info.loop_edges.iter().map(|edge| {
+            let tables = |tables: &[TableId]| tables.iter().map(|&at| renumber(at, file)).collect();
+            match edge {
+                LoopEdge::ParameterToField(p, on, field) => LoopEdge::ParameterToField(*p, tables(on), field.clone()),
+                LoopEdge::ReturnToField(id, on, field) => LoopEdge::ReturnToField(renumber(*id, file), tables(on), field.clone()),
+                LoopEdge::FieldToParameter(on, field, id, i) => LoopEdge::FieldToParameter(tables(on), field.clone(), renumber(*id, file), *i),
+                LoopEdge::ParameterToParameter(p, id, i) => LoopEdge::ParameterToParameter(*p, renumber(*id, file), *i),
+            }
+        }).collect(),
+        returned_parameters: info.returned_parameters.clone(),
     }
 }
 
@@ -1876,6 +1908,15 @@ pub struct Analysis {
     /// between two with the same is recursive. Found from what each function
     /// calls once a walk is done, for the next walk
     pub call_cycles: HashMap<FunctionId, FunctionId>,
+    /// Parameters what they're passed comes back to through a field, as
+    /// `ShowGuild(rowWidth)` writes `self.oldRowWidth = rowWidth` and
+    /// `OnEvent` calls `ShowGuild(self.oldRowWidth)`. A field read sees the
+    /// walk before's writes, and a parameter settles once a walk is done, so
+    /// the value takes two walks to come round: what odd walks have and what
+    /// even walks have never meet, and something only one of them got stays
+    /// in it, swapping each walk. Each keeps what it had the walk before as
+    /// well, so they meet. Found from each function's `loop_edges`
+    pub field_loops: HashSet<(FunctionId, usize)>,
     /// How many walks it took to settle
     pub walks: usize,
     /// Whether walks came round to a state seen before, so they only
@@ -1990,6 +2031,7 @@ impl Analysis {
             if combining {
                 next.combine_inputs(&result);
                 next.find_call_cycles();
+                next.find_field_loops();
             }
             // Once found, still saved: leaving out a write can take away the
             // field a table was found through, and keeping it again would put
@@ -2130,6 +2172,76 @@ impl Analysis {
             }
         }
         found
+    }
+
+    /// Finds `field_loops` from each function's `loop_edges`: the parameters
+    /// in a group of parameters and fields that each reach the others, with
+    /// a field among them
+    fn find_field_loops(&mut self) {
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        enum Node { Parameter(FunctionId, usize), Field(Option<TableId>, String) }
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut index: HashMap<Node, usize> = HashMap::default();
+        let mut edges: Vec<Vec<usize>> = Vec::new();
+        let mut node = |n: Node, nodes: &mut Vec<Node>, edges: &mut Vec<Vec<usize>>| -> usize {
+            *index.entry(n.clone()).or_insert_with(|| { nodes.push(n); edges.push(Vec::new()); nodes.len() - 1 })
+        };
+        // The fields a field on `on` is: on each table, each a stand-in
+        // stands for, and each mixin, which one read through it reads
+        let fields = |on: &[TableId], name: &str| -> Vec<Node> {
+            if on.is_empty() {
+                return vec![Node::Field(None, name.to_string())]
+            }
+            let mut tables: Vec<TableId> = Vec::new();
+            let mut pending: Vec<TableId> = on.to_vec();
+            while let Some(at) = pending.pop() {
+                // Deep enough for any real chain of mixins
+                if tables.contains(&at) || tables.len() > 64 {
+                    continue
+                }
+                tables.push(at);
+                pending.extend(self.stand_in_members(at));
+                pending.extend(self.mixins.get(&at).into_iter().flatten().filter_map(|mixin| mixin.named.identity()));
+            }
+            tables.sort();
+            tables.into_iter().map(|at| Node::Field(Some(at), name.to_string())).collect()
+        };
+        let mut ids: Vec<&FunctionId> = self.functions.keys().collect();
+        ids.sort();
+        for &id in &ids {
+            for edge in &self.functions[id].loop_edges {
+                let steps: Vec<(Node, Node)> = match edge {
+                    LoopEdge::ParameterToField(p, on, field) => fields(on, field).into_iter()
+                        .map(|f| (Node::Parameter(*id, *p), f))
+                        .collect(),
+                    LoopEdge::ReturnToField(callee, on, field) => self.functions.get(callee).into_iter()
+                        .flat_map(|f| f.returned_parameters.iter())
+                        .flat_map(|&p| fields(on, field).into_iter().map(move |f| (Node::Parameter(*callee, p), f)))
+                        .collect(),
+                    LoopEdge::FieldToParameter(on, field, callee, i) => fields(on, field).into_iter()
+                        .map(|f| (f, Node::Parameter(*callee, *i)))
+                        .collect(),
+                    LoopEdge::ParameterToParameter(p, callee, i) => vec![(Node::Parameter(*id, *p), Node::Parameter(*callee, *i))],
+                };
+                for (from, to) in steps {
+                    let (from, to) = (node(from, &mut nodes, &mut edges), node(to, &mut nodes, &mut edges));
+                    edges[from].push(to);
+                }
+            }
+        }
+        let groups = strongly_connected(&edges);
+        let mut sizes: HashMap<usize, usize> = HashMap::default();
+        let mut with_field: HashSet<usize> = HashSet::default();
+        for (n, &group) in groups.iter().enumerate() {
+            *sizes.entry(group).or_default() += 1;
+            if matches!(nodes[n], Node::Field(..)) {
+                with_field.insert(group);
+            }
+        }
+        self.field_loops = nodes.iter().zip(&groups)
+            .filter(|&(_, group)| sizes[group] > 1 && with_field.contains(group))
+            .filter_map(|(n, _)| match n { Node::Parameter(id, i) => Some((*id, *i)), Node::Field(..) => None })
+            .collect();
     }
 
     /// Finds `call_cycles` from what each function calls: the groups of
@@ -3062,6 +3174,13 @@ struct Walker<'a> {
     /// The stand-ins parameters have for a table they can't identify, which
     /// are already theirs
     parameter_pseudos: HashSet<TableId>,
+    /// For each function being walked, its `FunctionInfo::loop_edges`
+    loop_edges: Vec<Vec<LoopEdge>>,
+    /// For each function being walked, its `FunctionInfo::returned_parameters`
+    returned_parameters: Vec<Vec<usize>>,
+    /// The function each call to one of the files' functions calls, by where
+    /// the call is
+    callees: HashMap<(FileId, TextRange), FunctionId>,
     /// How many loops were being walked where each function in
     /// `function_ranges` is
     closure_loop_depths: Vec<usize>,
@@ -3763,6 +3882,7 @@ impl<'a> Walker<'a> {
             Some(prior) if same_calls => analysis.call_cycles = prior.call_cycles.clone(),
             _ => analysis.find_call_cycles(),
         }
+        analysis.find_field_loops();
         analysis
     }
 
@@ -3893,6 +4013,7 @@ impl<'a> Walker<'a> {
             metatables: self.metatables,
             vararg_values: self.vararg_values,
             call_cycles: HashMap::default(),
+            field_loops: HashSet::default(),
             walks: 1,
             cycled: false,
             roots: self.roots.iter().map(|root| root.green().into_owned()).collect(),
@@ -4128,7 +4249,16 @@ impl<'a> Walker<'a> {
                     self.stand_ins.get_mut().entry(stand_in(Place::Parameter(*id, i))).or_default();
                 }
             }
-            let types = types.iter().enumerate().map(|(i, &ty)| kept_at(self.stand_ins.get_mut(), Place::Parameter(*id, i), ty).0).collect();
+            // In a loop through a field: with what it had the walk before
+            // too (see `Analysis::field_loops`)
+            let prior = self.prior;
+            let types = types.iter().enumerate().map(|(i, &ty)| {
+                let before = prior.filter(|prior| prior.field_loops.contains(&(*id, i)))
+                    .and_then(|prior| prior.functions.get(id)?.parameters.get(i))
+                    .map(|p| p.types);
+                let ty = before.map_or(ty, |before| ty | before);
+                kept_at(self.stand_ins.get_mut(), Place::Parameter(*id, i), ty).0
+            }).collect();
             kept.insert(*id, types);
         }
         let parameters = kept;
@@ -4579,6 +4709,7 @@ impl<'a> Walker<'a> {
                                 // Only a value of its own, not one of several a call returns
                                 let value = (expressions.len() == targets.len()).then(|| expressions.get(i)).flatten();
                                 self.note_field_write(&base_expression, base, field.text(), value);
+                                self.note_loop_write(base, field.text(), value);
                                 self.field_write(base, field.text(), types);
                                 self.field_reference(target.syntax(), &field, base, types, true);
                             }
@@ -4844,6 +4975,13 @@ impl<'a> Walker<'a> {
                 }
             }
             Statement::Return(s) => {
+                for expression in s.expressions() {
+                    if let Some(index) = self.own_parameter_read(&expression) {
+                        if let Some(returned) = self.returned_parameters.last_mut() {
+                            returned.push(index);
+                        }
+                    }
+                }
                 let returned_fields: Vec<Option<ReturnedField>> = s.expressions().iter().map(|e| self.returned_field(e)).collect();
                 if let Some(fields) = self.returned_fields.last_mut() {
                     *fields = Some(match fields.take() {
@@ -5780,6 +5918,8 @@ impl<'a> Walker<'a> {
         let outer_fields = (std::mem::take(&mut self.narrowed_fields), self.field_epoch);
         self.returns.push(None);
         self.calls.push(Vec::new());
+        self.loop_edges.push(Vec::new());
+        self.returned_parameters.push(Vec::new());
         self.function_ranges.push((def.syntax().text_range(), self.function));
         self.closure_loop_depths.push(self.loop_depth);
         self.function_ids.push(id);
@@ -5831,6 +5971,10 @@ impl<'a> Walker<'a> {
         }
         let returned = self.returns.pop().flatten();
         let calls = self.calls.pop().unwrap_or_default();
+        let loop_edges = self.loop_edges.pop().unwrap_or_default();
+        let mut returned_parameters = self.returned_parameters.pop().unwrap_or_default();
+        returned_parameters.sort();
+        returned_parameters.dedup();
         self.function_ranges.pop();
         self.closure_loop_depths.pop();
         self.function_ids.pop();
@@ -5884,7 +6028,7 @@ impl<'a> Walker<'a> {
         }).collect();
         let varargs = params.is_some_and(|p| p.ellipsis())
             .then(|| Parameter { name: "...".to_string(), types: Type::UNKNOWN, mandated: None });
-        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls, field_writes, returned_fields, iterated, only: None }));
+        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls, field_writes, returned_fields, iterated, only: None, loop_edges, returned_parameters }));
     }
 
     /// `returns`, with the templates the definitions say objects the function
@@ -6414,6 +6558,7 @@ impl<'a> Walker<'a> {
         };
         let mut returns = match callee.function {
             FunctionRef::One(id) => {
+                self.note_loop_call(call, id, &arguments, offset);
                 match self.pending_call(id, &arguments, &parameter_types, callee_method, is_method) {
                     Some(pending) => {
                         self.pending_calls.push(pending);
@@ -7239,6 +7384,52 @@ impl<'a> Walker<'a> {
     /// The function (by its number in the walk) and index of the parameter
     /// that `expression` reads, if it reads one that still holds its argument.
     /// It can be an enclosing function's
+    /// The parameter of the function being walked `expression` reads, if it
+    /// reads one as it was passed
+    fn own_parameter_read(&self, expression: &Expression) -> Option<usize> {
+        let caller = self.function_ranges.last().map(|&(_, function)| function).filter(|_| self.function != MAIN_CHUNK)?;
+        self.parameter_read(expression).filter(|&(function, _)| function == caller).map(|(_, index)| index)
+    }
+
+    fn add_loop_edge(&mut self, edge: LoopEdge) {
+        if let Some(edges) = self.loop_edges.last_mut().filter(|edges| !edges.contains(&edge)) {
+            edges.push(edge);
+        }
+    }
+
+    /// Field `field` is written `value`: a step of a loop through it if
+    /// that's a parameter, or what a function returns
+    fn note_loop_write(&mut self, on: Type, field: &str, value: Option<&Expression>) {
+        let Some(value) = value else { return };
+        let on = loop_tables(on.named);
+        if let Some(index) = self.own_parameter_read(value) {
+            self.add_loop_edge(LoopEdge::ParameterToField(index, on, field.to_string()));
+        } else if let Expression::FunctionCall(call) = value {
+            if let Some(&callee) = self.callees.get(&(self.file, call.syntax().text_range())) {
+                self.add_loop_edge(LoopEdge::ReturnToField(callee, on, field.to_string()));
+            }
+        }
+    }
+
+    /// A call to `callee` passing `arguments`, each `offset` from the
+    /// parameter it fills: the fields and parameters it passes on
+    fn note_loop_call(&mut self, call: &FunctionCall, callee: FunctionId, arguments: &[Expression], offset: isize) {
+        self.callees.insert((self.file, call.syntax().text_range()), callee);
+        for (i, argument) in arguments.iter().enumerate() {
+            let Ok(position) = usize::try_from(i as isize + offset) else { continue };
+            if let Some(index) = self.own_parameter_read(argument) {
+                self.add_loop_edge(LoopEdge::ParameterToParameter(index, callee, position));
+            } else if let Some((_, field)) = match argument { Expression::Identifier(identifier) => field_access(identifier.syntax()), _ => None } {
+                // What it was read from, as the read just walked found
+                let on = self.field_references.iter().rev()
+                    .find(|reference| reference.file == self.file && reference.range == field.text_range() && !reference.write)
+                    .map(|reference| loop_tables(reference.base))
+                    .unwrap_or_default();
+                self.add_loop_edge(LoopEdge::FieldToParameter(on, field.text().to_string(), callee, position));
+            }
+        }
+    }
+
     fn parameter_read(&self, expression: &Expression) -> Option<(usize, usize)> {
         let Expression::Identifier(identifier) = expression else { return None };
         let id = self.local_binding(identifier.simple_name()?.text())?;
@@ -8656,6 +8847,66 @@ impl<'a> Walker<'a> {
 
 /// `a.b` as (`a`, `b`), for an expression `a` and a field name `b`. None for
 /// indexing (`a[b]`) and plain names
+/// The tables a field on a value of `named` is on, for `LoopEdge`s: the
+/// table, each of several, or each object's of several
+fn loop_tables(named: NamedRef) -> Vec<TableId> {
+    match named {
+        NamedRef::Several(_) => named.alternatives().into_iter().filter_map(NamedRef::identity).collect(),
+        named => named.identities(),
+    }
+}
+
+/// The group of each node of a graph, by `edges` from each: nodes in one
+/// group each reach the others (Kosaraju's algorithm)
+fn strongly_connected(edges: &[Vec<usize>]) -> Vec<usize> {
+    let count = edges.len();
+    let mut backwards: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (from, tos) in edges.iter().enumerate() {
+        for &to in tos {
+            backwards[to].push(from);
+        }
+    }
+    // The order nodes finish in, going forwards
+    let mut order = Vec::with_capacity(count);
+    let mut visited = vec![false; count];
+    for start in 0..count {
+        if visited[start] {
+            continue
+        }
+        visited[start] = true;
+        let mut stack = vec![(start, 0)];
+        while let Some((at, next)) = stack.pop() {
+            if let Some(&to) = edges[at].get(next) {
+                stack.push((at, next + 1));
+                if !visited[to] {
+                    visited[to] = true;
+                    stack.push((to, 0));
+                }
+            } else {
+                order.push(at);
+            }
+        }
+    }
+    // Then the groups reached backwards from the last to finish
+    let mut group = vec![usize::MAX; count];
+    for &start in order.iter().rev() {
+        if group[start] != usize::MAX {
+            continue
+        }
+        group[start] = start;
+        let mut stack = vec![start];
+        while let Some(at) = stack.pop() {
+            for &from in &backwards[at] {
+                if group[from] == usize::MAX {
+                    group[from] = start;
+                    stack.push(from);
+                }
+            }
+        }
+    }
+    group
+}
+
 fn field_access(node: &SyntaxNode) -> Option<(Expression, SyntaxToken)> {
     let mut significant = node.children_with_tokens()
         .filter(|t| !matches!(t.kind(), SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment));
@@ -9004,6 +9255,27 @@ mod tests {
         local migrations = { Migrate }
         function Run(config) for _, m in ipairs(migrations) do m(config) end end";
         assert!(!analyse_with(source, &library()).cycled);
+    }
+
+    #[test]
+    fn loop_through_field_settles() {
+        // What `text` is passed comes back to it through `entry.message`,
+        // two walks round: walks before and after the switch to unknowns
+        // left one side a string and the other unknown, swapping each walk
+        let source = "local module = {}
+        function module:AddMessage(frame)
+            local entry = frame.historyBuffer:GetEntryAtIndex(1)
+            entry.message = self:InsertTimeStamp(entry.message, frame)
+        end
+        function module:InsertTimeStamp(text, cf)
+            if type(text) == 'string' then return '[time] ' .. text end
+            return text
+        end";
+        let analysis = analyse_with(source, &library());
+        assert!(!analysis.cycled);
+        // Only `text` is in the loop, not `cf`
+        let loops: Vec<usize> = analysis.field_loops.iter().map(|&(_, i)| i).collect();
+        assert_eq!(loops, [0]);
     }
 
     #[test]

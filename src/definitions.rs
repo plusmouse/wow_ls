@@ -1380,7 +1380,7 @@ impl Definitions {
             }
             Some(_) => return Err("`only` should be an array".to_string()),
         };
-        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns, calls: Vec::new(), forwarded_calls, field_writes, returned_fields, iterated: None, only })
+        Ok(FunctionInfo { parameters, method: false, varargs, returns: Values { values, rest }, fresh_returns, calls: Vec::new(), forwarded_calls, field_writes, returned_fields, iterated: None, only, loop_edges: Vec::new(), returned_parameters: Vec::new() })
     }
 
     /// `"name"` or `"name: type"`
