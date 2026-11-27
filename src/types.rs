@@ -4038,6 +4038,17 @@ impl<'a> Walker<'a> {
                         // What the calls seen pass, as any parameter takes
                         // until walks settle, when it meets the requirement
                         (Some(mandated), Some(passed)) if trusted[id] && meets(passed.get(i), mandated) => passed.get(i),
+                        // Some of what's passed meets it, the rest (a number,
+                        // say) fails the body: what meets it. Not the
+                        // requirement, a table of unknown origin, whose
+                        // contents would be unknown, and read less than what's
+                        // known of these tables, so a function passing what
+                        // it reads of them back to itself would swap between
+                        // the two each walk
+                        (Some(mandated), Some(passed)) if trusted[id] && {
+                            let narrowed = passed.get(i).without(TypeSet::UNKNOWN.without(mandated.set));
+                            narrowed.set != TypeSet::NEVER && meets(narrowed, mandated)
+                        } => passed.get(i).without(TypeSet::UNKNOWN.without(mandated.set)),
                         // Nothing passed yet: nothing yet, as the requirement
                         // (a plain `table`) would stand for a table of unknown
                         // origin, which may hold anything, round a loop that's
@@ -8844,6 +8855,25 @@ mod tests {
         assert_eq!(cycle("a"), cycle("b"));
         // Calls into the cycle, but isn't called back
         assert_eq!(cycle("c"), None);
+    }
+
+    #[test]
+    fn partly_meeting_requirement_settles() {
+        // What's passed only partly meets `ipairs`' table: its tables, not
+        // a table of unknown origin, whose contents would read as nothing
+        // yet, so passing them back would swap the two each walk
+        let source = "local function Combine(elements)
+            local result = ''
+            for _, entry in ipairs(elements) do
+                if entry.kind == 1 then result = result .. Combine(entry.value) else result = result .. entry.value end
+            end
+            return result
+        end
+        local root = { kind = 1, value = { { kind = 2, value = 3 } } }
+        Combine({ root })";
+        let analysis = analyse_with(source, &library());
+        assert!(analysis.walks <= 5, "{} walks", analysis.walks);
+        assert_eq!(describe_uses(&analysis, "elements")[0], "table[]");
     }
 
     #[test]
