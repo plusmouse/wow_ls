@@ -4746,13 +4746,13 @@ impl<'a> Walker<'a> {
                 let iterator_function = expressions.iter().map(|e| self.expression(e)).next();
                 // `for object in pool:EnumerateActive()`
                 let enumerated = match expressions.as_slice() {
-                    [Expression::FunctionCall(call)] => self.enumerated.get(&self.location(call.syntax().text_range().start())).copied(),
+                    [Expression::FunctionCall(call)] => self.enumerated.get(&self.call_location(call)).copied(),
                     _ => None,
                 };
                 // `for k, v in pairs(t)` over a table whose contents are known, or
                 // `for w in s:gmatch(p)`
                 let iterated = match expressions.as_slice() {
-                    [Expression::FunctionCall(call)] => self.iterated.get(&self.location(call.syntax().text_range().start())).cloned(),
+                    [Expression::FunctionCall(call)] => self.iterated.get(&self.call_location(call)).cloned(),
                     _ => None,
                 };
                 // Otherwise each pass calls the iterator, so the variables are
@@ -4885,7 +4885,7 @@ impl<'a> Walker<'a> {
                 // `return ipairs(t)`: what a loop over it gets, for a loop
                 // over a call to this function
                 let iterated = match s.expressions().as_slice() {
-                    [Expression::FunctionCall(call)] => self.iterated.get(&self.location(call.syntax().text_range().start())).cloned(),
+                    [Expression::FunctionCall(call)] => self.iterated.get(&self.call_location(call)).cloned(),
                     _ => None,
                 };
                 if let Some(iterating) = self.iterating.last_mut() {
@@ -5563,6 +5563,12 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
+            // Not a table, as far as is known, but written to as one: one
+            // it can't identify. Most likely read as a field of that name
+            // other tables have (`entry.resource` of an unknown `entry`), so
+            // the write only goes missing once that's known, and comes back
+            // when its own write is then gone, each walk
+            NamedRef::None if base.set != TypeSet::NEVER => self.apply(Write::AnyTableField(name.to_string(), value)),
             NamedRef::None => {}
         }
     }
@@ -6429,7 +6435,7 @@ impl<'a> Walker<'a> {
                 // A loop over this call gets what one over the function's
                 // own return does
                 if let Some(iterated) = self.known_function(FunctionRef::One(id)).and_then(|f| f.iterated.clone()) {
-                    self.iterated.insert(self.location(call.syntax().text_range().start()), iterated);
+                    self.iterated.insert(self.call_location(call), iterated);
                 }
                 returns
             }
@@ -6521,7 +6527,7 @@ impl<'a> Walker<'a> {
                 "Acquire" => return Values { values: vec![object, Type::of(TypeSet::BOOLEAN)], rest: Type::NIL },
                 "GetNextActive" => return Values { values: vec![object | Type::NIL], rest: Type::NIL },
                 "EnumerateActive" => {
-                    self.enumerated.insert(self.location(call.syntax().text_range().start()), object);
+                    self.enumerated.insert(self.call_location(call), object);
                 }
                 _ => {}
             }
@@ -6573,7 +6579,7 @@ impl<'a> Walker<'a> {
                     "CreateAnimation" => self.kind_named(kind, child),
                     _ => child,
                 };
-                let at = self.location(call.syntax().text_range().start());
+                let at = self.call_location(call);
                 let (named, extended) = self.templated(child, template);
                 first.named = NamedRef::Instance { named, at, extended };
                 self.apply(Write::Parent(at, receiver));
@@ -6910,7 +6916,7 @@ impl<'a> Walker<'a> {
         }
         let kind = self.frame_type(arguments.first())?;
         let (named, extended) = self.templated(kind, arguments.get(3));
-        let at = self.location(call.syntax().text_range().start());
+        let at = self.call_location(call);
         // A kind the function making it is passed: each call's own
         let caller = self.function_ranges.last().map(|&(_, function)| function);
         if let Some((_, index)) = arguments.first().and_then(|kind| self.parameter_read(kind)).filter(|&(function, _)| Some(function) == caller) {
@@ -6928,7 +6934,7 @@ impl<'a> Walker<'a> {
         if self.builtin("table.create") != Some(callee) {
             return None
         }
-        let at = self.location(call.syntax().text_range().start());
+        let at = self.call_location(call);
         Some(Values { values: vec![Type::table(at)], rest: Type::NIL })
     }
 
@@ -6988,7 +6994,7 @@ impl<'a> Walker<'a> {
     /// the fields and mixins they give it are what `Acquire` returns
     fn create_pool(&mut self, call: &FunctionCall, callee: Type, expressions: &[Expression], arguments: &Values) -> Option<Values> {
         let is = |name: &str| self.builtin(name) == Some(callee);
-        let at = self.location(call.syntax().text_range().start());
+        let at = self.call_location(call);
         let object_at = Location { slot: POOL_OBJECT, ..at };
         // Made from a template, as with `CreateFrame`
         let region = |kind: Option<NamedId>, template: usize| -> Option<Type> {
@@ -7196,6 +7202,22 @@ impl<'a> Walker<'a> {
     fn is_mixin(&self, at: TableId) -> bool {
         self.note(Read::MixedInto(at));
         self.prior.is_some_and(|prior| prior.mixed_into.contains_key(&at)) || self.layer.mixed_into.contains_key(&at)
+    }
+
+    /// Where a call is, for what it makes and what loops over it get: where it
+    /// starts, unless a call it makes its callee starts there too, as
+    /// `a:b():c()`'s `a:b()` does, whose table would be the same one. Then its
+    /// method's name, or its arguments, where no other call starts
+    fn call_location(&self, call: &FunctionCall) -> Location {
+        let start = call.syntax().text_range().start();
+        let shared = call.callee().is_some_and(|callee| callee.syntax().descendants().any(|n| n.kind() == SyntaxKind::FunctionCall));
+        let at = match shared {
+            false => start,
+            true => call.method_name().map(|name| name.text_range().start())
+                .or_else(|| call.syntax().children().find(|n| n.kind() == SyntaxKind::ArgumentList).map(|n| n.text_range().start()))
+                .unwrap_or(start),
+        };
+        self.location(at)
     }
 
     /// Whether a table or object was made by the function being walked: there,
@@ -7621,7 +7643,7 @@ impl<'a> Walker<'a> {
     /// `function` is the definitions' function called, if it's one, whose
     /// tables are of a family (see `family`)
     fn fresh_object(&mut self, call: &FunctionCall, slot: usize, value: Type, fresh: &FreshObject, arguments: &Values, expressions: &[Expression], offset: isize, function: Option<BuiltinId>) -> Type {
-        let here = self.location(call.syntax().text_range().start());
+        let here = self.call_location(call);
         let at = function.and_then(|function| family_member(here, function, slot))
             .unwrap_or(Location { slot: slot as u32 + 1, ..here });
         // Passing on a parameter of the function calling, so each call to that
@@ -7705,7 +7727,7 @@ impl<'a> Walker<'a> {
     /// and `Mixin(object, a, b)` adds them to `object` and returns it
     fn mix(&mut self, call: &FunctionCall, callee: Type, expressions: &[Expression], arguments: &Values) -> Option<Values> {
         let (object, mixins, mixin_expressions) = if self.definitions.global("CreateFromMixins") == Some(callee) {
-            (Type::table(self.location(call.syntax().text_range().start())), &arguments.values[..], expressions)
+            (Type::table(self.call_location(call)), &arguments.values[..], expressions)
         } else if self.definitions.global("Mixin") == Some(callee) {
             let (object, mixins) = arguments.values.split_first()?;
             (*object, mixins, expressions.get(1..).unwrap_or_default())
@@ -7767,7 +7789,7 @@ impl<'a> Walker<'a> {
             _ => return None,
         };
         let shallow = matches!(expressions.get(1), Some(Expression::Literal(literal)) if literal.get_bool().as_deref() == Some("true"));
-        let at = self.location(call.syntax().text_range().start());
+        let at = self.call_location(call);
         for from in sources {
             self.copy_into(from, at, shallow, &mut vec![from]);
         }
@@ -8303,7 +8325,7 @@ impl<'a> Walker<'a> {
         // Every capture (or the whole match) is a string
         if is("string.gmatch") || is("gmatch") {
             let strings = Values { values: Vec::new(), rest: Type::of(TypeSet::STRING) };
-            self.iterated.insert(self.location(call.syntax().text_range().start()), strings);
+            self.iterated.insert(self.call_location(call), strings);
             return
         }
         if (is("table.insert") || is("tinsert")) && count >= 2 {
@@ -8318,7 +8340,7 @@ impl<'a> Walker<'a> {
         // there, as a field read's does
         let Some(prior) = self.prior else {
             let nothing = Values { values: vec![Type::default(), Type::default()], rest: Type::NIL };
-            self.iterated.insert(self.location(call.syntax().text_range().start()), nothing);
+            self.iterated.insert(self.call_location(call), nothing);
             return
         };
         // Whichever table it is, of several
@@ -8343,7 +8365,7 @@ impl<'a> Walker<'a> {
         }));
         if let Some((key, value)) = contents {
             let values = Values { values: vec![key, value], rest: Type::NIL };
-            self.iterated.insert(self.location(call.syntax().text_range().start()), values);
+            self.iterated.insert(self.call_location(call), values);
         }
     }
 
@@ -8948,6 +8970,39 @@ mod tests {
             if root.details.last then Delete(root:GetParent()) end
         end
         function Start(details, top) Delete(Find(details, top)) end";
+        assert!(!analyse_with(source, &library()).cycled);
+    }
+
+    #[test]
+    fn chained_calls_make_their_own_tables() {
+        // `Make(...)` and `Make(...):Items()` start at the same place: the
+        // object one makes and the copy the other does are separate tables,
+        // not one with the mixins and contents of both, which swapped each walk
+        let source = "local M = {}
+        function M:Init(data) self.data = data end
+        function M:Items() return CopyTable(self.data.items) end
+        local function Make(data) return CreateAndInitFromMixin(M, data) end
+        local x = Make({ items = { 'a' } }):Items()";
+        assert!(!analyse_with(source, &library()).cycled);
+    }
+
+    #[test]
+    fn write_through_other_tables_field_settles() {
+        // `entry.resource` of an unknown `entry` reads as the string written
+        // through it: writing to it is still a write to some table, or it
+        // would be gone the next walk, and back the one after
+        let source = "local function Migrate(group)
+            for i = #group.entries, 1, -1 do
+                local entry = group.entries[i]
+                if entry.kind == 'group' then
+                    Migrate(entry)
+                elseif entry.resource and entry.resource.resource == 'pain' then
+                    entry.resource.resource = 'fury'
+                end
+            end
+        end
+        local migrations = { Migrate }
+        function Run(config) for _, m in ipairs(migrations) do m(config) end end";
         assert!(!analyse_with(source, &library()).cycled);
     }
 
