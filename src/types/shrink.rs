@@ -97,10 +97,10 @@ impl<'a> Remap<'a> {
     }
 
     fn ty(&self, ty: Type) -> Option<Type> {
-        let function = match ty.function {
+        let function = ty.function.map_functions(|function| Some(match function {
             FunctionRef::One(id) => FunctionRef::One(self.location(id)?),
             other => other,
-        };
+        }))?;
         Some(Type { function, named: self.named(ty.named)?, ..ty })
     }
 

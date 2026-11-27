@@ -386,7 +386,7 @@ fn union_all(types: impl IntoIterator<Item = Type>) -> Option<Type> {
             [one] => NamedRef::Table(*one),
             _ => NamedRef::several_tables(tables),
         };
-        joined = joined | Type { set: TypeSet::NEVER, function: FunctionRef::None, named, numeric: NamedRef::None };
+        joined = joined | Type { named, ..Type::default() };
     }
     Some(joined)
 }
@@ -479,7 +479,7 @@ fn narrowed_to(field: Type, body: Type) -> Type {
     }
     match field.set.intersection(body.set) {
         TypeSet::NEVER => body,
-        set => Type { set, ..field },
+        set => field.without(TypeSet::UNKNOWN.without(set)),
     }
 }
 
@@ -536,7 +536,7 @@ fn through_elements(at: Location) -> Option<Location> {
 }
 
 /// Which function a value is, when it can be one
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub enum FunctionRef {
     /// Can't be a function
     #[default]
@@ -545,17 +545,82 @@ pub enum FunctionRef {
     One(FunctionId),
     /// A function from the preset definitions
     Builtin(BuiltinId),
-    /// A function we can't pin down: a parameter, an unknown call result, or one
-    /// of several functions
+    /// Any of several functions (`One` or `Builtin`), as `cond and f or g`
+    /// is: an index into `FUNCTION_SETS`. Calling it calls each
+    Several(u32),
+    /// A function we can't pin down: a parameter, an unknown call result, or
+    /// one of more functions than `MOST_FUNCTIONS`
     Unknown,
 }
+
+/// The most functions `FunctionRef::Several` keeps apart. More are unknown
+const MOST_FUNCTIONS: usize = 8;
+
+/// Each list of functions a `FunctionRef::Several` stands for, sorted, once
+/// each. Shared by every analysis, like `OBJECT_SETS`
+#[derive(Default)]
+struct FunctionSets {
+    lists: Vec<&'static [FunctionRef]>,
+    ids: std::collections::HashMap<&'static [FunctionRef], u32>,
+}
+
+static FUNCTION_SETS: std::sync::LazyLock<std::sync::Mutex<FunctionSets>> = std::sync::LazyLock::new(Default::default);
 
 impl FunctionRef {
     fn union(self, other: FunctionRef) -> FunctionRef {
         match (self, other) {
             (FunctionRef::None, x) | (x, FunctionRef::None) => x,
             (a, b) if a == b => a,
-            _ => FunctionRef::Unknown,
+            (FunctionRef::Unknown, _) | (_, FunctionRef::Unknown) => FunctionRef::Unknown,
+            (a, b) => {
+                let mut all = a.alternatives();
+                all.extend(b.alternatives());
+                FunctionRef::several(all)
+            }
+        }
+    }
+
+    /// Each function this may be: itself, or those of `Several`. None for
+    /// `None` and `Unknown`
+    pub fn alternatives(self) -> Vec<FunctionRef> {
+        match self {
+            FunctionRef::One(_) | FunctionRef::Builtin(_) => vec![self],
+            FunctionRef::Several(id) => {
+                let sets = FUNCTION_SETS.lock().unwrap_or_else(|e| e.into_inner());
+                sets.lists.get(id as usize).map(|list| list.to_vec()).unwrap_or_default()
+            }
+            FunctionRef::None | FunctionRef::Unknown => Vec::new(),
+        }
+    }
+
+    /// Any of `functions` (each `One` or `Builtin`): one, or several, each
+    /// once, or unknown past `MOST_FUNCTIONS`
+    pub fn several(mut functions: Vec<FunctionRef>) -> FunctionRef {
+        functions.sort();
+        functions.dedup();
+        match functions.len() {
+            0 => return FunctionRef::None,
+            1 => return functions[0],
+            n if n > MOST_FUNCTIONS => return FunctionRef::Unknown,
+            _ => {}
+        }
+        let mut sets = FUNCTION_SETS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&id) = sets.ids.get(functions.as_slice()) {
+            return FunctionRef::Several(id)
+        }
+        let list: &'static [FunctionRef] = Box::leak(functions.into_boxed_slice());
+        let id = sets.lists.len() as u32;
+        sets.lists.push(list);
+        sets.ids.insert(list, id);
+        FunctionRef::Several(id)
+    }
+
+    /// Each function this may be changed by `change`, which may give none
+    /// for one, making the whole none
+    fn map_functions(self, change: impl Fn(FunctionRef) -> Option<FunctionRef>) -> Option<FunctionRef> {
+        match self {
+            FunctionRef::Several(_) => Some(FunctionRef::several(self.alternatives().into_iter().map(change).collect::<Option<_>>()?)),
+            other => change(other),
         }
     }
 }
@@ -581,7 +646,8 @@ pub enum NamedRef {
     Table(TableId),
     /// Any of several WoW objects (`One`, `Extended` or `Instance`), as a
     /// variable given different frames holds: an index into `OBJECT_SETS`.
-    /// It has the members all of them have
+    /// It has the members all of them have. With at least one of those, it
+    /// may also hold tables made in the files (`Table`), as `frame or {}` is
     Several(u32),
     /// Any of several tables made in the files (`Table`), as a field reset
     /// to a new table holds: an index into `OBJECT_SETS`. Shown as a plain
@@ -663,7 +729,14 @@ impl NamedRef {
                         all.extend(more);
                         NamedRef::several_tables(all)
                     }
-                    _ => NamedRef::Unknown,
+                    // WoW objects and tables made in the files: each
+                    _ => match (a.members(), b.members()) {
+                        (Some(mut all), Some(more)) => {
+                            all.extend(more);
+                            NamedRef::several(all)
+                        }
+                        _ => NamedRef::Unknown,
+                    },
                 },
             },
         }
@@ -739,7 +812,14 @@ impl NamedRef {
         }
     }
 
-    /// The objects this may be, if it's only WoW objects
+    /// The WoW objects and tables made in the files this may be, if it's
+    /// only those: tables as `Table`
+    fn members(self) -> Option<Vec<NamedRef>> {
+        self.objects().or_else(|| Some(self.tables()?.into_iter().map(NamedRef::Table).collect()))
+    }
+
+    /// The objects this may be, if it's only WoW objects (and, with some,
+    /// tables made in the files)
     fn objects(self) -> Option<Vec<NamedRef>> {
         match self {
             NamedRef::One(_) | NamedRef::Extended(_) | NamedRef::Instance { .. } => Some(vec![self]),
@@ -786,7 +866,15 @@ impl NamedRef {
         if joined.len() == 1 {
             return joined[0]
         }
+        // Only tables, as mapping each of several may leave
+        if joined.iter().all(|o| matches!(o, NamedRef::Table(_))) {
+            return NamedRef::several_tables(joined.iter().filter_map(|o| o.identity()).collect())
+        }
         if joined.len() > MOST_OBJECTS {
+            // A plain table isn't of any WoW type
+            if joined.iter().any(|o| matches!(o, NamedRef::Table(_))) {
+                return NamedRef::Unknown
+            }
             let mut types = joined.iter().filter_map(|o| o.object_type()).map(|(id, _)| id);
             let first = types.next();
             return match types.try_fold(first, |common, id| Some(common_object_type(common?, id))).flatten() {
@@ -871,25 +959,136 @@ impl NamedRef {
 /// (an enum like `Enum.ItemQuality`) if it can be a number. `function` is None
 /// exactly when `set` doesn't contain FUNCTION, `named` exactly when it has
 /// neither TABLE nor OTHER, and `numeric` exactly when it has no NUMBER.
-/// `numeric` is Unknown for a plain number
+/// `numeric` is Unknown for a plain number. `literal` is which strings it
+/// may be, when it may be one: None without STRING, Unknown for any string
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Type {
     pub set: TypeSet,
     pub function: FunctionRef,
     pub named: NamedRef,
     pub numeric: NamedRef,
+    pub literal: Literals,
+}
+
+/// Which strings a value may be, when it may be one
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+pub enum Literals {
+    /// Can't be a string
+    #[default]
+    None,
+    /// One of these, written in the files as literals: an index into
+    /// `LITERAL_SETS`
+    Some(u32),
+    /// Any string
+    Unknown,
+}
+
+/// The most strings `Literals::Some` keeps apart. More are any string
+const MOST_LITERALS: usize = 8;
+
+/// The longest string kept as a literal. A longer one is just a string,
+/// like a message, which says little more written out
+const LONGEST_LITERAL: usize = 64;
+
+/// Each list of strings a `Literals::Some` stands for, sorted, once each.
+/// Shared by every analysis, like `OBJECT_SETS`
+#[derive(Default)]
+struct LiteralSets {
+    lists: Vec<&'static [&'static str]>,
+    ids: std::collections::HashMap<&'static [&'static str], u32>,
+    strings: std::collections::HashSet<&'static str>,
+}
+
+static LITERAL_SETS: std::sync::LazyLock<std::sync::Mutex<LiteralSets>> = std::sync::LazyLock::new(Default::default);
+
+impl Literals {
+    /// Exactly the string `text` is, from a literal's source (with its
+    /// quotes), if it's one kept apart: quoted, short, with no escapes,
+    /// so two spelled the same are the same string. Else any string
+    pub fn of_literal(source: &str) -> Literals {
+        let source = source.trim();
+        let Some(quote) = source.chars().next().filter(|&c| c == '"' || c == '\'') else { return Literals::Unknown };
+        let Some(text) = source.strip_prefix(quote).and_then(|t| t.strip_suffix(quote)) else { return Literals::Unknown };
+        if text.contains('\\') || text.len() > LONGEST_LITERAL {
+            return Literals::Unknown
+        }
+        Literals::of(vec![text])
+    }
+
+    /// Any of `strings`, or any string past `MOST_LITERALS`
+    fn of(strings: Vec<&str>) -> Literals {
+        let mut sets = LITERAL_SETS.lock().unwrap_or_else(|e| e.into_inner());
+        Literals::of_in(&mut sets, strings)
+    }
+
+    fn of_in(sets: &mut LiteralSets, mut strings: Vec<&str>) -> Literals {
+        strings.sort();
+        strings.dedup();
+        if strings.len() > MOST_LITERALS {
+            return Literals::Unknown
+        }
+        if strings.is_empty() {
+            return Literals::None
+        }
+        let strings: Vec<&'static str> = strings.into_iter().map(|text| match sets.strings.get(text) {
+            Some(&kept) => kept,
+            None => {
+                let kept: &'static str = Box::leak(text.to_string().into_boxed_str());
+                sets.strings.insert(kept);
+                kept
+            }
+        }).collect();
+        if let Some(&id) = sets.ids.get(strings.as_slice()) {
+            return Literals::Some(id)
+        }
+        let list: &'static [&'static str] = Box::leak(strings.into_boxed_slice());
+        let id = sets.lists.len() as u32;
+        sets.lists.push(list);
+        sets.ids.insert(list, id);
+        Literals::Some(id)
+    }
+
+    /// The strings this may be, if it's only some
+    pub fn strings(self) -> Option<&'static [&'static str]> {
+        let Literals::Some(id) = self else { return None };
+        let sets = LITERAL_SETS.lock().unwrap_or_else(|e| e.into_inner());
+        sets.lists.get(id as usize).copied()
+    }
+
+    fn union(self, other: Literals) -> Literals {
+        match (self, other) {
+            (Literals::None, x) | (x, Literals::None) => x,
+            (a, b) if a == b => a,
+            (Literals::Some(a), Literals::Some(b)) => {
+                let mut sets = LITERAL_SETS.lock().unwrap_or_else(|e| e.into_inner());
+                let list = |id: u32| sets.lists.get(id as usize).copied().unwrap_or_default();
+                let all: Vec<&str> = list(a).iter().chain(list(b)).copied().collect();
+                Literals::of_in(&mut sets, all)
+            }
+            _ => Literals::Unknown,
+        }
+    }
+
+    /// Without the string `text`: none left if it was the only one
+    fn without(self, text: &str) -> Literals {
+        match self.strings() {
+            Some(strings) => Literals::of(strings.iter().copied().filter(|&s| s != text).collect()),
+            None => self,
+        }
+    }
 }
 
 /// The types a named type can be based on
 const OBJECTS: TypeSet = TypeSet(TypeSet::TABLE.0 | TypeSet::OTHER.0);
 
 impl Type {
-    pub const NIL: Type = Type { set: TypeSet::NIL, function: FunctionRef::None, named: NamedRef::None, numeric: NamedRef::None };
+    pub const NIL: Type = Type { set: TypeSet::NIL, function: FunctionRef::None, named: NamedRef::None, numeric: NamedRef::None, literal: Literals::None };
     pub const UNKNOWN: Type = Type {
         set: TypeSet::UNKNOWN,
         function: FunctionRef::Unknown,
         named: NamedRef::Unknown,
         numeric: NamedRef::Unknown,
+        literal: Literals::Unknown,
     };
 
     /// A type with no known function or named-type identity
@@ -897,7 +1096,12 @@ impl Type {
         let function = if set.contains(TypeSet::FUNCTION) { FunctionRef::Unknown } else { FunctionRef::None };
         let named = if set.intersection(OBJECTS) != TypeSet::NEVER { NamedRef::Unknown } else { NamedRef::None };
         let numeric = if set.contains(TypeSet::NUMBER) { NamedRef::Unknown } else { NamedRef::None };
-        Type { set, function, named, numeric }
+        let literal = if set.contains(TypeSet::STRING) { Literals::Unknown } else { Literals::None };
+        Type { set, function, named, numeric, literal }
+    }
+    /// A string written as the literal `source` (with its quotes)
+    pub fn string_literal(source: &str) -> Type {
+        Type { literal: Literals::of_literal(source), ..Type::of(TypeSet::STRING) }
     }
     pub fn function(id: FunctionId) -> Type {
         Type { function: FunctionRef::One(id), ..Type::of(TypeSet::FUNCTION) }
@@ -923,6 +1127,17 @@ impl Type {
             function: self.function.union(other.function),
             named: self.named.union(other.named),
             numeric: self.numeric.union_numeric(other.numeric),
+            literal: self.literal.union(other.literal),
+        }
+    }
+    /// As a field read that may be what's found, or something else, is: any
+    /// of several functions, which may not be all it could be, is unknown, so
+    /// a call to it doesn't call each as if it were. One function is kept,
+    /// as it always has been
+    fn guessed(self) -> Type {
+        match self.function {
+            FunctionRef::Several(_) => Type { function: FunctionRef::Unknown, ..self },
+            _ => self,
         }
     }
     /// Functions, tables and userdata are always truthy, so they're kept
@@ -937,7 +1152,8 @@ impl Type {
         let function = if set.contains(TypeSet::FUNCTION) { self.function } else { FunctionRef::None };
         let named = if set.intersection(OBJECTS) != TypeSet::NEVER { self.named } else { NamedRef::None };
         let numeric = if set.contains(TypeSet::NUMBER) { self.numeric } else { NamedRef::None };
-        Type { set, function, named, numeric }
+        let literal = if set.contains(TypeSet::STRING) { self.literal } else { Literals::None };
+        Type { set, function, named, numeric, literal }
     }
 }
 
@@ -1782,11 +1998,11 @@ fn renumber_named(named: NamedRef, file: &impl Fn(FileId) -> FileId) -> NamedRef
 }
 
 fn renumber_type(ty: Type, file: &impl Fn(FileId) -> FileId) -> Type {
-    let function = match ty.function {
+    let function = ty.function.map_functions(|function| Some(match function {
         FunctionRef::One(id) => FunctionRef::One(renumber(id, file)),
         other => other,
-    };
-    Type { function, named: renumber_named(ty.named, file), numeric: renumber_named(ty.numeric, file), set: ty.set }
+    })).unwrap_or(FunctionRef::Unknown);
+    Type { function, named: renumber_named(ty.named, file), numeric: renumber_named(ty.numeric, file), ..ty }
 }
 
 fn renumber_values(values: &Values, file: &impl Fn(FileId) -> FileId) -> Values {
@@ -1857,6 +2073,32 @@ impl Drop for MadeWith {
     }
 }
 
+thread_local! {
+    /// Whether strings are described as the literals they may be. Tests,
+    /// most of which aren't about those, describe them as just `string`
+    /// unless they ask (see `LiteralsShown`)
+    static LITERALS_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(!cfg!(test)) };
+}
+
+/// While one is held, strings are described as the literals they may be
+/// (`"LEFT"|"RIGHT"`), as they always are outside tests
+#[cfg(test)]
+struct LiteralsShown(bool);
+
+#[cfg(test)]
+impl LiteralsShown {
+    fn shown() -> LiteralsShown {
+        LiteralsShown(LITERALS_SHOWN.replace(true))
+    }
+}
+
+#[cfg(test)]
+impl Drop for LiteralsShown {
+    fn drop(&mut self) {
+        LITERALS_SHOWN.set(self.0);
+    }
+}
+
 /// A file to analyse
 pub struct SourceFile {
     pub root: SyntaxNode,
@@ -1881,6 +2123,10 @@ pub struct Handler {
 
 #[derive(Debug, Default)]
 pub struct Analysis {
+    /// For a method (`function t:m()`) only seen given as a script
+    /// handler: what its `self` is, rather than `t` (see
+    /// `Walker::method_selves`)
+    method_selves: HashMap<FunctionId, Type>,
     pub bindings: Vec<Binding>,
     /// Sorted by file, then position
     pub references: Vec<Reference>,
@@ -2335,6 +2581,11 @@ impl Analysis {
     /// Empty when the walks have settled
     fn changed_reads(&self, older: &Analysis) -> HashSet<Read> {
         let mut changed = HashSet::default();
+        for id in self.method_selves.keys().chain(older.method_selves.keys()) {
+            if self.method_selves.get(id) != older.method_selves.get(id) {
+                changed.insert(Read::MethodSelf(*id));
+            }
+        }
         for &at in self.saved_tables.symmetric_difference(&older.saved_tables) {
             changed.insert(Read::Saved(at));
         }
@@ -2600,10 +2851,21 @@ impl Analysis {
 
     fn describe_with(&self, ty: Type, signatures: bool) -> String {
         // Any of several objects: each as it would be on its own, once
-        if let NamedRef::Several(_) = ty.named {
+        // (Not when nothing's known of what it is, which says just that)
+        if matches!(ty.named, NamedRef::Several(_)) && !ty.set.names()[0].starts_with("unknown") {
             let mut objects: Vec<String> = Vec::new();
             for object in ty.named.alternatives() {
-                let one = self.describe_with(Type { named: object, ..Type::of(ty.set.intersection(OBJECTS)) }, signatures);
+                // Each as what it can be: a table made in the files a table,
+                // an object what its type is based on
+                let base = match object {
+                    NamedRef::Table(_) => TypeSet::TABLE,
+                    _ => object.named_id().and_then(|id| self.definitions.named_type(id)).map_or(OBJECTS, |named| named.base),
+                };
+                let set = match base.intersection(ty.set) {
+                    TypeSet::NEVER => ty.set.intersection(OBJECTS),
+                    set => set,
+                };
+                let one = self.describe_with(Type { named: object, ..Type::of(set) }, signatures);
                 if !objects.contains(&one) {
                     objects.push(one);
                 }
@@ -2625,6 +2887,19 @@ impl Analysis {
         let signature = match ty.function {
             FunctionRef::One(id) if signatures => self.function_info(FunctionRef::One(id)).map(|f| self.signature(f)),
             FunctionRef::Builtin(id) if signatures => self.definitions.function(id).map(|f| self.signature(f)),
+            // Each of several, once, unless one isn't known yet
+            FunctionRef::Several(_) if signatures => {
+                let signatures: Option<Vec<String>> = ty.function.alternatives().into_iter()
+                    .map(|function| self.function_info(function).map(|f| self.signature(f)))
+                    .collect();
+                signatures.map(|mut each| {
+                    each.dedup();
+                    match each.as_slice() {
+                        [one] => one.clone(),
+                        _ => each.iter().map(|one| format!("({one})")).collect::<Vec<_>>().join("|"),
+                    }
+                })
+            }
             _ => None,
         };
         let named = ty.named.named_id()
@@ -2642,6 +2917,9 @@ impl Analysis {
         let names: Vec<String> = names.iter()
             .filter(|&&name| !(optional && name == "nil"))
             .map(|&name| match (&signature, named, name) {
+                // Several signatures are each in brackets already, so
+                // they only need more to be optional together
+                (Some(s), _, "function") if s.starts_with('(') => if optional { format!("({s})") } else { s.clone() },
                 (Some(s), _, "function") if wrap && s.contains(" -> ") => format!("({s})"),
                 (Some(s), _, "function") => s.clone(),
                 (_, Some(named), "table" | "userdata") if named.base.names() == [name] && signatures
@@ -2663,6 +2941,11 @@ impl Analysis {
                     }
                 }
                 (_, _, "number") if numeric.is_some() => numeric.map_or_else(String::new, |n| n.name.clone()),
+                // The strings it may be, as they're written
+                (_, _, "string") if ty.literal.strings().is_some() && LITERALS_SHOWN.get() => ty.literal.strings().unwrap_or_default().iter()
+                    .map(|text| if text.contains('"') { format!("'{text}'") } else { format!("\"{text}\"") })
+                    .collect::<Vec<_>>()
+                    .join("|"),
                 (_, _, "table") if contents.is_some() => {
                     let contents = contents.clone().unwrap_or_default();
                     // `(string[])|number`, but `string[]?`
@@ -2809,8 +3092,13 @@ impl Analysis {
                 }
             }
         }
-        if let (true, FunctionRef::One(id)) = (sites.is_empty(), field.types.function) {
-            sites.push(Site { file: id.file, range: TextRange::empty(id.offset) });
+        // Else where the function it holds (or each of several) is defined
+        if sites.is_empty() {
+            for function in field.types.function.alternatives() {
+                if let FunctionRef::One(id) = function {
+                    sites.push(Site { file: id.file, range: TextRange::empty(id.offset) });
+                }
+            }
         }
         sites
     }
@@ -3166,6 +3454,13 @@ struct Walker<'a> {
     /// Functions passed straight to a pool, which calls them only as it
     /// documents (with its objects)
     pool_callbacks: HashSet<FunctionId>,
+    /// Functions read where a call can't be seen to be all that's done
+    /// with them (`t[k]` not called), so code that can't be seen may call
+    /// them
+    escaped_functions: HashSet<FunctionId>,
+    /// For each method, what's passed as its `self` by calls that pass one
+    /// (`a:m()`, `t.m(a)`), and by the game to a script handler
+    self_passed: HashMap<FunctionId, (Type, Type)>,
     /// Calls to a pool's `EnumerateActive`, by where they are, and the objects
     /// the iterator gives
     enumerated: HashMap<Location, Type>,
@@ -3220,6 +3515,36 @@ struct Walker<'a> {
     parameter_mixins: HashMap<TableId, Vec<usize>>,
 }
 
+/// What a call to one function gives (see `Walker::call_one`)
+struct Called {
+    returns: Values,
+    /// What the function's own record says it returns, before the call's
+    /// arguments refine it
+    documented: Values,
+    /// What it requires of each argument
+    required: Vec<Option<Type>>,
+    /// Where it's passed a template, if it takes one
+    template: Option<usize>,
+}
+
+impl Called {
+    /// Calling either: what either returns, and what both require
+    fn join(self, other: Called) -> Called {
+        let required = (0..self.required.len().max(other.required.len()))
+            .map(|i| match (self.required.get(i).copied().flatten(), other.required.get(i).copied().flatten()) {
+                (Some(a), Some(b)) if a == b => Some(a),
+                _ => None,
+            })
+            .collect();
+        Called {
+            returns: self.returns.union(&other.returns),
+            documented: self.documented.union(&other.documented),
+            required,
+            template: self.template.or(other.template),
+        }
+    }
+}
+
 /// Where a call's callee was read
 #[derive(Clone, Copy)]
 enum CalleeRead {
@@ -3260,6 +3585,11 @@ enum Write {
     /// A table `CopyTable` made, and the table it's a copy of
     CopiedFrom(TableId, TableId),
     PoolCallback(FunctionId),
+    /// A function that may be called where that can't be seen
+    Escaped(FunctionId),
+    /// A method passed this as `self`: by a call in the files if true, else
+    /// by the game, as a script handler
+    SelfPassed(FunctionId, Type, bool),
     AssignedTo(FunctionId, BindingId),
     ParameterMixin(TableId, usize),
     Parent(TableId, Type),
@@ -3287,7 +3617,8 @@ impl Write {
             Write::MixinsReplaced(at, _) | Write::MixinAdded(at, _) | Write::ParameterMixin(at, _) => vec![Read::Mixins(*at)],
             Write::MixedInto(at, _) => vec![Read::MixedInto(*at)],
             Write::CopiedFrom(copy, _) => vec![Read::Fields(*copy), Read::Entries(*copy), Read::MixedInto(*copy)],
-            Write::PoolCallback(function) => vec![Read::ParameterTypes(*function)],
+            Write::PoolCallback(function) | Write::Escaped(function) => vec![Read::ParameterTypes(*function)],
+            Write::SelfPassed(function, _, _) => vec![Read::MethodSelf(*function)],
             Write::AssignedTo(function, _) => vec![Read::Function(*function)],
             Write::Parent(at, _) => vec![Read::Parent(*at)],
             Write::Triggered(at, event, _) => vec![Read::Triggered(*at, *event)],
@@ -3303,6 +3634,8 @@ impl Write {
 /// differently: from the previous walk, or another body earlier in this one
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Read {
+    /// What a method's `self` is, when not its table (`Analysis::method_selves`)
+    MethodSelf(FunctionId),
     Binding(BindingId),
     Function(FunctionId),
     /// A field by name, which goes by its name's hash. Two names sharing a
@@ -3934,6 +4267,7 @@ impl<'a> Walker<'a> {
 
     fn finish(mut self) -> Analysis {
         self.settle_parameter_types();
+        let method_selves = self.method_selves();
         for binding in self.bindings.iter_mut() {
             if binding.kind == BindingKind::Global && !binding.assigned {
                 binding.types = self.layer.globals.get(&*binding.name).copied()
@@ -4026,6 +4360,7 @@ impl<'a> Walker<'a> {
             saved_tables: HashSet::default(),
             // With those of the walk before, which it started with
             stand_ins: self.stand_ins.into_inner(),
+            method_selves,
         }
     }
 
@@ -4046,13 +4381,26 @@ impl<'a> Walker<'a> {
             let in_fields = self.stored_in_fields.get(id).map(|names| {
                 !escaped.contains(id) && names.iter().all(|name| !unresolved.contains(name.as_str()))
             });
-            let all_calls_seen = match (in_variable, in_fields) {
+            let all_calls_seen = !escaped.contains(id) && match (in_variable, in_fields) {
                 (None, None) => self.pool_callbacks.contains(id),
                 (variable, fields) => variable.unwrap_or(true) && fields.unwrap_or(true),
             };
             all_seen.insert(*id, all_calls_seen);
         }
         all_seen
+    }
+
+    /// Each method given as a script handler (as `frame:SetScript("OnShow",
+    /// t.m)` gives it) that no call in the files is seen passing a `self`:
+    /// the frames the game passes it, rather than the table it's defined
+    /// on, which it's never seen called on. Otherwise, even read as a value
+    /// for something else (`__call`, or kept to call later), the table it's
+    /// defined on is still the best guess
+    fn method_selves(&self) -> HashMap<FunctionId, Type> {
+        self.self_passed.iter()
+            .filter(|(_, (by_call, by_game))| by_call.set == TypeSet::NEVER && by_game.set != TypeSet::NEVER)
+            .map(|(&id, &(_, by_game))| (id, by_game))
+            .collect()
     }
 
     fn settle_parameter_types(&mut self) {
@@ -4064,7 +4412,19 @@ impl<'a> Walker<'a> {
         }
         // Functions read from a field other than to call them, and field names
         // read where it isn't known which function they hold
-        let mut escaped = HashSet::default();
+        let mut escaped: HashSet<FunctionId> = self.escaped_functions.clone();
+        // A variable read other than to call it: the functions it may hold
+        // go wherever it does. (The variable a function was assigned to is
+        // accounted for by `only_called`)
+        for reference in self.references.iter().filter(|r| !r.write && !r.callee) {
+            for function in reference.types.function.alternatives() {
+                if let FunctionRef::One(id) = function {
+                    if self.assigned_to.get(&id) != Some(&reference.binding) {
+                        escaped.insert(id);
+                    }
+                }
+            }
+        }
         let mut unresolved = HashSet::default();
         // Methods `ForwardedCall`s stand for: resolved by each call to the
         // function calling them, if every one is seen
@@ -4072,6 +4432,19 @@ impl<'a> Walker<'a> {
         for field in self.field_references.iter().filter(|f| !f.write) {
             match (field.types.function, field.forwarded) {
                 (FunctionRef::One(function), _) if !field.callee => { escaped.insert(function); }
+                // Each of several it may be: called, each gets what's
+                // passed, but read otherwise, any could be called anywhere
+                (FunctionRef::Several(_), forwarded_by) => {
+                    if !field.callee {
+                        escaped.extend(field.types.function.alternatives().into_iter().filter_map(|f| match f {
+                            FunctionRef::One(id) => Some(id),
+                            _ => None,
+                        }));
+                    }
+                    if let Some(caller) = forwarded_by {
+                        forwarded.push((field.name(), caller));
+                    }
+                }
                 (FunctionRef::Unknown, Some(caller)) => forwarded.push((field.name(), caller)),
                 (FunctionRef::Unknown, None) => { unresolved.insert(field.name()); }
                 _ => {}
@@ -4894,11 +5267,15 @@ impl<'a> Walker<'a> {
                 // what it returns, if it's a function we know
                 let iterated = iterated.or_else(|| {
                     let function = iterator_function?.function;
-                    match function {
-                        FunctionRef::One(id) => Some(self.returns_of(id)),
-                        FunctionRef::Builtin(_) => self.known_function(function).map(|f| f.returns.clone()),
-                        _ => None,
+                    let mut joined: Option<Values> = None;
+                    for function in function.alternatives() {
+                        let returns = match function {
+                            FunctionRef::One(id) => self.returns_of(id),
+                            _ => self.known_function(function)?.returns.clone(),
+                        };
+                        joined = Some(joined.map_or_else(|| returns.clone(), |j| j.union(&returns)));
                     }
+                    joined
                 });
                 let names = s.name_list().map(|n| n.name_tokens()).unwrap_or_default();
                 self.loop_body(|w| {
@@ -4971,6 +5348,19 @@ impl<'a> Walker<'a> {
                                         let set = if set == TypeSet::NEVER { TypeSet::TABLE } else { set };
                                         Type { named, ..Type::of(set) }
                                     }
+                                }
+                            });
+                            // Only given as a script handler, never seen called
+                            // on the table: the frames the game calls it with.
+                            // With those it's mixed into too, if it's a mixin,
+                            // as their template's scripts may call it
+                            let self_type = self_type.map(|owner_self| {
+                                let id = self.function_id(def);
+                                self.note(Read::MethodSelf(id));
+                                match self.prior.and_then(|prior| prior.method_selves.get(&id).copied()) {
+                                    Some(frames) if matches!(owner_self.named, NamedRef::Table(_) | NamedRef::Tables(_) | NamedRef::Unknown) => frames,
+                                    Some(frames) => owner_self | frames,
+                                    None => owner_self,
                                 }
                             });
                             self.function_body(def, self_type);
@@ -5185,7 +5575,7 @@ impl<'a> Walker<'a> {
                 self.note(Read::AnyTableField(name_key(name)));
                 let any = prior.any_table_fields.get(name).copied().into_iter().chain(self.layer.any_table_fields.get(name).copied()).reduce(Type::union);
                 match (own, any) {
-                    (Some(own), Some(any)) => Some(own | Type { named: any.named.loosened(), ..any }),
+                    (Some(own), Some(any)) => Some(own | Type { named: any.named.loosened(), ..any }.guessed()),
                     (own, None) => own,
                     (None, Some(_)) => None,
                 }
@@ -5211,7 +5601,7 @@ impl<'a> Walker<'a> {
                 self.note(Read::Entries(id));
                 self.entries_within(prior, id, 0, true)
                     .filter(|entries| entries.keys.set.contains(TypeSet::STRING) && entries.values.set != TypeSet::NEVER)
-                    .map(|entries| entries.values | Type::NIL)
+                    .map(|entries| (entries.values | Type::NIL).guessed())
             }
             _ => None,
         };
@@ -5235,7 +5625,7 @@ impl<'a> Walker<'a> {
                 };
                 // Some other table's field, perhaps, so not a type to report
                 // missing methods by
-                Type { named: found.named.loosened(), ..found }
+                Type { named: found.named.loosened(), ..found }.guessed()
             }
         }
     }
@@ -5543,6 +5933,14 @@ impl<'a> Walker<'a> {
                 }
             }
             Write::PoolCallback(function) => { self.pool_callbacks.insert(*function); }
+            Write::Escaped(function) => { self.escaped_functions.insert(*function); }
+            Write::SelfPassed(function, value, by_call) => {
+                let passed = self.self_passed.entry(*function).or_default();
+                match by_call {
+                    true => passed.0 |= *value,
+                    false => passed.1 |= *value,
+                }
+            }
             Write::AssignedTo(function, binding) => { self.assigned_to.insert(*function, *binding); }
             Write::ParameterMixin(at, parameter) => {
                 let recorded = self.parameter_mixins.entry(*at).or_default();
@@ -5666,9 +6064,21 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// Each function of the files `value` may be, as escaping (see
+    /// `Write::Escaped`)
+    fn escape(&mut self, value: Type) {
+        for function in value.function.alternatives() {
+            if let FunctionRef::One(function) = function {
+                self.apply(Write::Escaped(function));
+            }
+        }
+    }
+
     fn field_write(&mut self, base: Type, name: &str, value: Type) {
-        if let FunctionRef::One(function) = value.function {
-            self.apply(Write::StoredInField(function, name.to_string()));
+        for function in value.function.alternatives() {
+            if let FunctionRef::One(function) = function {
+                self.apply(Write::StoredInField(function, name.to_string()));
+            }
         }
         match base.named {
             NamedRef::Table(id) => {
@@ -5691,8 +6101,14 @@ impl<'a> Walker<'a> {
             // `self` (the mixin table) reads what's set on the objects there
             NamedRef::Several(_) => {
                 for object in base.named.alternatives() {
-                    if let Some(at) = object.identity() {
-                        self.apply(Write::Field(at, name.to_string(), value));
+                    match object {
+                        // A table made in the files, as for one alone
+                        NamedRef::Table(at) => if let Some(value) = self.stored_in(at, value) {
+                            self.apply(Write::Field(at, name.to_string(), value));
+                        }
+                        _ => if let Some(at) = object.identity() {
+                            self.apply(Write::Field(at, name.to_string(), value));
+                        }
                     }
                 }
                 self.apply(Write::AnyTableField(name.to_string(), value));
@@ -6260,6 +6676,7 @@ impl<'a> Walker<'a> {
 
     fn expression(&mut self, expression: &Expression) -> Type {
         match expression {
+            Expression::Literal(l) if l.get_string().is_some() => Type::string_literal(&l.get_string().unwrap_or_default()),
             Expression::Literal(l) => Type::of(if l.get_string().is_some() {
                 TypeSet::STRING
             } else if l.get_number().is_some() {
@@ -6306,7 +6723,18 @@ impl<'a> Walker<'a> {
                                     }
                                     types
                                 }
-                                Key::Other(key) => self.index_read(base, key),
+                                Key::Other(key) => {
+                                    let types = self.index_read(base, key);
+                                    // Read other than to call it, so any
+                                    // function it gives may be called anywhere
+                                    let called = identifier.syntax().parent().and_then(FunctionCall::cast)
+                                        .and_then(|call| call.callee())
+                                        .is_some_and(|callee| callee.syntax() == identifier.syntax());
+                                    if !called {
+                                        self.escape(types);
+                                    }
+                                    types
+                                }
                             }
                         }
                         None => {
@@ -6515,12 +6943,72 @@ impl<'a> Walker<'a> {
                 _ => Values::unknown(),
             }
         };
+        let called = match callee.function {
+            // Any of several functions: it calls one of them, so it returns
+            // what any of them does, and each gets what's passed
+            FunctionRef::Several(_) => {
+                let mut joined: Option<Called> = None;
+                let mut bailed: Option<Values> = None;
+                for function in callee.function.alternatives() {
+                    let one = Type { function, ..callee };
+                    match self.call_one(call, one, receiver, is_method, &arguments, &argument_types) {
+                        Ok(called) => joined = Some(match joined {
+                            None => called,
+                            Some(joined) => joined.join(called),
+                        }),
+                        Err(returns) => bailed = Some(bailed.map_or_else(|| returns.clone(), |b| b.union(&returns))),
+                    }
+                }
+                match (joined, bailed) {
+                    (None, bailed) => return bailed.unwrap_or_else(Values::unknown),
+                    // One it can't call yet: none of what's required of
+                    // the arguments is certain
+                    (Some(joined), Some(bailed)) => Called {
+                        returns: joined.returns.union(&bailed),
+                        documented: joined.documented.union(&bailed),
+                        required: Vec::new(),
+                        template: joined.template,
+                    },
+                    (Some(joined), None) => joined,
+                }
+            }
+            _ => match self.call_one(call, callee, receiver, is_method, &arguments, &argument_types) {
+                Ok(called) => called,
+                Err(returns) => return returns,
+            },
+        };
+        let Called { mut returns, documented, required, template } = called;
+        if let Some(receiver) = receiver.filter(|_| is_method) {
+            self.callback_registry(receiver, callee, &arguments, &argument_types);
+            if let Some(method) = call.method_name() {
+                self.script_handler(receiver, callee, method.text(), &arguments, &argument_types);
+            }
+        }
+        if let (Some(receiver), Some(method)) = (receiver, call.method_name()) {
+            returns = self.object_method(call, receiver, method.text(), arguments.first(), template.and_then(|i| arguments.get(i)), &argument_types, returns);
+        }
+        self.require_arguments(&arguments, &required);
+        if returns != documented {
+            let call_returns = Some(returns.clone());
+            match callee_read {
+                Some(CalleeRead::Variable(i)) => if let Some(r) = self.references.get_mut(i) { r.call_returns = call_returns },
+                Some(CalleeRead::Field(i)) => if let Some(f) = self.field_references.get_mut(i) { f.call_returns = call_returns },
+                None => {}
+            }
+        }
+        returns
+    }
+
+    /// What calling `callee`, one function (not `Several`), does: what it
+    /// returns, and what it requires of the arguments. Or, if it isn't known
+    /// yet, what the call returns then
+    fn call_one(&mut self, call: &FunctionCall, callee: Type, receiver: Option<Type>, is_method: bool, arguments: &[Expression], argument_types: &Values) -> Result<Called, Values> {
         let Some(function) = self.known_function(callee.function) else {
             // A function the files make but this first walk hasn't reached yet
-            return match (callee.function, self.prior) {
+            return Err(match (callee.function, self.prior) {
                 (FunctionRef::One(_), None) => Values::nothing(),
                 _ => Values::unknown(),
-            }
+            })
         };
         // The definitions' functions don't list `self`, as `:` passes it, but
         // `s:format(x)` is `string.format(s, x)`: the string is its first
@@ -6563,6 +7051,11 @@ impl<'a> Walker<'a> {
         let mut returns = match callee.function {
             FunctionRef::One(id) => {
                 self.note_loop_call(call, id, &arguments, offset);
+                // A method is given a `self`: what it's called on, or the first argument
+                if callee_method {
+                    let passed = if is_method { receiver.unwrap_or(Type::UNKNOWN) } else { argument_types.get(0) };
+                    self.apply(Write::SelfPassed(id, passed, true));
+                }
                 match self.pending_call(id, &arguments, &parameter_types, callee_method, is_method) {
                     Some(pending) => {
                         self.pending_calls.push(pending);
@@ -6610,7 +7103,7 @@ impl<'a> Walker<'a> {
         };
         // What the function calls on what this call passes it. A definition's
         // function has its arguments by position
-        let passed = if matches!(callee.function, FunctionRef::One(_)) { (&parameter_types, offset) } else { (&argument_types, 0) };
+        let passed = if matches!(callee.function, FunctionRef::One(_)) { (&parameter_types, offset) } else { (argument_types, 0) };
         // `self`, and the code giving it
         let self_value = match (is_method, callee_method) {
             (true, _) => receiver.map(|r| (r, call.callee())),
@@ -6646,25 +7139,7 @@ impl<'a> Walker<'a> {
             let held = self.field_read(on, &field.field);
             returns.values[slot] = if value.set == TypeSet::NEVER { held } else { narrowed_to(held, value) };
         }
-        if let Some(receiver) = receiver.filter(|_| is_method) {
-            self.callback_registry(receiver, callee, &arguments, &argument_types);
-            if let Some(method) = call.method_name() {
-                self.script_handler(receiver, callee, method.text(), &arguments, &argument_types);
-            }
-        }
-        if let (Some(receiver), Some(method)) = (receiver, call.method_name()) {
-            returns = self.object_method(call, receiver, method.text(), arguments.first(), template.and_then(|i| arguments.get(i)), &argument_types, returns);
-        }
-        self.require_arguments(&arguments, &required);
-        if returns != documented {
-            let call_returns = Some(returns.clone());
-            match callee_read {
-                Some(CalleeRead::Variable(i)) => if let Some(r) = self.references.get_mut(i) { r.call_returns = call_returns },
-                Some(CalleeRead::Field(i)) => if let Some(f) = self.field_references.get_mut(i) { f.call_returns = call_returns },
-                None => {}
-            }
-        }
-        returns
+        Ok(Called { returns, documented, required, template })
     }
 
     /// Methods that make or change WoW objects' parents. `returns` is what the
@@ -7273,6 +7748,13 @@ impl<'a> Walker<'a> {
         let handler = argument_types.get(1);
         if self.known_function(handler.function).is_some_and(|f| f.method) {
             values.remove(0);
+            // The frame, which the game calls it with (not nil, as setting
+            // it would have failed)
+            for function in handler.function.alternatives() {
+                if let FunctionRef::One(id) = function {
+                    self.apply(Write::SelfPassed(id, receiver.without(TypeSet::NIL), false));
+                }
+            }
         }
         self.pass_to_callback(arguments.get(1), handler, Values { values, rest });
     }
@@ -7289,6 +7771,9 @@ impl<'a> Walker<'a> {
             let Some(takes_self) = self.known_function(FunctionRef::One(id)).map(|f| f.method) else { continue };
             // A step of a loop through a field, as for a call to it alone
             self.note_loop_call(call, id, expressions, if takes_self { 0 } else { 1 });
+            if takes_self {
+                self.apply(Write::SelfPassed(id, receiver, true));
+            }
             let values = match takes_self {
                 true => arguments.clone(),
                 false => {
@@ -7688,7 +8173,7 @@ impl<'a> Walker<'a> {
             return None
         }
         let summarised = match method.function {
-            FunctionRef::One(_) | FunctionRef::Unknown => true,
+            FunctionRef::One(_) | FunctionRef::Several(_) | FunctionRef::Unknown => true,
             FunctionRef::Builtin(_) => self.known_function(method.function).is_some_and(|info| !info.field_writes.is_empty() || !info.forwarded_calls.is_empty()),
             FunctionRef::None => false,
         };
@@ -7803,6 +8288,8 @@ impl<'a> Walker<'a> {
             // Called with `:`, so `self` is separate unless the function takes it
             if !method_takes_self {
                 passed.insert(0, receiver);
+            } else {
+                self.apply(Write::SelfPassed(id, receiver, true));
             }
             let rest = if says_nothing(rest) { Type::default() } else { rest };
             self.apply(Write::CallArguments(id, Values { values: passed, rest }));
@@ -8120,12 +8607,16 @@ impl<'a> Walker<'a> {
         // Whether `f` ran without error, then its returns, or the error
         let (pcall, xpcall) = (is("pcall"), is("xpcall"));
         if pcall || xpcall {
-            let function = arguments.get(0).function;
-            let known = self.known_function(function).map(|f| f.returns.clone())?;
-            let returns = match function {
-                FunctionRef::One(id) => self.returns_of(id),
-                _ => known,
-            };
+            let mut returns: Option<Values> = None;
+            for function in arguments.get(0).function.alternatives() {
+                let known = self.known_function(function).map(|f| f.returns.clone())?;
+                let one = match function {
+                    FunctionRef::One(id) => self.returns_of(id),
+                    _ => known,
+                };
+                returns = Some(returns.map_or_else(|| one.clone(), |r| r.union(&one)));
+            }
+            let returns = returns?;
             // The error is anything `error` was given, though nearly always a message
             let error = match xpcall {
                 true => self.known_function(arguments.get(1).function).map_or(Type::UNKNOWN, |f| f.returns.first()),
@@ -8860,6 +9351,20 @@ impl<'a> Walker<'a> {
         if literal.is_nil() {
             let (target, ty) = self.narrowable(tested)?;
             return Some(Narrowing { when_true: vec![(target.clone(), Type::NIL)], when_false: vec![(target, ty.without(TypeSet::NIL))] })
+        }
+        // `x == "a"`: then it's that string, else not it
+        if let (Some(source), Some((target, ty))) = (literal.get_string(), self.narrowable(tested)) {
+            let equal = Type::string_literal(&source);
+            // Nothing known yet stays nothing, so types only grow walk by walk
+            let when_true = if ty.set == TypeSet::NEVER { ty } else { equal };
+            let when_false = match equal.literal.strings() {
+                Some(&[text]) if ty.literal.strings().is_some() => match ty.literal.without(text) {
+                    Literals::None => ty.without(TypeSet::STRING),
+                    literal => Type { literal, ..ty },
+                },
+                _ => ty,
+            };
+            return Some(Narrowing { when_true: vec![(target.clone(), when_true)], when_false: vec![(target, when_false)] })
         }
         // `type(x)`, while `type` is the library's
         let Expression::FunctionCall(call) = tested else { return None };
@@ -9706,14 +10211,117 @@ mod tests {
         assert_eq!(types_of(source, "y"), ["string"]);
         // Reassigned later, so the closure could call either
         let source = "local function g() return 1 end local function f() return g() end g = function() return 's' end local y = f()";
+        assert_eq!(types_of(source, "y"), ["number|string"]);
+    }
+
+    #[test]
+    fn string_literals() {
+        let _shown = LiteralsShown::shown();
+        assert_eq!(types_of("local s = c and 'LEFT' or \"RIGHT\"", "s"), ["\"LEFT\"|\"RIGHT\""]);
+        assert_eq!(types_of("local s = c and 'a' or nil", "s"), ["\"a\"?"]);
+        // Written either way, the same string
+        assert_eq!(types_of("local s = c and 'a' or \"a\"", "s"), ["\"a\""]);
+        // What can't be written out plainly is just a string
+        assert_eq!(types_of("local s = 'a\\nb'", "s"), ["string"]);
+        assert_eq!(types_of("local s = [[a]]", "s"), ["string"]);
+        assert_eq!(types_of(&format!("local s = '{}'", "x".repeat(65)), "s"), ["string"]);
+        // Joining makes any string
+        assert_eq!(types_of("local s = 'a' .. 'b'", "s"), ["string"]);
+        // More than are kept apart: any string
+        let choice: String = (0..9).map(|i| format!("if c{i} then s = 's{i}' end ")).collect();
+        assert_eq!(types_of(&format!("local s = 'x' {choice} local t = s"), "t"), ["string"]);
+        // Through fields and parameters
+        assert_eq!(types_of("local t = {} t.kind = 'a' t.kind = 'b' local k = t.kind", "k"), ["\"a\"|\"b\""]);
+        assert_eq!(types_of("local function f(p) return p end f('TOP') f('BOTTOM')", "p"), ["\"BOTTOM\"|\"TOP\""; 2]);
+    }
+
+    #[test]
+    fn narrowing_by_string_equality() {
+        let _shown = LiteralsShown::shown();
+        let source = "local s = c and 'a' or (d and 'b' or 'c') if s == 'a' then local x = s else local y = s end";
+        assert_eq!(types_of(source, "x"), ["\"a\""]);
+        assert_eq!(types_of(source, "y"), ["\"b\"|\"c\""]);
+        let source = "local s = c and 'a' or 'b' if s ~= 'a' then local x = s end";
+        assert_eq!(types_of(source, "x"), ["\"b\""]);
+        // Of anything, equal to the string is that string, unequal still anything
+        let source = "local function f(p) if p == 'on' then local x = p else local y = p end end Unknown(f)";
+        assert_eq!(types_of(source, "x"), ["\"on\""]);
         assert_eq!(types_of(source, "y"), ["unknown"]);
+        // The only string it may be, ruled out
+        let source = "local s = c and 'a' or 1 if s ~= 'a' then local x = s end";
+        assert_eq!(types_of(source, "x"), ["number"]);
+    }
+
+    #[test]
+    fn several_functions() {
+        let source = "local function f(a) return 1 end local function g(a) return 's' end
+            local h = c and f or g local y = h(1)";
+        assert_eq!(types_of(source, "h"), ["(function(a) -> number)|(function(a) -> string)"; 2]);
+        assert_eq!(types_of(source, "y"), ["number|string"]);
+        // Optional together
+        assert_eq!(types_of("local function f() return 1 end local function g() end local h = c and (d and f or g) or nil local y = h", "h"),
+            ["((function() -> number)|(function()))?"; 2]);
+        // Given to one field at different times
+        let source = "local function f() return 1 end local function g() return 's' end
+            local t = {} t.cb = f t.cb = g local y = t.cb()";
+        assert_eq!(types_of(source, "y"), ["number|string"]);
+        // Through `pcall`
+        let source = "local function f() return 1 end local function g() return true end
+            local h = c and f or g local ok, y = xpcall(h, function() return true end)";
+        assert_eq!(library_types_of(source, "y")[0], "number|true");
+        // More than are kept apart: unknown
+        let functions: String = (0..9).map(|i| format!("local function f{i}() return {i} end ")).collect();
+        let choice: String = (0..9).map(|i| format!("if c{i} then h = f{i} end ")).collect();
+        let source = format!("{functions} local h {choice} local y = h()");
+        assert_eq!(types_of(&source, "y"), ["unknown"]);
+    }
+
+    #[test]
+    fn several_functions_each_get_arguments() {
+        // Called only through the field, so each gets what's passed
+        let source = "local t = {} t.cb = function(x) return x end t.cb = function(y) return y end t.cb(1)";
+        assert_eq!(types_of(source, "x"), ["number"; 2]);
+        assert_eq!(types_of(source, "y"), ["number"; 2]);
+        // Read other than to call, through a variable: either may be called anywhere
+        let source = "local t = {} t.cb = function(x) return x end t.cb = function(y) return y end local h = t.cb h(1) Unknown(h)";
+        assert_eq!(types_of(source, "x"), ["unknown"; 2]);
+        assert_eq!(types_of(source, "y"), ["unknown"; 2]);
+    }
+
+    #[test]
+    fn functions_read_through_computed_keys_escape() {
+        let source = "local t = {} t['a'] = function(x) return x end local k = c and 'a' or 'b' t.a(1)";
+        assert_eq!(types_of(&format!("{source} Unknown(t[k])"), "x"), ["unknown"; 2]);
+        assert_eq!(types_of(&format!("{source} local g = t[k] Unknown(g)"), "x"), ["unknown"; 2]);
+        // Called right there, it's a call seen
+        assert_eq!(types_of(&format!("{source} t[k](2)"), "x"), ["number"; 2]);
+    }
+
+    #[test]
+    fn methods_of_computed_entries_arent_each_called() {
+        // `self:Fire()` may be a method the table gets elsewhere (a mixin the
+        // analysis can't see), not one of those stored under computed keys
+        let source = "local methods = {
+                SetValues = function(self, step) self.step = step end,
+                SetText = function(self, text) self.text = text end,
+            }
+            local function Constructor()
+                local widget = {}
+                for name, f in pairs(methods) do widget[name] = f end
+                widget:Fire('OnChanged')
+                local s = widget.step
+            end";
+        // What any entry is, as before: not `string`, as calling `SetValues`
+        // for `Fire` would make it
+        assert_eq!(library_types_of(source, "s"), ["function?"]);
     }
 
     #[test]
     fn unknown_calls() {
         assert_eq!(types_of("local y = print()", "y"), ["unknown"]);
         assert_eq!(types_of("local function f(g) return g() end local y = f()", "y"), ["unknown"]);
-        assert_eq!(types_of("local f = c and function() return 1 end or function() return 2 end local y = f()", "y"), ["unknown"]);
+        // Either of two functions: what either returns
+        assert_eq!(types_of("local f = c and function() return 1 end or function() return 2 end local y = f()", "y"), ["number"]);
         // Recursion converges on the first walk's unknown
         let source = "local function f(n) if n then return f(n) end return 1 end local y = f()";
         assert!(analyse(source).references.iter().any(|r| r.types.set.contains(TypeSet::NUMBER)));
@@ -9973,9 +10581,15 @@ mod tests {
 
     #[test]
     fn mixing_named_types() {
-        // Different named types are either, a named type and a plain table just a table
+        // Different named types are either, as are a named type and a table
+        // made in the files
         assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or GetTexture()", "f"), ["Texture|Frame"]);
-        assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or {}", "f"), ["table"]);
+        assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or {}", "f"), ["Frame|table"]);
+        // Which keeps the table's fields, and what's written through either
+        let source = "local t = { y = 's' } local f = c and CreateFrame('Frame') or t f.x = 1 local x, y = t.x, f.y";
+        assert_eq!(object_types_of(source, "x"), ["number"]);
+        // The frame may have one set where that can't be seen
+        assert_eq!(object_types_of(source, "y"), ["unknown"]);
         assert_eq!(object_types_of("local f = c and CreateFrame('Frame') or 1", "f"), ["number|Frame"]);
         assert_eq!(object_types_of("local f = CreateFrame('Frame') if c then f = CreateFrame('Frame') end local g = f", "g"), ["Frame"]);
     }
@@ -10716,6 +11330,23 @@ mod tests {
         // Copied onto something else (a mixin), whose calls aren't known to be it
         let analysis = analyse_files(&["local M = {} function M:Init(x) end M:Init(1)", "local f = Mixin(CreateFrame('Frame'), M) f:Init('s')"], true);
         assert_eq!(types_in(&analysis, 0, "x"), ["unknown"]);
+    }
+
+    #[test]
+    fn methods_only_given_as_script_handlers() {
+        // Never called on `M`, only by the game on the frame
+        let source = "local f = CreateFrame('Button')
+            local M = {} function M:OnShow() local s = self end
+            f:SetScript('OnShow', M.OnShow)";
+        assert_eq!(widget_types_of(source, "s")[0], "Button");
+        // Also called on `M`: either may be `self`, and `M` is the guess
+        let source = "local f = CreateFrame('Button')
+            local M = {} function M:OnShow() local s = self end
+            f:SetScript('OnShow', M.OnShow) M:OnShow()";
+        assert_eq!(widget_types_of(source, "s")[0], "table");
+        // Read as a value for anything else, it's still `M`'s
+        let source = "local M = { libs = {} } function M:Get() local s = self.libs end setmetatable(M, { __call = M.Get })";
+        assert_eq!(types_of(source, "s"), ["table"]);
     }
 
     #[test]

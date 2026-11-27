@@ -535,8 +535,10 @@ fn giving_methods(layer: &Layer) -> std::collections::HashSet<String> {
     let mut names: HashMap<crate::types::FunctionId, Vec<&str>> = HashMap::new();
     for fields in layer.fields.values() {
         for (name, ty) in fields {
-            if let FunctionRef::One(id) = ty.function {
-                names.entry(id).or_default().push(name);
+            for function in ty.function.alternatives() {
+                if let FunctionRef::One(id) = function {
+                    names.entry(id).or_default().push(name);
+                }
             }
         }
     }
