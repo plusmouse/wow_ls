@@ -2013,7 +2013,10 @@ impl Analysis {
                 };
                 let name_of = |h: u64| -> String {
                     result.fields.values().flat_map(|m| m.keys()).chain(result.any_table_fields.keys()).chain(result.function_fields.iter())
-                        .find(|n| name_key(n) == h).cloned().unwrap_or_else(|| format!("#{h:x}"))
+                        .find(|n| name_key(n) == h).cloned()
+                        .or_else(|| next.fields.values().flat_map(|m| m.keys()).find(|n| name_key(n) == h).cloned())
+                        .or_else(|| next.field_references.iter().map(|f| f.name()).find(|n| name_key(n) == h).map(str::to_string))
+                        .unwrap_or_else(|| format!("#{h:x}"))
                 };
                 let describe = |r: &Read| -> String { match r {
                     Read::Binding(id) => { let b = &next.bindings[*id]; format!("Binding {} {:?} f{} decl {:?}: {} -> {}  [{:?} -> {:?}]", b.name, b.kind, b.file.0, b.declaration.map(|d| at(&Location { file: b.file, offset: d.start(), slot: 0 })), result.bindings.get(*id).map(|o| next.describe(o.types)).unwrap_or_default(), next.describe(b.types), result.bindings.get(*id).map(|o| o.types), b.types) }
@@ -6270,6 +6273,11 @@ impl<'a> Walker<'a> {
         if let Some(callee) = callee {
             self.table_library_call(call, callee, arguments.len(), &argument_types);
         }
+        // A method of one of several objects: which one it calls isn't known,
+        // but each object's own method of that name gets what's passed
+        if let (Some(base), Some(method), Some(FunctionRef::Unknown)) = (receiver, call.method_name(), callee.map(|c| c.function)) {
+            self.pass_to_each_method(base, method.text(), &argument_types);
+        }
         // Calling a table whose metatable has `__call` calls that, with the table first
         let call_metamethod = callee
             .filter(|c| !c.set.contains(TypeSet::FUNCTION))
@@ -7047,6 +7055,28 @@ impl<'a> Walker<'a> {
             values.remove(0);
         }
         self.pass_to_callback(arguments.get(1), handler, Values { values, rest });
+    }
+
+    /// `a:m(...)` where `a` is one of several objects: what's passed goes to
+    /// each object's own `m` that's known to be one function
+    fn pass_to_each_method(&mut self, base: Type, method: &str, arguments: &Values) {
+        if !matches!(base.named, NamedRef::Several(_) | NamedRef::Tables(_)) {
+            return
+        }
+        for object in base.named.alternatives() {
+            let receiver = Type { named: object, ..base };
+            let FunctionRef::One(id) = self.field_read(receiver, method).function else { continue };
+            let Some(takes_self) = self.known_function(FunctionRef::One(id)).map(|f| f.method) else { continue };
+            let values = match takes_self {
+                true => arguments.clone(),
+                false => {
+                    let mut values = vec![receiver];
+                    values.extend(arguments.values.iter().copied());
+                    Values { values, rest: arguments.rest }
+                }
+            };
+            self.apply(Write::CallArguments(id, values));
+        }
     }
 
     /// A function given to a pool, which calls it with `arguments`. That call
