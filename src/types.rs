@@ -6495,7 +6495,7 @@ impl<'a> Walker<'a> {
         // A method of one of several objects: which one it calls isn't known,
         // but each object's own method of that name gets what's passed
         if let (Some(base), Some(method), Some(FunctionRef::Unknown)) = (receiver, call.method_name(), callee.map(|c| c.function)) {
-            self.pass_to_each_method(base, method.text(), &argument_types);
+            self.pass_to_each_method(call, base, method.text(), &arguments, &argument_types);
         }
         // Calling a table whose metatable has `__call` calls that, with the table first
         let call_metamethod = callee
@@ -7279,7 +7279,7 @@ impl<'a> Walker<'a> {
 
     /// `a:m(...)` where `a` is one of several objects: what's passed goes to
     /// each object's own `m` that's known to be one function
-    fn pass_to_each_method(&mut self, base: Type, method: &str, arguments: &Values) {
+    fn pass_to_each_method(&mut self, call: &FunctionCall, base: Type, method: &str, expressions: &[Expression], arguments: &Values) {
         if !matches!(base.named, NamedRef::Several(_) | NamedRef::Tables(_)) {
             return
         }
@@ -7287,6 +7287,8 @@ impl<'a> Walker<'a> {
             let receiver = Type { named: object, ..base };
             let FunctionRef::One(id) = self.field_read(receiver, method).function else { continue };
             let Some(takes_self) = self.known_function(FunctionRef::One(id)).map(|f| f.method) else { continue };
+            // A step of a loop through a field, as for a call to it alone
+            self.note_loop_call(call, id, expressions, if takes_self { 0 } else { 1 });
             let values = match takes_self {
                 true => arguments.clone(),
                 false => {
@@ -8480,7 +8482,6 @@ impl<'a> Walker<'a> {
         if is_stand_in(at) && depth <= 16 {
             self.note(Read::StandIn(at));
             let all: Vec<Entries> = self.stand_in_members(at).into_iter()
-                .filter(|member| !known || member.slot & PSEUDO == 0)
                 .filter_map(|member| self.entries_within(prior, member, depth + 1, known))
                 .chain(prior.entries.get(&at).copied())
                 .collect();
@@ -8492,15 +8493,32 @@ impl<'a> Walker<'a> {
             })
         }
         // A variable's stand-in for a table it doesn't know: what it's seen
-        // given is only some of what the table may hold
+        // given is only some of what the table may hold. Nothing it knows,
+        // with `known`, whether reached as a stand-in's member or a mixin
         if at.slot & PSEUDO != 0 {
+            if known {
+                return None
+            }
             let anything = Type::UNKNOWN.without(TypeSet::NIL);
             return Some(Entries { keys: anything, values: anything })
         }
-        match (prior.entries.get(&at), self.layer.entries.get(&at)) {
+        let own = match (prior.entries.get(&at), self.layer.entries.get(&at)) {
             (Some(a), Some(b)) => Some(Entries { keys: a.keys | b.keys, values: a.values | b.values }),
             (a, b) => a.or(b).copied(),
+        };
+        // Deep enough for any real chain of mixins, and stops a loop
+        if depth > 16 {
+            return own
         }
+        // What its mixins hold too, as `Mixin` copies every key: a new table
+        // a call to a function returns has the one it made as its mixin
+        self.note(Read::Mixins(at));
+        let mixins = prior.mixins.get(&at).or_else(|| self.layer.mixins.get(&at));
+        mixins.into_iter().flatten()
+            .filter_map(|mixin| mixin.named.identity())
+            .filter_map(|mixin| self.entries_within(prior, mixin, depth + 1, known))
+            .chain(own)
+            .reduce(|a, b| Entries { keys: a.keys | b.keys, values: a.values | b.values })
     }
 
     /// The types of a table's named fields: here, and from a dependency
@@ -11370,6 +11388,11 @@ mod tests {
         assert_eq!(widget_types_of("local t = c and { n = 1 } or nil local s = CopyTableSafe(t)", "s"), ["table?"]);
         // Not a table made in the files: as the definitions say
         assert_eq!(widget_types_of("local c = CopyTable(unknown)", "c"), ["table"]);
+        // Returned from a method, so each call's is new: still what it holds
+        let returned = "local M = {} function M:Init(data) self.data = data end
+            function M:Items() return CopyTable(self.data.items) end
+            local o = CreateAndInitFromMixin(M, { items = { 'a' } }) local y = o:Items() local h = y[1]";
+        assert_eq!(library_types_of(returned, "h"), ["string?"]);
         // Any of several tables: what any of them holds
         assert_eq!(widget_types_of("local t = x and { n = 1 } or { s = 'a' } local c = CopyTable(t) local n, s = c.n, c.s", "n"), ["number"]);
         assert_eq!(widget_types_of("local t = x and { n = 1 } or { s = 'a' } local c = CopyTable(t) local s = c.s", "s"), ["string"]);
