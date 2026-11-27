@@ -289,6 +289,116 @@ const MOST_FAMILIES: u32 = 1 << 20;
 /// dependencies (`LAYER_FILES`), and before those of namespaces
 const FAMILIES: FileId = FileId(u32::MAX - (1 << 20));
 
+/// The pseudo file of stand-ins: one identity for each place that holds
+/// more tables made in the files than are kept apart (`MOST_OBJECTS`), its
+/// slot the place's number (see `stand_in`). What it stands for, its
+/// members, is in `Analysis::stand_ins`. Just before families'
+const STAND_INS: FileId = FileId(u32::MAX - (1 << 20) - 1);
+
+/// Somewhere a value is kept between statements or walks, which a set of
+/// tables too large to keep apart is replaced in by its stand-in
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Place {
+    /// A local or parameter, by its declaration
+    Binding(Location),
+    /// A global, by its name's hash
+    Global(u64),
+    /// A table's field, by its name's hash
+    Field(TableId, u64),
+    /// What a table holds under computed keys
+    Entries(TableId),
+    EntryKeys(TableId),
+    /// A field of tables of unknown identity, by its name's hash
+    AnyField(u64),
+    /// A function's return, by position
+    Return(FunctionId, usize),
+    /// A function's parameter, by position
+    Parameter(FunctionId, usize),
+}
+
+/// Each place's number, shared by every analysis, so a stand-in is the same
+/// identity on every walk
+static PLACES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<Place, u32>>> = std::sync::LazyLock::new(Default::default);
+
+/// The stand-in for the tables at `place`
+fn stand_in(place: Place) -> TableId {
+    let mut places = PLACES.lock().unwrap_or_else(|e| e.into_inner());
+    let next = places.len() as u32;
+    let slot = *places.entry(place).or_insert(next);
+    Location { file: STAND_INS, offset: TextSize::new(0), slot }
+}
+
+/// The stand-in for the tables at `place`, if it has one yet
+fn existing_stand_in(place: Place) -> Option<TableId> {
+    let places = PLACES.lock().unwrap_or_else(|e| e.into_inner());
+    places.get(&place).map(|&slot| Location { file: STAND_INS, offset: TextSize::new(0), slot })
+}
+
+fn is_stand_in(at: TableId) -> bool {
+    at.file == STAND_INS
+}
+
+/// `ty`, to be kept at `place`: if it's more tables than are kept apart,
+/// the place's stand-in, noted in `stand_ins` as standing for them. With
+/// the stand-in and the tables it stands for that it didn't before
+fn kept_at(stand_ins: &mut HashMap<TableId, Vec<TableId>>, place: Place, ty: Type) -> (Type, Option<(TableId, Vec<TableId>)>) {
+    if !matches!(ty.named, NamedRef::Table(_) | NamedRef::Tables(_)) {
+        return (ty, None)
+    }
+    // Once a place has a stand-in, whatever tables are kept there are it:
+    // what's kept only grows, so it would have been anyway, and the same
+    // tables are always written the same way
+    let at = match (many_tables(ty.named), existing_stand_in(place)) {
+        (_, Some(at)) if stand_ins.contains_key(&at) => at,
+        (true, _) => stand_in(place),
+        (false, _) => return (ty, None),
+    };
+    let known = stand_ins.entry(at).or_default();
+    let mut added: Vec<TableId> = ty.named.identities().into_iter().filter(|&m| m != at && known.binary_search(&m).is_err()).collect();
+    added.sort();
+    added.dedup();
+    known.extend(added.iter().copied());
+    known.sort();
+    let added = (!added.is_empty()).then_some((at, added));
+    (Type { named: NamedRef::Table(at), ..ty }, added)
+}
+
+/// The union of `types`, with the tables of all of them joined into one set
+/// at once rather than one at a time: for joining what many tables hold
+fn union_all(types: impl IntoIterator<Item = Type>) -> Option<Type> {
+    let mut tables: Vec<TableId> = Vec::new();
+    let mut joined: Option<Type> = None;
+    for ty in types {
+        let rest = match ty.named {
+            NamedRef::Table(_) | NamedRef::Tables(_) => {
+                tables.extend(ty.named.identities());
+                Type { named: NamedRef::None, ..ty }
+            }
+            _ => ty,
+        };
+        joined = Some(joined.map_or(rest, |joined| joined | rest));
+    }
+    let mut joined = joined?;
+    if !tables.is_empty() {
+        tables.sort();
+        tables.dedup();
+        let named = match tables.as_slice() {
+            [one] => NamedRef::Table(*one),
+            _ => NamedRef::several_tables(tables),
+        };
+        joined = joined | Type { set: TypeSet::NEVER, function: FunctionRef::None, named, numeric: NamedRef::None };
+    }
+    Some(joined)
+}
+
+/// How many tables a type holds, without looking past a few
+fn many_tables(named: NamedRef) -> bool {
+    match named {
+        NamedRef::Tables(id) => object_set(id).len() > MOST_OBJECTS,
+        _ => false,
+    }
+}
+
 /// A call whose callee's summaries are being applied (see `ForwardedCall`,
 /// `FieldWrite`): what it passes, and where it came from in the function
 /// making it, for passing the summaries on as that function's own
@@ -592,10 +702,10 @@ impl NamedRef {
             joined.sort();
             joined.dedup();
         }
-        match joined.len() {
-            1 => return joined[0],
-            n if n > MOST_OBJECTS => return NamedRef::Unknown,
-            _ => {}
+        // However many: where it's kept, more than are kept apart are
+        // replaced by a stand-in (see `Walker::stored`)
+        if joined.len() == 1 {
+            return joined[0]
         }
         let mut sets = OBJECT_SETS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(&id) = sets.ids.get(joined.as_slice()) {
@@ -1412,6 +1522,8 @@ pub struct Layer {
     pub field_sites: HashMap<TableId, HashMap<String, Vec<Site>>>,
     /// Where fields of tables whose identity wasn't known are assigned, by name
     pub any_field_sites: HashMap<String, Vec<Site>>,
+    /// The tables each stand-in stands for (see `Analysis::stand_ins`)
+    pub stand_ins: HashMap<TableId, Vec<TableId>>,
 }
 
 /// Where the files of addons in a `Layer` are numbered from: far above any
@@ -1506,6 +1618,9 @@ impl Layer {
         for (at, name) in &analysis.table_names {
             own.table_names.insert(renumber(*at, &file), name.clone());
         }
+        for (at, members) in &analysis.stand_ins {
+            own.stand_ins.insert(*at, members.iter().map(|&m| renumber(m, &file)).collect());
+        }
         let site = |file_id: FileId, range: TextRange| Site { file: file(file_id), range };
         for r in analysis.references.iter().filter(|r| r.write) {
             let binding = analysis.binding(r);
@@ -1527,6 +1642,14 @@ impl Layer {
 
     /// Adds what `other` makes visible: both addons are loaded
     pub fn add(&mut self, other: &Layer) {
+        for (at, members) in &other.stand_ins {
+            let mine = self.stand_ins.entry(*at).or_default();
+            for &member in members {
+                if !mine.contains(&member) {
+                    mine.push(member);
+                }
+            }
+        }
         for (name, &ty) in &other.globals {
             *self.globals.entry(name.clone()).or_default() |= ty;
         }
@@ -1811,6 +1934,9 @@ pub struct Analysis {
     pub lua_mixins: HashMap<String, Type>,
     /// The tables the game saves between sessions (see `tables_saved_in`)
     saved_tables: HashSet<TableId>,
+    /// For each stand-in, the tables it stands for: those ever kept at its
+    /// place, only growing (see `Walker::stored`)
+    pub stand_ins: HashMap<TableId, Vec<TableId>>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -2063,6 +2189,23 @@ impl Analysis {
         self.call_cycles = cycles;
     }
 
+    /// The tables stand-in `at` stands for, here and in what this addon depends
+    /// on. None for any other table
+    pub fn stand_in_members(&self, at: TableId) -> Vec<TableId> {
+        if !is_stand_in(at) {
+            return Vec::new()
+        }
+        let mut members: Vec<TableId> = Vec::new();
+        for list in self.stand_ins.get(&at).into_iter().chain(self.layer.stand_ins.get(&at)) {
+            for &member in list {
+                if !members.contains(&member) {
+                    members.push(member);
+                }
+            }
+        }
+        members
+    }
+
     /// What a walk from `self` would read differently from one from `older`.
     /// Empty when the walks have settled
     fn changed_reads(&self, older: &Analysis) -> HashSet<Read> {
@@ -2176,11 +2319,25 @@ impl Analysis {
         if self.lua_mixins != older.lua_mixins {
             changed.insert(Read::LuaMixins);
         }
+        for at in keys(&self.stand_ins, &older.stand_ins) {
+            if self.stand_ins.get(&at) != older.stand_ins.get(&at) {
+                changed.insert(Read::StandIn(at));
+            }
+        }
         changed
     }
 
     /// Adds what `other` had to everything a walk reads from this one
     fn combine_inputs(&mut self, other: &Analysis) {
+        for (at, members) in &other.stand_ins {
+            let mine = self.stand_ins.entry(*at).or_default();
+            for &member in members {
+                if !mine.contains(&member) {
+                    mine.push(member);
+                }
+            }
+            mine.sort();
+        }
         for (at, fields) in &other.fields {
             let mine = self.fields.entry(*at).or_default();
             for (name, &ty) in fields {
@@ -2300,6 +2457,7 @@ impl Analysis {
             map(8, &self.metatables),
             map(9, &self.vararg_values),
             map(10, &self.functions),
+            map(13, &self.stand_ins),
             opened_types,
         ])
     }
@@ -2853,6 +3011,9 @@ struct Walker<'a> {
     opened_types: HashSet<NamedId>,
     /// Entries seen on this walk. Reads use the previous walk's, like fields
     entries: HashMap<TableId, Entries>,
+    /// For each stand-in, the tables it stands for, so far on this walk.
+    /// Reads add to it too (see `Walker::read_through`)
+    stand_ins: std::cell::RefCell<HashMap<TableId, Vec<TableId>>>,
     /// Metatables seen on this walk. Reads use the previous walk's, like fields
     metatables: HashMap<TableId, Type>,
     /// Worked out with parameter types, at the end of the walk
@@ -2970,6 +3131,8 @@ enum Write {
     Function(FunctionId, FunctionInfo),
     /// A variable declared outside the body was assigned this
     Binding(BindingId, Type),
+    /// A stand-in stands for these tables too
+    StandIn(TableId, Vec<TableId>),
 }
 
 impl Write {
@@ -2993,6 +3156,7 @@ impl Write {
             Write::PoolObject(at, _) => vec![Read::PoolObject(*at)],
             Write::Function(id, _) => vec![Read::Function(*id), Read::CallCycle(*id), Read::ParameterTypes(*id), Read::Method(*id)],
             Write::Binding(id, _) => vec![Read::Binding(*id)],
+            Write::StandIn(at, _) => vec![Read::StandIn(*at)],
         }
     }
 }
@@ -3029,6 +3193,8 @@ enum Read {
     /// What a method's `self` is, which the statement defining it decides.
     /// Never read by a body, only depended on
     SelfType(FunctionId),
+    /// The tables a stand-in stands for
+    StandIn(TableId),
     /// Only the types of a function's parameters, as the previous walk settled them
     ParameterTypes(FunctionId),
     /// What the globals XML names as mixins are
@@ -3514,7 +3680,9 @@ const LOOP_PASSES_BEFORE_WIDENING: usize = 8;
 impl<'a> Walker<'a> {
     fn new(prior: Option<&'a Analysis>, definitions: &Arc<Definitions>, layer: &Arc<Layer>, changed: HashSet<Read>, replay: bool) -> Walker<'a> {
         let builtins = BUILTIN_PATHS.iter().map(|&path| (path, definitions.at_path(path))).collect();
-        Walker { prior, changed, replay, layer: layer.clone(), definitions: definitions.clone(), builtins, ..Walker::default() }
+        // Stand-ins only grow: this walk starts with all the walk before found
+        let stand_ins = std::cell::RefCell::new(prior.map(|prior| prior.stand_ins.clone()).unwrap_or_default());
+        Walker { prior, changed, replay, layer: layer.clone(), definitions: definitions.clone(), builtins, stand_ins, ..Walker::default() }
     }
 
     /// A global's preset type: what a dependency gives it, else the
@@ -3712,6 +3880,8 @@ impl<'a> Walker<'a> {
             layer: self.layer,
             // Found once the walk is done
             saved_tables: HashSet::default(),
+            // With those of the walk before, which it started with
+            stand_ins: self.stand_ins.into_inner(),
         }
     }
 
@@ -3910,6 +4080,13 @@ impl<'a> Walker<'a> {
                 }
             }
         }
+        // Kept as their types: more tables than are kept apart are a stand-in
+        let mut kept: HashMap<FunctionId, Vec<Type>> = HashMap::default();
+        for (id, types) in &parameters {
+            let types = types.iter().enumerate().map(|(i, &ty)| kept_at(self.stand_ins.get_mut(), Place::Parameter(*id, i), ty).0).collect();
+            kept.insert(*id, types);
+        }
+        let parameters = kept;
         for (id, function) in self.functions.iter_mut() {
             for (parameter, &ty) in function.parameters.iter_mut().zip(&parameters[id]) {
                 parameter.types = ty;
@@ -4003,6 +4180,7 @@ impl<'a> Walker<'a> {
 
     /// Sets a binding's current type, noting the type before when in a loop
     fn set_current(&mut self, id: BindingId, types: Type) {
+        let types = self.stored(self.binding_place(id), types, true);
         if let Some(body) = self.deps.get_mut().last_mut() {
             if id >= body.bindings_start && self.bindings[id].kind != BindingKind::Global {
                 if let Some(level) = body.levels.last_mut() {
@@ -4063,7 +4241,9 @@ impl<'a> Walker<'a> {
         id
     }
 
-    fn declare(&mut self, token: &SyntaxToken, kind: BindingKind, mut types: Type) -> BindingId {
+    fn declare(&mut self, token: &SyntaxToken, kind: BindingKind, types: Type) -> BindingId {
+        let place = Place::Binding(self.location(token.text_range().start()));
+        let mut types = self.stored(place, types, true);
         if types.named == NamedRef::Unknown {
             // A table we can't identify: track its fields under this variable
             types.named = NamedRef::Table(Location { slot: PSEUDO, ..self.location(token.text_range().start()) });
@@ -4224,8 +4404,10 @@ impl<'a> Walker<'a> {
             }
         }
         let in_closure = self.bindings[id].function != self.function;
+        let joined = self.joined_at(self.binding_place(id), self.bindings[id].types, types, true);
+        let types = self.stored(self.binding_place(id), types, true);
         let binding = &mut self.bindings[id];
-        binding.types |= types;
+        binding.types = joined;
         binding.assigned = true;
         binding.reassigned = true;
         if in_closure {
@@ -4869,6 +5051,17 @@ impl<'a> Walker<'a> {
     /// A field of a table made in the files: its own, else one it got from its
     /// mixins (the last mixin first, as later ones overwrite earlier ones)
     fn own_field(&self, prior: &Analysis, table: TableId, name: &str, depth: usize) -> Option<Type> {
+        // A stand-in: what's written through it, and what any table it
+        // stands for has
+        if is_stand_in(table) && depth <= 16 {
+            self.note(Read::StandIn(table));
+            self.note(Read::Field(table, name_key(name)));
+            let written = prior.fields.get(&table).and_then(|fields| fields.get(name)).copied();
+            let found = union_all(self.stand_in_members(table).into_iter()
+                .filter_map(|member| self.own_field(prior, member, name, depth + 1))
+                .chain(written))?;
+            return Some(self.read_through(Place::Field(table, name_key(name)), found))
+        }
         self.note(Read::Field(table, name_key(name)));
         // A dependency's table: what it gave the table, and what's written to it here
         let layered = (table.file.0 >= LAYER_FILES).then(|| self.layer.field(table, name, 0)).flatten();
@@ -4946,7 +5139,114 @@ impl<'a> Walker<'a> {
         for write in family_write.into_iter().flatten() {
             self.effect_here(&write);
         }
+        // What's written through a stand-in, each table it stands for is
+        // given too, so it's there however the table is reached
+        let through = match write {
+            Write::Field(at, name, value) if is_stand_in(*at) => self.stood_for(*at).into_iter()
+                .map(|m| Write::Field(m, name.clone(), *value)).collect(),
+            Write::Entry(at, key, value) if is_stand_in(*at) => self.stood_for(*at).into_iter()
+                .map(|m| Write::Entry(m, *key, *value)).collect(),
+            Write::MixinAdded(at, mixin) if is_stand_in(*at) => self.stood_for(*at).into_iter()
+                .map(|m| Write::MixinAdded(m, *mixin)).collect(),
+            _ => Vec::new(),
+        };
+        for write in through {
+            self.effect(&write);
+        }
         self.effect_here(write);
+    }
+
+    /// The tables stand-in `at` stands for: as the walk before found, and as
+    /// this walk has so far
+    fn stand_in_members(&self, at: TableId) -> Vec<TableId> {
+        let mut members: Vec<TableId> = self.prior.and_then(|prior| prior.stand_ins.get(&at)).into_iter()
+            .chain(self.layer.stand_ins.get(&at))
+            .flatten()
+            .copied()
+            .chain(self.stand_ins.borrow().get(&at).into_iter().flatten().copied())
+            .collect();
+        members.sort();
+        members.dedup();
+        members
+    }
+
+    /// The tables made in the files stand-in `at` stands for, through any
+    /// stand-ins it stands for: each once, however they stand for each other
+    fn stood_for(&self, at: TableId) -> Vec<TableId> {
+        let mut seen: HashSet<TableId> = HashSet::from_iter([at]);
+        let mut pending = vec![at];
+        let mut tables = Vec::new();
+        while let Some(at) = pending.pop() {
+            for member in self.stand_in_members(at) {
+                if !seen.insert(member) {
+                    continue
+                }
+                if is_stand_in(member) {
+                    pending.push(member);
+                } else {
+                    tables.push(member);
+                }
+            }
+        }
+        tables
+    }
+
+    /// `ty`, to be kept at `place`: if it's more tables than are kept apart,
+    /// the place's stand-in instead, which stands for them from now on. So
+    /// what's kept there only grows. `record` notes it for replaying the
+    /// body walking it, when it's not part of a write already replayed
+    fn stored(&mut self, place: Place, ty: Type, record: bool) -> Type {
+        let (ty, added) = kept_at(self.stand_ins.get_mut(), place, ty);
+        if let (true, Some((at, added))) = (record, added) {
+            self.record_write(Write::StandIn(at, added));
+        }
+        ty
+    }
+
+    /// `before`, kept at `place`, joined with `value`. Once it's the place's
+    /// stand-in, `value`'s tables go straight into what it stands for, rather
+    /// than through a set of them
+    fn joined_at(&mut self, place: Place, before: Type, value: Type, record: bool) -> Type {
+        if let NamedRef::Table(at) = before.named {
+            if is_stand_in(at) && matches!(value.named, NamedRef::Table(_) | NamedRef::Tables(_)) && at == stand_in(place) {
+                let tables: Vec<TableId> = value.named.identities().into_iter().filter(|&t| t != at).collect();
+                let known = self.stand_ins.get_mut().entry(at).or_default();
+                let mut added: Vec<TableId> = tables.into_iter().filter(|t| known.binary_search(t).is_err()).collect();
+                added.sort();
+                added.dedup();
+                if !added.is_empty() {
+                    known.extend(added.iter().copied());
+                    known.sort();
+                    if record {
+                        self.record_write(Write::StandIn(at, added));
+                    }
+                }
+                return before | Type { named: NamedRef::None, ..value }
+            }
+        }
+        self.stored(place, before | value, record)
+    }
+
+    /// What's read through a stand-in, at `place`: if it's more tables than
+    /// are kept apart, a stand-in for them, as for what's kept there, so a
+    /// read doesn't make a set that size
+    fn read_through(&self, place: Place, found: Type) -> Type {
+        let (ty, _) = kept_at(&mut self.stand_ins.borrow_mut(), place, found);
+        if let NamedRef::Table(at) = ty.named {
+            if is_stand_in(at) {
+                self.note(Read::StandIn(at));
+            }
+        }
+        ty
+    }
+
+    /// The place a binding's value is kept
+    fn binding_place(&self, id: BindingId) -> Place {
+        let binding = &self.bindings[id];
+        match binding.declaration {
+            Some(range) => Place::Binding(Location { file: binding.file, offset: range.start(), slot: 0 }),
+            None => Place::Global(name_key(&binding.name)),
+        }
     }
 
     fn effect_here(&mut self, write: &Write) {
@@ -4958,8 +5258,22 @@ impl<'a> Walker<'a> {
             map.get_mut(name).expect("inserted above")
         }
         match write {
-            Write::Field(at, name, value) => *named(self.fields.entry(*at).or_default(), name) |= *value,
-            Write::AnyTableField(name, value) => *named(&mut self.any_table_fields, name) |= *value,
+            Write::Field(at, name, value) => {
+                let before = self.fields.get(at).and_then(|fields| fields.get(name)).copied().unwrap_or_default();
+                let joined = self.joined_at(Place::Field(*at, name_key(name)), before, *value, false);
+                *named(self.fields.entry(*at).or_default(), name) = joined;
+            }
+            Write::AnyTableField(name, value) => {
+                let before = self.any_table_fields.get(name).copied().unwrap_or_default();
+                let joined = self.joined_at(Place::AnyField(name_key(name)), before, *value, false);
+                *named(&mut self.any_table_fields, name) = joined;
+            }
+            Write::StandIn(at, members) => {
+                let known = self.stand_ins.get_mut().entry(*at).or_default();
+                known.extend(members.iter().copied());
+                known.sort();
+                known.dedup();
+            }
             Write::Opened(id) => {
                 self.opened_types.insert(*id);
             }
@@ -4970,9 +5284,12 @@ impl<'a> Walker<'a> {
                 }
             }
             Write::Entry(at, key, value) => {
+                let before = self.entries.get(at).copied().unwrap_or_default();
+                let keys = self.joined_at(Place::EntryKeys(*at), before.keys, *key, false);
+                let values = self.joined_at(Place::Entries(*at), before.values, *value, false);
                 let entries = self.entries.entry(*at).or_default();
-                entries.keys |= *key;
-                entries.values |= *value;
+                entries.keys = keys;
+                entries.values = values;
             }
             Write::Metatable(at, value) => *self.metatables.entry(*at).or_default() |= *value,
             Write::CallArguments(function, values) => {
@@ -5013,8 +5330,9 @@ impl<'a> Walker<'a> {
             Write::PoolObject(at, object) => { self.pool_objects.insert(*at, *object); }
             Write::Function(id, info) => { self.functions.insert(*id, info.clone()); }
             Write::Binding(id, types) => {
+                let joined = self.joined_at(self.binding_place(*id), self.bindings[*id].types, *types, false);
                 let binding = &mut self.bindings[*id];
-                binding.types |= *types;
+                binding.types = joined;
                 binding.assigned = true;
                 binding.reassigned = true;
                 // Only a body declared inside the binding's function records it
@@ -5443,6 +5761,11 @@ impl<'a> Walker<'a> {
             None => Values::none(),
         };
         let returns = self.with_returned_templates(def, returns);
+        // Kept as its signature: more tables than are kept apart are a stand-in
+        let returns = Values {
+            values: returns.values.iter().enumerate().map(|(i, &value)| self.stored(Place::Return(id, i), value, true)).collect(),
+            rest: self.stored(Place::Return(id, usize::MAX), returns.rest, true),
+        };
         self.pop_scope();
         self.function = outer_function;
         self.function_scope = outer_function_scope;
@@ -7796,6 +8119,25 @@ impl<'a> Walker<'a> {
 
     /// What a table holds beyond its named fields: here, and from a dependency
     fn entries_of(&self, prior: &Analysis, at: TableId) -> Option<Entries> {
+        self.entries_within(prior, at, 0)
+    }
+
+    fn entries_within(&self, prior: &Analysis, at: TableId, depth: usize) -> Option<Entries> {
+        // A stand-in: what any table it stands for holds, and what's put
+        // through it
+        if is_stand_in(at) && depth <= 16 {
+            self.note(Read::StandIn(at));
+            let all: Vec<Entries> = self.stand_in_members(at).into_iter()
+                .filter_map(|member| self.entries_within(prior, member, depth + 1))
+                .chain(prior.entries.get(&at).copied())
+                .collect();
+            let keys = union_all(all.iter().map(|e| e.keys))?;
+            let values = union_all(all.iter().map(|e| e.values))?;
+            return Some(Entries {
+                keys: self.read_through(Place::EntryKeys(at), keys),
+                values: self.read_through(Place::Entries(at), values),
+            })
+        }
         // A variable's stand-in for a table it doesn't know: what it's seen
         // given is only some of what the table may hold
         if at.slot & PSEUDO != 0 {

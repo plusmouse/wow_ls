@@ -128,6 +128,8 @@ impl<'a> Remap<'a> {
             Read::CallCycle(at) => Read::CallCycle(self.location(*at)?),
             Read::Method(at) => Read::Method(self.location(*at)?),
             Read::SelfType(at) => Read::SelfType(self.location(*at)?),
+            // A stand-in is the same identity whatever moves
+            Read::StandIn(at) => Read::StandIn(*at),
             Read::ParameterTypes(at) => Read::ParameterTypes(self.location(*at)?),
             Read::Saved(at) => Read::Saved(self.location(*at)?),
             other => other.clone(),

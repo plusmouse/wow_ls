@@ -426,6 +426,10 @@ fn own_fields(analysis: &Analysis, at: TableId, found: &mut HashMap<String, Type
     if depth > 16 {
         return
     }
+    // A stand-in for many tables: what any of them has
+    for member in analysis.stand_in_members(at) {
+        own_fields(analysis, member, found, depth + 1);
+    }
     // What the files give it, then what an addon depended on gives it
     let layer = &analysis.layer;
     for (name, &types) in analysis.fields.get(&at).into_iter().chain(layer.fields.get(&at)).flatten() {
