@@ -4933,6 +4933,25 @@ impl<'a> Walker<'a> {
         if base.set == TypeSet::NEVER {
             return Type::default()
         }
+        // May be a string or something else, like an unknown value: a string
+        // has the string library's fields whatever the rest has, so knowing
+        // more of what it may be only adds to what's read. What can't be
+        // indexed (a number, a boolean, a function, nil) adds nothing, as
+        // indexing it fails. With a table, only what the string library
+        // declares: the table's read already falls back on fields of that
+        // name anywhere (as a string's does, for functions added to
+        // `string`), and it mustn't hide what the table's own field holds
+        // (`ns.Version` of an addon's namespace)
+        let other = base.without(TypeSet::STRING | TypeSet::NIL);
+        if base.set.contains(TypeSet::STRING) && other.set != TypeSet::NEVER {
+            if !(other.set.contains(TypeSet::TABLE) || other.set.contains(TypeSet::OTHER)) {
+                return self.field_read(Type::of(TypeSet::STRING), name)
+            }
+            let declared = self.definitions.string_library()
+                .and_then(|library| self.definitions.field(library, name))
+                .unwrap_or_default();
+            return declared | self.field_read(other, name)
+        }
         // Any of several objects: what each has, which is only known for a
         // field all of them have
         if let NamedRef::Several(_) = base.named {
@@ -9664,8 +9683,26 @@ mod tests {
         assert_eq!(library_types_of("local s if math.random() > 0.5 then s = 'x' end local u = s:upper()", "u")[0], "string");
         // Functions an addon adds to `string`
         assert_eq!(library_types_of("string.ext = function() return 1 end local n = ('x'):ext()", "n")[0], "number");
-        // Not a string for sure: nothing to go on
-        assert_eq!(library_types_of("local function f(v) return v:upper() end local u = f(1) f('x')", "u")[0], "unknown");
+        // A number has no methods, so calling one on what may be a number or
+        // a string is a string's, if it works at all
+        assert_eq!(library_types_of("local function f(v) return v:upper() end local u = f(1) f('x')", "u")[0], "string");
+        // A string's methods whatever else it may be, so knowing more of
+        // what a value may be never takes them away, which would leave a
+        // function taking its own results cycling
+        let source = "local function parse(value)
+            local first, remainder = value:sub(1, 1), value:sub(2)
+            if first == '^' then
+                local str, rest = remainder:match('(.)(.*)')
+                return parse(str), rest
+            end
+            return 1, remainder
+        end
+        local x, y = parse(('abc'):lower())";
+        let analysis = analyse_with(source, &library());
+        assert!(analysis.walks <= 5, "{} walks", analysis.walks);
+        assert_eq!(describe_uses(&analysis, "remainder")[0], "string");
+        // A table's own field isn't lost to a string's nothing known of it
+        assert_eq!(library_types_of("local t = {} t.v = 1 local s = math.random() > 0.5 and t or 'x' local n = s.v", "n")[0], "number");
     }
 
     #[test]
