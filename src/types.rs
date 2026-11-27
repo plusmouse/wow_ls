@@ -1878,6 +1878,9 @@ pub struct Analysis {
     pub call_cycles: HashMap<FunctionId, FunctionId>,
     /// How many walks it took to settle
     pub walks: usize,
+    /// Whether walks came round to a state seen before, so they only
+    /// settled by keeping what each had (see `combining`)
+    pub cycled: bool,
     /// Each file's tree, for what field references point to. The green tree,
     /// which can go to another thread, unlike a `SyntaxNode`
     roots: Vec<rowan::GreenNode>,
@@ -1973,6 +1976,7 @@ impl Analysis {
         // Whether walks have started to cycle, so each is combined with the
         // one before
         let mut combining = false;
+        let mut cycled = false;
         // Whether walks have settled once, and go on with what tables nothing's
         // been seen stored in hold unknown (see `Walker::settled`)
         let mut unstored_unknown = false;
@@ -2035,6 +2039,7 @@ impl Analysis {
                 for k in keys.iter().take(40) { eprintln!("    {k}"); }
             }
             combining |= repeat;
+            cycled |= repeat && !settled;
             result = next;
             if !settled {
                 continue
@@ -2067,6 +2072,7 @@ impl Analysis {
             seen.insert(result.fingerprint());
             combining = false;
         }
+        result.cycled = cycled;
         result.complete();
         result
     }
@@ -3050,6 +3056,12 @@ struct Walker<'a> {
     /// The function being walked's code, to tell what it makes, for each
     /// function being walked
     function_ranges: Vec<(TextRange, usize)>,
+    /// Where each function walked (or replayed) ends, to tell what's
+    /// declared in it
+    function_ends: HashMap<FunctionId, TextSize>,
+    /// The stand-ins parameters have for a table they can't identify, which
+    /// are already theirs
+    parameter_pseudos: HashSet<TableId>,
     /// How many loops were being walked where each function in
     /// `function_ranges` is
     closure_loop_depths: Vec<usize>,
@@ -3882,6 +3894,7 @@ impl<'a> Walker<'a> {
             vararg_values: self.vararg_values,
             call_cycles: HashMap::default(),
             walks: 1,
+            cycled: false,
             roots: self.roots.iter().map(|root| root.green().into_owned()).collect(),
             layer: self.layer,
             // Found once the walk is done
@@ -4100,6 +4113,21 @@ impl<'a> Walker<'a> {
         // Kept as their types: more tables than are kept apart are a stand-in
         let mut kept: HashMap<FunctionId, Vec<Type>> = HashMap::default();
         for (id, types) in &parameters {
+            // Passed a variable's stand-in for a table it can't identify that's
+            // declared in the function itself, passed back to it (as
+            // `Degroup(entry)` in `Degroup`): which of its variables it was
+            // would swap from walk to walk, as what each holds depends on the
+            // parameter. The parameter's own stand-in, standing for them all,
+            // is the same every walk and has what each of them has
+            let end = self.function_ends.get(id).copied();
+            let inner = |at: &TableId| at.slot == PSEUDO && at.file == id.file
+                && end.is_some_and(|end| at.offset >= id.offset && at.offset < end)
+                && !self.parameter_pseudos.contains(at);
+            for (i, ty) in types.iter().enumerate() {
+                if ty.named.identities().iter().any(inner) {
+                    self.stand_ins.get_mut().entry(stand_in(Place::Parameter(*id, i))).or_default();
+                }
+            }
             let types = types.iter().enumerate().map(|(i, &ty)| kept_at(self.stand_ins.get_mut(), Place::Parameter(*id, i), ty).0).collect();
             kept.insert(*id, types);
         }
@@ -5039,7 +5067,7 @@ impl<'a> Walker<'a> {
         let entry = match (own, base.named) {
             (None, NamedRef::Table(id)) if id.slot & PSEUDO == 0 => {
                 self.note(Read::Entries(id));
-                self.entries_of(prior, id)
+                self.entries_within(prior, id, 0, true)
                     .filter(|entries| entries.keys.set.contains(TypeSet::STRING) && entries.values.set != TypeSet::NEVER)
                     .map(|entries| entries.values | Type::NIL)
             }
@@ -5541,6 +5569,10 @@ impl<'a> Walker<'a> {
 
     fn function_body(&mut self, def: &FunctionDefinition, self_type: Option<Type>) -> FunctionId {
         let id = self.function_id(def);
+        self.function_ends.insert(id, def.syntax().text_range().end());
+        for param in def.params().map(|p| p.parameter_tokens()).unwrap_or_default() {
+            self.parameter_pseudos.insert(Location { slot: PSEUDO, ..self.location(param.text_range().start()) });
+        }
         if let Some(record) = self.replayable(id, self_type) {
             self.replay(id, &record);
             return id
@@ -8213,16 +8245,20 @@ impl<'a> Walker<'a> {
 
     /// What a table holds beyond its named fields: here, and from a dependency
     fn entries_of(&self, prior: &Analysis, at: TableId) -> Option<Entries> {
-        self.entries_within(prior, at, 0)
+        self.entries_within(prior, at, 0, false)
     }
 
-    fn entries_within(&self, prior: &Analysis, at: TableId, depth: usize) -> Option<Entries> {
+    /// With `known`, only what's seen put in tables it knows: not that a
+    /// variable's stand-in for a table it doesn't know may hold anything, as
+    /// a field read through it falls back on fields of that name elsewhere
+    fn entries_within(&self, prior: &Analysis, at: TableId, depth: usize, known: bool) -> Option<Entries> {
         // A stand-in: what any table it stands for holds, and what's put
         // through it
         if is_stand_in(at) && depth <= 16 {
             self.note(Read::StandIn(at));
             let all: Vec<Entries> = self.stand_in_members(at).into_iter()
-                .filter_map(|member| self.entries_within(prior, member, depth + 1))
+                .filter(|member| !known || member.slot & PSEUDO == 0)
+                .filter_map(|member| self.entries_within(prior, member, depth + 1, known))
                 .chain(prior.entries.get(&at).copied())
                 .collect();
             let keys = union_all(all.iter().map(|e| e.keys))?;
@@ -8874,6 +8910,45 @@ mod tests {
         let analysis = analyse_with(source, &library());
         assert!(analysis.walks <= 5, "{} walks", analysis.walks);
         assert_eq!(describe_uses(&analysis, "elements")[0], "table[]");
+    }
+
+    #[test]
+    fn own_variable_passed_back_settles() {
+        // A table of unknown origin read in the function, passed back to it:
+        // which of its variables the parameter holds would swap each walk
+        let source = "local function Degroup(details)
+            for _, entry in ipairs(details.entries) do
+                if entry.kind == 'group' then Degroup(entry) end
+            end
+            local final = {}
+            for _, entry in ipairs(details.entries) do
+                if entry.kind == 'group' then table.insert(final, entry.entries[1]) else table.insert(final, entry) end
+            end
+            details.entries = final
+        end
+        function Start(root) Degroup(root) end";
+        assert!(!analyse_with(source, &library()).cycled);
+    }
+
+    #[test]
+    fn stand_in_for_unknown_table_reads_nothing_yet() {
+        // A stand-in for tables including one of unknown origin: a field
+        // nothing's seen written reads as through that table, not as
+        // anything it may hold under any key, so passing what it reads back
+        // doesn't swap what the parameter is each walk
+        let source = "local function Find(details, root)
+            if root.details == details then return root end
+            for _, e in ipairs(root.children) do
+                local result = Find(details, e)
+                if result then return result end
+            end
+        end
+        local function Delete(root)
+            root.deleted = true
+            if root.details.last then Delete(root:GetParent()) end
+        end
+        function Start(details, top) Delete(Find(details, top)) end";
+        assert!(!analyse_with(source, &library()).cycled);
     }
 
     #[test]
