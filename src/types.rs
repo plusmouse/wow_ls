@@ -4244,9 +4244,19 @@ impl<'a> Walker<'a> {
     fn declare(&mut self, token: &SyntaxToken, kind: BindingKind, types: Type) -> BindingId {
         let place = Place::Binding(self.location(token.text_range().start()));
         let mut types = self.stored(place, types, true);
-        if types.named == NamedRef::Unknown {
+        let pseudo = Location { slot: PSEUDO, ..self.location(token.text_range().start()) };
+        match types.named {
             // A table we can't identify: track its fields under this variable
-            types.named = NamedRef::Table(Location { slot: PSEUDO, ..self.location(token.text_range().start()) });
+            NamedRef::Unknown => types.named = NamedRef::Table(pseudo),
+            // A parameter required to be an object of a named type, which
+            // has no identity of its own: still track what's written through
+            // it under this variable, as before it was known to be one, so
+            // what the body reads back is the same either way
+            NamedRef::One(named) | NamedRef::Extended(named) if kind == BindingKind::Parameter => {
+                let extended = matches!(types.named, NamedRef::Extended(_));
+                types.named = NamedRef::Instance { named, at: pseudo, extended };
+            }
+            _ => {}
         }
         let depth = self.scopes.len() - 1;
         let id = self.new_binding(token.text(), kind, Some(token.text_range()), types, self.function, depth);
@@ -4961,6 +4971,19 @@ impl<'a> Walker<'a> {
             NamedRef::Table(id) => self.own_field(prior, id, name, 0),
             // In a mixin's methods, `self` is an object with the fields of
             // the tables the mixin was mixed into on its way to it
+            // A parameter's stand-in for an object of a named type, which may
+            // be any object of it: what's written through it, with what any
+            // object's field of that name is given, as for the type itself
+            NamedRef::Instance { at: id, named, .. } if id.slot & PSEUDO != 0 => {
+                let own = self.own_field(prior, id, name, 0).or_else(|| self.lua_mixin_field(prior, named, name));
+                self.note(Read::AnyTableField(name_key(name)));
+                let any = prior.any_table_fields.get(name).copied().into_iter().chain(self.layer.any_table_fields.get(name).copied()).reduce(Type::union);
+                match (own, any) {
+                    (Some(own), Some(any)) => Some(own | Type { named: any.named.loosened(), ..any }),
+                    (own, None) => own,
+                    (None, Some(_)) => None,
+                }
+            }
             NamedRef::Instance { at: id, .. } => self.own_field(prior, id, name, 0).or_else(|| self.copied_into_field(prior, id, name)),
             // A frame XML makes from a template has its Lua mixins' fields,
             // as one `CreateFrame` makes does
@@ -5447,7 +5470,14 @@ impl<'a> Walker<'a> {
                     self.apply(Write::Field(id, name.to_string(), value));
                 }
             }
-            NamedRef::Instance { at: id, .. } => self.apply(Write::Field(id, name.to_string(), value)),
+            NamedRef::Instance { at: id, .. } => {
+                self.apply(Write::Field(id, name.to_string(), value));
+                // A parameter's stand-in for an object of unknown identity:
+                // as for any object of its type, which it may be
+                if id.slot & PSEUDO != 0 {
+                    self.apply(Write::AnyTableField(name.to_string(), value));
+                }
+            }
             // Could be any table, or shared by every object of a WoW type
             NamedRef::One(_) | NamedRef::Extended(_) | NamedRef::Unknown => self.apply(Write::AnyTableField(name.to_string(), value)),
             // Whichever object it is gets it, so each may have it. Also kept
