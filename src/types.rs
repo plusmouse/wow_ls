@@ -3620,6 +3620,9 @@ struct PendingCall {
     parameters: Vec<(usize, FunctionId, usize, Option<TypeSet>)>,
     /// From this position on, the arguments are that function's own `...`
     varargs: Option<(usize, FunctionId)>,
+    /// Whether the call is recursive, so what it passes on of `...` is joined
+    /// (see `resolve_pending`)
+    recursive: bool,
 }
 
 /// How much had been recorded before a loop pass, to discard that pass
@@ -7198,7 +7201,8 @@ impl<'a> Walker<'a> {
                 .map(|now| now.set);
             parameters.push((position, function, index, narrowed));
         }
-        (!parameters.is_empty() || varargs.is_some()).then(|| PendingCall { callee, known: known.clone(), parameters, varargs })
+        let recursive = varargs.is_some_and(|(_, function)| self.recursive(function, callee));
+        (!parameters.is_empty() || varargs.is_some()).then(|| PendingCall { callee, known: known.clone(), parameters, varargs, recursive })
     }
 
     /// A function's new object, for one call: a new identity at the call, with
@@ -8591,8 +8595,15 @@ fn resolve_pending(call: &PendingCall, parameters: &HashMap<FunctionId, Vec<Type
     if let Some((position, function)) = call.varargs {
         let passed = varargs.get(&function).cloned().unwrap_or_else(Values::unknown);
         values.values.truncate(position);
-        values.values.extend(passed.values);
-        values.rest = passed.rest;
+        if call.recursive {
+            // Passing its own `...` back with more in front, as in
+            // `f(x, ...)` in `f`, would make `...` one longer each time round.
+            // What's in front keeps its place, what's passed on is joined
+            values.rest = passed.values.into_iter().fold(passed.rest, |rest, value| rest | value);
+        } else {
+            values.values.extend(passed.values);
+            values.rest = passed.rest;
+        }
     }
     values
 }
@@ -8814,6 +8825,17 @@ mod tests {
         assert_eq!(cycle("a"), cycle("b"));
         // Calls into the cycle, but isn't called back
         assert_eq!(cycle("c"), None);
+    }
+
+    #[test]
+    fn recursive_varargs_settle() {
+        // Passing `...` back with more in front would make it one longer each
+        // time round, as AceConfigRegistry's `validate(v, errlvl, k, "args", ...)`
+        let source = "local function f(stop, ...) local a, b, c = ... if not stop then f(true, 's', ...) end end f(false, 1)";
+        assert!(analyse(source).walks <= 5);
+        assert_eq!(types_of(source, "a")[0], "number|string");
+        assert_eq!(types_of(source, "b")[0], "number|string|nil");
+        assert_eq!(types_of(source, "c")[0], "number|string|nil");
     }
 
     #[test]
