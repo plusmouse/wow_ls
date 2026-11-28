@@ -28,6 +28,10 @@ pub(super) struct Scope {
     pub(super) end: TextSize,
 }
 
+/// A field a function gives what it's passed: on what, its name, and the
+/// values it's given
+pub(super) type GivenField = (Result<On, TableId>, String, Vec<Forwarded>);
+
 #[derive(Default)]
 pub(super) struct Walker<'a> {
     /// Results of the previous walk, used where this walk doesn't know yet
@@ -217,7 +221,7 @@ pub(super) struct Walker<'a> {
     /// Per function being walked: the fields it gives what it's passed, on
     /// `self`, a parameter, or a table it makes (which `FieldWrite`s name by
     /// the return that gives it, once that's known)
-    pub(super) field_writes: Vec<Vec<(Result<On, TableId>, String, Vec<Forwarded>)>>,
+    pub(super) field_writes: Vec<Vec<GivenField>>,
     /// Per function being walked: for each return, the field of `self` or a
     /// parameter it returns, so far (None once returns disagree)
     pub(super) returned_fields: Vec<Option<Vec<Option<ReturnedField>>>>,

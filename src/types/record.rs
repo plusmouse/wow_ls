@@ -177,6 +177,9 @@ pub(super) struct Record {
     pub(super) own_influences: Arc<BodyInfluences>,
 }
 
+/// Each key a body influences, with the keys it depends on
+pub(super) type Influences = [(Read, Arc<[Read]>)];
+
 /// What a body did and read as it was walked, from which what each key it
 /// influences depended on is worked out when asked (see
 /// `BodyInfluences::get`): only the last walk's are ever asked for
@@ -191,7 +194,7 @@ pub(super) struct BodyInfluences {
     /// The function each call passing its parameters on calls, and what the
     /// call read
     pub(super) pending: Vec<(FunctionId, Arc<Dep>)>,
-    pub(super) found: std::sync::OnceLock<Arc<[(Read, Arc<[Read]>)]>>,
+    pub(super) found: std::sync::OnceLock<Arc<Influences>>,
 }
 
 impl std::fmt::Debug for BodyInfluences {
@@ -204,7 +207,7 @@ impl BodyInfluences {
     /// Each key it influences: each write, each local it declares, its
     /// signature, what it passes on. With what each depended on: what the
     /// statement doing it read, and what the locals it used read
-    pub(super) fn get(&self) -> &[(Read, Arc<[Read]>)] {
+    pub(super) fn get(&self) -> &Influences {
         self.found.get_or_init(|| self.work_out())
     }
 
@@ -213,7 +216,7 @@ impl BodyInfluences {
         self.body.own_reads()
     }
 
-    pub(super) fn work_out(&self) -> Arc<[(Read, Arc<[Read]>)]> {
+    pub(super) fn work_out(&self) -> Arc<Influences> {
         let (body, id) = (&self.body, self.function);
         let closed = body.closed();
         // What reaches these from its top (its parameters) does so through

@@ -266,8 +266,8 @@ impl<'a> Walker<'a> {
                 self.script_handler(receiver, callee, method.text(), &arguments, &argument_types);
             }
         }
-        if let (Some(receiver), Some(method)) = (receiver, call.method_name()) {
-            returns = self.object_method(call, receiver, method.text(), arguments.first(), template.and_then(|i| arguments.get(i)), &argument_types, returns);
+        if let Some(receiver) = receiver {
+            returns = self.object_method(call, receiver, &arguments, template, &argument_types, returns);
         }
         self.require_arguments(&arguments, &required);
         if returns != documented {
@@ -353,7 +353,7 @@ impl<'a> Walker<'a> {
                 let mut returns = self.returns_of(id);
                 for (slot, fresh) in fresh_returns.iter().enumerate() {
                     if let (Some(fresh), Some(&value)) = (fresh, returns.values.get(slot)) {
-                        returns.values[slot] = self.fresh_object(call, slot, value, fresh, &parameter_types, arguments, offset, None);
+                        returns.values[slot] = self.fresh_object(&Making { call, arguments: &parameter_types, expressions: arguments, offset, function: None }, slot, value, fresh);
                     }
                 }
                 // A loop over this call gets what one over the function's
@@ -377,7 +377,7 @@ impl<'a> Walker<'a> {
                     let mut returns = documented.clone();
                     for (slot, fresh) in fresh_returns.iter().enumerate() {
                         if let (Some(fresh), Some(&value)) = (fresh, returns.values.get(slot)) {
-                            returns.values[slot] = self.fresh_object(call, slot, value, fresh, argument_types, arguments, 0, builtin);
+                            returns.values[slot] = self.fresh_object(&Making { call, arguments: argument_types, expressions: arguments, offset: 0, function: builtin }, slot, value, fresh);
                         }
                     }
                     returns
@@ -425,8 +425,13 @@ impl<'a> Walker<'a> {
     }
 
     /// Methods that make or change WoW objects' parents. `returns` is what the
-    /// method's documentation says it returns
-    pub(super) fn object_method(&mut self, call: &FunctionCall, receiver: Type, name: &str, kind: Option<&Expression>, template: Option<&Expression>, arguments: &Values, mut returns: Values) -> Values {
+    /// method's documentation says it returns, and `template` which argument
+    /// names the template it makes an object from
+    pub(super) fn object_method(&mut self, call: &FunctionCall, receiver: Type, expressions: &[Expression], template: Option<usize>, arguments: &Values, mut returns: Values) -> Values {
+        let Some(method) = call.method_name() else { return returns };
+        let name = method.text();
+        let kind = expressions.first();
+        let template = template.and_then(|i| expressions.get(i));
         let parent = receiver.named.identity();
         if let Some(object) = parent.and_then(|at| self.pool_object(at)) {
             match name {

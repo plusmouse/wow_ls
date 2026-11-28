@@ -56,6 +56,14 @@ struct Kinds<'a> {
     intrinsics: HashMap<String, String>,
 }
 
+/// What `mixin` finds of a mixin: its methods, the fields that may hold one
+/// but may hold something else too, and whether it may have others
+struct MixinMembers {
+    functions: Map<String, Value>,
+    values: Map<String, Value>,
+    open: bool,
+}
+
 impl Kinds<'_> {
     fn is_object_type(&self, name: &str) -> bool {
         self.definitions.named_type_id(name)
@@ -211,7 +219,7 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path, colors
     let mut mixins = Map::new();
     for name in &mixin_names {
         match generator.mixin(name) {
-            Some((functions, values, open)) => {
+            Some(MixinMembers { functions, values, open }) => {
                 let mut mixin = Map::new();
                 if open {
                     report.open_mixins.push(name.clone());
@@ -596,7 +604,7 @@ impl Generator<'_> {
     /// types, and whether it may have others: when it or one mixed into it
     /// holds functions under computed keys, which can be methods
     /// (`handler[accessor] = function(self) ... end`)
-    fn mixin(&self, name: &str) -> Option<(Map<String, Value>, Map<String, Value>, bool)> {
+    fn mixin(&self, name: &str) -> Option<MixinMembers> {
         let table = self.layer.globals.get(name)?.named.identity()?;
         let mut fields = HashMap::new();
         let open = self.table_fields(table, &mut fields, 0);
@@ -620,7 +628,7 @@ impl Generator<'_> {
             };
             functions.insert(field, signature.unwrap_or_else(|| json!({"parameters": ["..."], "returns": ["unknown"], "rest": "unknown"})));
         }
-        Some((functions.into_iter().collect(), values.into_iter().collect(), open))
+        Some(MixinMembers { functions: functions.into_iter().collect(), values: values.into_iter().collect(), open })
     }
 
     /// A table's fields: those of its mixins, in the order they were mixed

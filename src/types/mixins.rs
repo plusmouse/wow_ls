@@ -29,12 +29,24 @@ pub(super) enum MixinTarget {
     Other,
 }
 
+/// A call that returns fresh objects (see `fresh_object`)
+#[derive(Clone, Copy)]
+pub(super) struct Making<'c> {
+    pub(super) call: &'c FunctionCall,
+    /// The types of the call's arguments
+    pub(super) arguments: &'c Values,
+    /// The call's arguments, each `offset` from the parameter it fills (see
+    /// `pending_call`)
+    pub(super) expressions: &'c [Expression],
+    pub(super) offset: isize,
+    /// The definitions' function called, if it's one, whose tables are of a
+    /// family (see `family`)
+    pub(super) function: Option<BuiltinId>,
+}
+
 impl<'a> Walker<'a> {
-    /// `expressions` are the call's arguments, each `offset` from the
-    /// parameter it fills (see `pending_call`)
-    /// `function` is the definitions' function called, if it's one, whose
-    /// tables are of a family (see `family`)
-    pub(super) fn fresh_object(&mut self, call: &FunctionCall, slot: usize, value: Type, fresh: &FreshObject, arguments: &Values, expressions: &[Expression], offset: isize, function: Option<BuiltinId>) -> Type {
+    pub(super) fn fresh_object(&mut self, making: &Making, slot: usize, value: Type, fresh: &FreshObject) -> Type {
+        let Making { call, arguments, expressions, offset, function } = *making;
         let here = self.call_location(call);
         let at = function.and_then(|function| family_member(here, function, slot))
             .unwrap_or(Location { slot: slot as u32 + 1, ..here });

@@ -122,7 +122,7 @@ impl<'a> Walker<'a> {
             let Some(named) = self.definitions.named_type(id) else { return };
             // A data table's members are all known too, and none are methods,
             // unless it's given ones that can't be named
-            if !named.has_methods && !(self.definitions.has_fixed_fields(id) && !self.is_opened(prior, id)) {
+            if !named.has_methods && (!self.definitions.has_fixed_fields(id) || self.is_opened(prior, id)) {
                 return
             }
             if !self.lua_mixins_known(prior, id) {
