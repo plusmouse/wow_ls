@@ -38,8 +38,7 @@ use crate::project::{self, Addon};
 use crate::completion::{self, CandidateKind};
 
 pub fn start_ls()  -> Result<(), Box<dyn Error + Sync + Send>> {
-    // Note that  we must have our logging only write out to stderr.
-    //eprintln!("Starting wow_ls");
+    // Logging must only go to stderr, as stdout is the transport
     // Create the transport. Includes the stdio (stdin and stdout) versions but this could
     // also be implemented to use sockets or HTTP.
     let (connection, _io_threads) = Connection::stdio();
@@ -633,7 +632,6 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                 continue
             }
         };
-        //eprintln!("got msg: {msg:?}");
         match msg {
             Message::Request(req) => {
                 // As `Connection::handle_shutdown`, which can't be used as the
@@ -651,7 +649,6 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                     connection.sender.send(Message::Response(resp))?;
                     continue;
                 }
-                //eprint!("got req {}", &*req.method);
                 match &*req.method {
                     "textDocument/hover" => {
                         if let Ok((id, params)) = cast_req::<request::HoverRequest>(req) {
@@ -758,14 +755,12 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                     _ => {
                     }
                 };
-                // ...
             }
             Message::Response(_) => {}
             Message::Notification(not) if not.method == "exit" => {
                 return if shutting_down { Ok(()) } else { Err("exit without shutdown".into()) };
             }
             Message::Notification(not) => {
-                //eprint!("got not {}", &*not.method);
                 match &*not.method {
                     "textDocument/didChange" => {
                         if let Ok(params) = cast_not::<notification::DidChangeTextDocument>(not) {
@@ -831,9 +826,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                             }
                         }
                     }
-                    _ => {
-                        //eprintln!("fallback")
-                    }
+                    _ => {}
                 }
             }
         }

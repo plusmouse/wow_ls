@@ -192,7 +192,7 @@ impl<'a> Walker<'a> {
 
     /// `e` as a local of the current function and the field names from it,
     /// for `x` (no names) or `x.a.b`
-    pub(super) fn field_path(&self, e: &Expression) -> Option<(BindingId, Vec<String>)> {
+    pub(super) fn narrowing_path(&self, e: &Expression) -> Option<(BindingId, Vec<String>)> {
         let Expression::Identifier(identifier) = e else { return None };
         if let Some(name) = identifier.simple_name() {
             // In the main chunk, a global is followed as it's assigned, as
@@ -205,7 +205,7 @@ impl<'a> Walker<'a> {
             return (self.bindings[id].function == self.function).then(|| (id, Vec::new()))
         }
         let (base, field) = field_access(identifier.syntax())?;
-        let (id, mut path) = self.field_path(&base)?;
+        let (id, mut path) = self.narrowing_path(&base)?;
         path.push(field.text().to_string());
         Some((id, path))
     }
@@ -215,7 +215,7 @@ impl<'a> Walker<'a> {
         if self.narrowed_fields.is_empty() {
             return None
         }
-        let (root, path) = self.field_path(e)?;
+        let (root, path) = self.narrowing_path(e)?;
         self.narrowed_fields.iter().find(|(r, p, _)| *r == root && *p == path).map(|(_, _, ty)| *ty)
     }
 
@@ -224,7 +224,7 @@ impl<'a> Walker<'a> {
     /// Or a field reached from one by names, while nothing changes it (see
     /// `narrowed_fields`)
     pub(super) fn narrowable(&self, expression: &Expression) -> Option<(Target, Type)> {
-        let (root, path) = self.field_path(expression)?;
+        let (root, path) = self.narrowing_path(expression)?;
         // A global the files don't assign is its preset, as a read finds
         let held = self.builtin_global(root).unwrap_or(self.current[root]);
         if path.is_empty() {

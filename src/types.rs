@@ -100,6 +100,14 @@
 //!
 //! Known gaps: globals the file doesn't assign (like saved variables) have no
 //! table identity. Recursive calls return unknown.
+//!
+//! The modules: `value` is how types are represented, and `results` what an
+//! analysis keeps. `analysis` runs walks until they settle. Each walk is a
+//! [`Walker`] (`walker`), whose methods are split by what they walk
+//! (`statements`, `expressions`, `calls`, `fields`, `tables`, `functions`,
+//! `narrowing`, ...), keeping a `record` of each body. `queries` and
+//! `describe` answer the editor, and `layer` carries an analysis over to the
+//! addons that depend on it.
 
 use std::fmt;
 use std::sync::Arc;
