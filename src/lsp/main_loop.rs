@@ -911,8 +911,8 @@ fn complete(workspace: &mut Workspace, uri: &str, s: &str, position: Position, d
     let items = completions.candidates.iter().map(|candidate| {
         let (kind, order) = match candidate.kind {
             CandidateKind::Local | CandidateKind::Parameter => (CompletionItemKind::VARIABLE, 0),
-            CandidateKind::Field => (CompletionItemKind::FIELD, 0),
-            CandidateKind::Method => (CompletionItemKind::METHOD, 0),
+            CandidateKind::Field => (CompletionItemKind::FIELD, u8::from(candidate.from_api)),
+            CandidateKind::Method => (CompletionItemKind::METHOD, u8::from(candidate.from_api)),
             CandidateKind::Global => (CompletionItemKind::VARIABLE, 1),
             CandidateKind::Keyword => (CompletionItemKind::KEYWORD, 2),
         };
@@ -924,7 +924,8 @@ fn complete(workspace: &mut Workspace, uri: &str, s: &str, position: Position, d
             label: candidate.name.clone(),
             kind: Some(kind),
             detail: completion::detail(analysis, candidate),
-            // Locals before globals before keywords, alphabetically within each
+            // Locals before globals before keywords, and the project's members
+            // before the WoW API's, alphabetically within each
             sort_text: Some(format!("{order}{}", candidate.name)),
             ..CompletionItem::default()
         }

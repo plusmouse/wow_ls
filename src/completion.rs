@@ -47,6 +47,9 @@ pub struct Candidate {
     pub kind: CandidateKind,
     /// Unknown for a keyword
     pub types: Type,
+    /// A member only the WoW API's definitions give, not the project's files,
+    /// so listed after those that are
+    pub from_api: bool,
 }
 
 #[derive(Debug, Default)]
@@ -216,7 +219,7 @@ fn names(analysis: &Analysis, file: FileId, offset: TextSize, prefix: &str) -> C
             continue
         }
         let kind = if binding.kind == BindingKind::Parameter { CandidateKind::Parameter } else { CandidateKind::Local };
-        let candidate = Candidate { name: binding.name.to_string(), kind, types: binding.types };
+        let candidate = Candidate { name: binding.name.to_string(), kind, types: binding.types, from_api: false };
         match locals.get(&*binding.name) {
             Some((start, _)) if *start > visible.start() => {}
             _ => { locals.insert(&binding.name, (visible.start(), candidate)); }
@@ -235,25 +238,25 @@ fn names(analysis: &Analysis, file: FileId, offset: TextSize, prefix: &str) -> C
     // Globals the files assign, then the preset ones they don't
     for binding in &analysis.bindings {
         if binding.kind == BindingKind::Global && binding.assigned() && matches(&binding.name, prefix) && seen.insert(binding.name.to_string()) {
-            globals.push(Candidate { name: binding.name.to_string(), kind: CandidateKind::Global, types: binding.types });
+            globals.push(Candidate { name: binding.name.to_string(), kind: CandidateKind::Global, types: binding.types, from_api: false });
         }
     }
     // Those of addons depended on before the preset ones, which they can replace
     for (name, &types) in &analysis.layer.globals {
         if matches(name, prefix) && seen.insert(name.clone()) {
-            globals.push(Candidate { name: name.clone(), kind: CandidateKind::Global, types });
+            globals.push(Candidate { name: name.clone(), kind: CandidateKind::Global, types, from_api: false });
         }
     }
     for (name, types) in analysis.definitions.globals() {
         if matches(name, prefix) && seen.insert(name.to_string()) {
-            globals.push(Candidate { name: name.to_string(), kind: CandidateKind::Global, types });
+            globals.push(Candidate { name: name.to_string(), kind: CandidateKind::Global, types, from_api: false });
         }
     }
     globals.sort_by(|a, b| a.name.cmp(&b.name));
     candidates.extend(globals);
     candidates.extend(KEYWORDS.iter()
         .filter(|k| matches(k, prefix) && !seen.contains(**k))
-        .map(|k| Candidate { name: k.to_string(), kind: CandidateKind::Keyword, types: Type::UNKNOWN }));
+        .map(|k| Candidate { name: k.to_string(), kind: CandidateKind::Keyword, types: Type::UNKNOWN, from_api: false }));
     Completions { candidates, incomplete }
 }
 
@@ -389,33 +392,40 @@ fn members(analysis: &Analysis, ty: Type, methods_only: bool) -> Vec<Candidate> 
         crate::types::NamedRef::Several(_) => ty.named.alternatives(),
         named => vec![named],
     };
-    let mut found: Option<HashMap<String, Type>> = None;
+    // Each name's types, and whether only the definitions give it
+    let mut found: Option<HashMap<String, (Type, bool)>> = None;
     for object in objects {
-        let mut own: HashMap<String, Type> = HashMap::new();
+        let mut files: HashMap<String, Type> = HashMap::new();
         if let Some(at) = object.identity() {
-            own_fields(analysis, at, &mut own, 0);
+            own_fields(analysis, at, &mut files, 0);
         }
+        let mut own: HashMap<String, (Type, bool)> = files.into_iter().map(|(name, types)| (name, (types, false))).collect();
         if let Some(id) = object.named_id() {
             for (name, types) in analysis.definitions.members(id) {
-                own.entry(name.to_string()).or_insert(types);
+                own.entry(name.to_string()).or_insert((types, true));
             }
         }
+        // The project's own if any of the objects' files give it
         found = Some(match found {
             None => own,
             Some(found) => found.into_iter()
-                .filter_map(|(name, types)| Some((name.clone(), types | *own.get(&name)?)))
+                .filter_map(|(name, (types, from_api))| {
+                    let &(other, other_from_api) = own.get(&name)?;
+                    Some((name, (types | other, from_api && other_from_api)))
+                })
                 .collect(),
         });
     }
     let found = found.unwrap_or_default();
     let mut candidates: Vec<Candidate> = found.into_iter()
-        .filter(|(_, types)| !methods_only || types.set.contains(TypeSet::FUNCTION))
-        .map(|(name, types)| {
+        .filter(|(_, (types, _))| !methods_only || types.set.contains(TypeSet::FUNCTION))
+        .map(|(name, (types, from_api))| {
             let kind = if methods_only { CandidateKind::Method } else { CandidateKind::Field };
-            Candidate { name, kind, types }
+            Candidate { name, kind, types, from_api }
         })
         .collect();
-    candidates.sort_by(|a, b| a.name.cmp(&b.name));
+    // The project's fields before the API's, alphabetically within each
+    candidates.sort_by(|a, b| (a.from_api, &a.name).cmp(&(b.from_api, &b.name)));
     candidates
 }
 
@@ -614,6 +624,16 @@ mod tests {
         let c = complete_at("local a = CreateFrame('Button') local b = CreateFrame('Frame') a.both = 1 b.both = 2 a.one = 3\nlocal x = c and a or b\nx.|");
         let names = names_of(&c);
         assert!(names.contains(&"both") && !names.contains(&"one"));
+    }
+
+    #[test]
+    fn project_members_before_the_apis() {
+        let c = complete_at("local f = CreateFrame('Frame')\nf.zed = 1\nfunction f:Zap() end\nf.|");
+        let names = names_of(&c);
+        assert_eq!(names[..2], ["Zap", "zed"], "{names:?}");
+        assert!(names.contains(&"SetPoint") && c.candidates[2..].iter().all(|c| c.from_api));
+        let c = complete_at("local f = CreateFrame('Frame')\nfunction f:Zap() end\nf:|");
+        assert_eq!(names_of(&c)[0], "Zap");
     }
 
     #[test]
