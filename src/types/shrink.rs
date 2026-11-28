@@ -143,7 +143,7 @@ impl<'a> Remap<'a> {
 enum Given {
     Type(Type),
     Values(Values),
-    Function(FunctionInfo),
+    Function(Box<FunctionInfo>),
     Written,
 }
 

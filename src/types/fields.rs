@@ -472,7 +472,7 @@ impl<'a> Walker<'a> {
                     .or_insert_with(|| values.clone());
             }
             Write::PoolObject(at, object) => { self.pool_objects.insert(*at, *object); }
-            Write::Function(id, info) => { self.functions.insert(*id, info.clone()); }
+            Write::Function(id, info) => { self.functions.insert(*id, (**info).clone()); }
             Write::Binding(id, types) => {
                 let joined = self.joined_at(self.binding_place(*id), self.bindings[*id].types, *types, false);
                 let binding = &mut self.bindings[*id];

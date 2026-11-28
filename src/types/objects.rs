@@ -322,8 +322,14 @@ impl<'a> Walker<'a> {
     /// Whether the table made at `at` is a mixin mixed into WoW objects, as
     /// the previous walk found
     pub(super) fn is_mixin(&self, at: TableId) -> bool {
+        self.mixed_into(at).is_some()
+    }
+
+    /// The type of WoW object the mixin made at `at` is mixed into, and
+    /// whether it's extended, as the previous walk found
+    pub(super) fn mixed_into(&self, at: TableId) -> Option<(NamedId, bool)> {
         self.note(Read::MixedInto(at));
-        self.prior.is_some_and(|prior| prior.mixed_into.contains_key(&at)) || self.layer.mixed_into.contains_key(&at)
+        self.prior.and_then(|prior| prior.mixed_into.get(&at)).or_else(|| self.layer.mixed_into.get(&at)).copied()
     }
 
     /// Where a call is, for what it makes and what loops over it get: where it

@@ -48,7 +48,7 @@ pub(super) enum Write {
     /// A callback registry's event, by its name's hash, triggered with these
     Triggered(TableId, u64, Values),
     PoolObject(TableId, Type),
-    Function(FunctionId, FunctionInfo),
+    Function(FunctionId, Box<FunctionInfo>),
     /// A variable declared outside the body was assigned this
     Binding(BindingId, Type),
     /// A stand-in stands for these tables too

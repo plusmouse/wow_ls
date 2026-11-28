@@ -363,8 +363,8 @@ impl<'a> Walker<'a> {
                                     NamedRef::None | NamedRef::Unknown => Type::table(self.function_id(def)),
                                     // A mixin: `self` is the WoW object it's mixed into, with
                                     // the mixin's fields too
-                                    NamedRef::Table(at) => match { self.note(Read::MixedInto(at)); self.prior.and_then(|prior| prior.mixed_into.get(&at)).or_else(|| self.layer.mixed_into.get(&at)) } {
-                                        Some(&(named, extended)) => Type { named: NamedRef::Instance { named, at, extended }, ..Type::of(TypeSet::TABLE) },
+                                    NamedRef::Table(at) => match self.mixed_into(at) {
+                                        Some((named, extended)) => Type { named: NamedRef::Instance { named, at, extended }, ..Type::of(TypeSet::TABLE) },
                                         None => Type { named: owner.named, ..Type::of(TypeSet::TABLE) },
                                     },
                                     named => {

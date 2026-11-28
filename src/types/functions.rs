@@ -335,7 +335,7 @@ impl<'a> Walker<'a> {
         }).collect();
         let varargs = params.is_some_and(|p| p.ellipsis())
             .then(|| Parameter { name: "...".to_string(), types: Type::UNKNOWN, mandated: None });
-        self.apply(Write::Function(id, FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls, field_writes, returned_fields, iterated, only: None, loop_edges, returned_parameters }));
+        self.apply(Write::Function(id, Box::new(FunctionInfo { parameters, method: self_type.is_some(), varargs, returns, fresh_returns, calls, forwarded_calls, field_writes, returned_fields, iterated, only: None, loop_edges, returned_parameters })));
     }
 
     /// `returns`, with the templates the definitions say objects the function
