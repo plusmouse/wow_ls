@@ -2166,6 +2166,9 @@ pub struct Analysis {
     /// in it, swapping each walk. Each keeps what it had the walk before as
     /// well, so they meet. Found from each function's `loop_edges`
     pub field_loops: HashSet<(FunctionId, usize)>,
+    /// The tables in a group whose entries each come from the others'
+    /// (see `Analysis::find_entry_loops`)
+    entry_loops: HashSet<TableId>,
     /// How many walks it took to settle
     pub walks: usize,
     /// Whether walks came round to a state seen before, so they only
@@ -2281,6 +2284,7 @@ impl Analysis {
                 next.combine_inputs(&result);
                 next.find_call_cycles();
                 next.find_field_loops();
+                next.find_entry_loops();
             }
             // Once found, still saved: leaving out a write can take away the
             // field a table was found through, and keeping it again would put
@@ -2494,6 +2498,51 @@ impl Analysis {
         self.field_loops = nodes.iter().zip(&groups)
             .filter(|&(_, group)| sizes[group] > 1 && with_field.contains(group))
             .filter_map(|(n, _)| match n { Node::Parameter(id, i) => Some((*id, *i)), Node::Field(..) => None })
+            .collect();
+    }
+
+    /// Finds `entry_loops` from what each body wrote under computed keys and
+    /// what that depended on: the tables in a group that each reach the
+    /// others, as a pool's tables of free and used objects do (`Free[k] =
+    /// InUse[k]`, `InUse[k] = next(Free)`). Each read sees the walk before,
+    /// so a value takes a walk per step to come round, and a loop of two
+    /// tables could keep what odd and even walks see apart for ever
+    fn find_entry_loops(&mut self) {
+        let mut nodes: Vec<TableId> = Vec::new();
+        let mut index: HashMap<TableId, usize> = HashMap::default();
+        let mut edges: Vec<Vec<usize>> = Vec::new();
+        let mut node = |at: TableId, nodes: &mut Vec<TableId>, edges: &mut Vec<Vec<usize>>| -> usize {
+            *index.entry(at).or_insert_with(|| { nodes.push(at); edges.push(Vec::new()); nodes.len() - 1 })
+        };
+        let mut ids: Vec<&FunctionId> = self.records.keys().collect();
+        ids.sort();
+        for id in ids {
+            let record = &self.records[id];
+            // Only a body that both reads entries and writes some can be a step
+            let writes = record.own_writes.iter().any(|w| matches!(**w, Write::Entry(..)));
+            if !writes || !record.reads.iter().any(|r| matches!(r, Read::Entries(_))) {
+                continue
+            }
+            for (key, deps) in record.own_influences.get() {
+                let Read::Entries(to) = key else { continue };
+                for dep in deps.iter() {
+                    if let Read::Entries(from) = dep {
+                        if from != to {
+                            let (from, to) = (node(*from, &mut nodes, &mut edges), node(*to, &mut nodes, &mut edges));
+                            edges[from].push(to);
+                        }
+                    }
+                }
+            }
+        }
+        let groups = strongly_connected(&edges);
+        let mut sizes: HashMap<usize, usize> = HashMap::default();
+        for &group in &groups {
+            *sizes.entry(group).or_default() += 1;
+        }
+        self.entry_loops = nodes.iter().zip(&groups)
+            .filter(|&(_, group)| sizes[group] > 1)
+            .map(|(&at, _)| at)
             .collect();
     }
 
@@ -4223,6 +4272,7 @@ impl<'a> Walker<'a> {
             _ => analysis.find_call_cycles(),
         }
         analysis.find_field_loops();
+        analysis.find_entry_loops();
         analysis
     }
 
@@ -4270,6 +4320,17 @@ impl<'a> Walker<'a> {
 
     fn finish(mut self) -> Analysis {
         self.settle_parameter_types();
+        // A table in a loop of entries: with what it had the walk before too,
+        // so it only grows (see `Analysis::find_entry_loops`)
+        if let Some(prior) = self.prior {
+            for at in &prior.entry_loops {
+                if let Some(&before) = prior.entries.get(at) {
+                    let entries = self.entries.entry(*at).or_default();
+                    entries.keys |= before.keys;
+                    entries.values |= before.values;
+                }
+            }
+        }
         let method_selves = self.method_selves();
         for binding in self.bindings.iter_mut() {
             if binding.kind == BindingKind::Global && !binding.assigned {
@@ -4355,6 +4416,7 @@ impl<'a> Walker<'a> {
             vararg_values: self.vararg_values,
             call_cycles: HashMap::default(),
             field_loops: HashSet::default(),
+            entry_loops: HashSet::default(),
             walks: 1,
             cycled: false,
             roots: self.roots.iter().map(|root| root.green().into_owned()).collect(),
@@ -9679,6 +9741,29 @@ mod tests {
             .filter(|(k, _)| k == key)
             .flat_map(|(_, deps)| deps.iter().cloned())
             .collect()
+    }
+
+    #[test]
+    fn tables_filling_each_other_are_an_entry_loop() {
+        // A pool's free and used objects, each table filled from the other's
+        // entries, and one only filled from itself, which is no loop
+        let analysis = keeping_records(|| analyse_with("local Pool = { InUse = {}, Free = {} }
+            local own = {}
+            function Fetch(name)
+                local _, frame = next(Pool.Free)
+                Pool.InUse[name] = frame or {}
+                own[name] = own[1]
+            end
+            function Release(name)
+                Pool.Free[name] = Pool.InUse[name]
+            end", &library()));
+        let at = |field: &str| analysis.fields.values()
+            .find_map(|fields| fields.get(field))
+            .and_then(|ty| ty.named.identity())
+            .expect("a table");
+        assert!(analysis.entry_loops.contains(&at("InUse")));
+        assert!(analysis.entry_loops.contains(&at("Free")));
+        assert!(!analysis.entry_loops.contains(&table_of(&analysis, "own")));
     }
 
     #[test]
