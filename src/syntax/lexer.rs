@@ -353,31 +353,21 @@ impl<'a> Generator<'a> {
                             validity = token_validity::Number::Invalid;
                         }
                     }
-                    token_modifier::Number::Integer => {
-                        if ch == '.' {
-                            modifier = token_modifier::Number::Decimal;
-                        } else if end - start > 0 && (ch == 'E' || ch == 'e') {
-                            modifier = token_modifier::Number::Exponential;
-                            needs_digit = true;
-                            // Eat + or - at the start of the exponent
-                            if let Some((_, '+' | '-', sign_end)) = self.peek_char() {
-                                self.next_char();
-                                end = sign_end;
-                            }
-                        } else if !ch.is_numeric() {
-                            validity = token_validity::Number::Invalid;
+                    token_modifier::Number::Integer if ch == '.' => {
+                        modifier = token_modifier::Number::Decimal;
+                    }
+                    token_modifier::Number::Integer | token_modifier::Number::Decimal
+                        if (ch == 'E' || ch == 'e') && (modifier == token_modifier::Number::Decimal || end - start > 0) => {
+                        modifier = token_modifier::Number::Exponential;
+                        needs_digit = true;
+                        // Eat + or - at the start of the exponent
+                        if let Some((_, '+' | '-', sign_end)) = self.peek_char() {
+                            self.next_char();
+                            end = sign_end;
                         }
                     }
-                    token_modifier::Number::Decimal => {
-                        if ch == 'E' || ch == 'e' {
-                            modifier = token_modifier::Number::Exponential;
-                            needs_digit = true;
-                            // Eat + or - at the start of the exponent
-                            if let Some((_, '+' | '-', sign_end)) = self.peek_char() {
-                                self.next_char();
-                                end = sign_end;
-                            }
-                        } else if !ch.is_numeric() {
+                    token_modifier::Number::Integer | token_modifier::Number::Decimal => {
+                        if !ch.is_numeric() {
                             validity = token_validity::Number::Invalid;
                         }
                     }
