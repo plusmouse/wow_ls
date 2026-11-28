@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use rowan::{NodeOrToken, TextRange, TextSize};
 
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
-use crate::types::{Analysis, BindingKind, FileId, TableId, Type, TypeSet, Values};
+use crate::types::{Analysis, BindingKind, FileId, HashSet, TableId, Type, TypeSet, Values};
 
 const KEYWORDS: &[&str] = &[
     "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
@@ -392,14 +392,15 @@ fn members(analysis: &Analysis, ty: Type, methods_only: bool) -> Vec<Candidate> 
         crate::types::NamedRef::Several(_) => ty.named.alternatives(),
         named => vec![named],
     };
-    // Each name's types, and whether only the definitions give it
+    // Each name's types, and whether only the API gives it: the definitions,
+    // or Blizzard's functions setting it, as `CreateColor` sets `r`
+    let assigned = analysis.assigned_fields();
     let mut found: Option<HashMap<String, (Type, bool)>> = None;
     for object in objects {
-        let mut files: HashMap<String, Type> = HashMap::new();
+        let mut own: HashMap<String, (Type, bool)> = HashMap::new();
         if let Some(at) = object.identity() {
-            own_fields(analysis, at, &mut files, 0);
+            own_fields(analysis, &assigned, at, &mut own, 0);
         }
-        let mut own: HashMap<String, (Type, bool)> = files.into_iter().map(|(name, types)| (name, (types, false))).collect();
         if let Some(id) = object.named_id() {
             for (name, types) in analysis.definitions.members(id) {
                 own.entry(name.to_string()).or_insert((types, true));
@@ -430,24 +431,27 @@ fn members(analysis: &Analysis, ty: Type, methods_only: bool) -> Vec<Candidate> 
 }
 
 /// A table's own fields, then those of its mixins, last mixin first as later
-/// ones overwrite earlier ones
-fn own_fields(analysis: &Analysis, at: TableId, found: &mut HashMap<String, Type>, depth: usize) {
+/// ones overwrite earlier ones. Each with whether only the API gives it: no
+/// code of the project's (in `assigned`) sets it
+fn own_fields(analysis: &Analysis, assigned: &HashSet<(TableId, &str)>, at: TableId, found: &mut HashMap<String, (Type, bool)>, depth: usize) {
     // Deep enough for any real chain of mixins, and stops a loop
     if depth > 16 {
         return
     }
     // A stand-in for many tables: what any of them has
     for member in analysis.stand_in_members(at) {
-        own_fields(analysis, member, found, depth + 1);
+        own_fields(analysis, assigned, member, found, depth + 1);
     }
     // What the files give it, then what an addon depended on gives it
     let layer = &analysis.layer;
     for (name, &types) in analysis.fields.get(&at).into_iter().chain(layer.fields.get(&at)).flatten() {
-        found.entry(name.clone()).or_insert(types);
+        let from_api = !assigned_on(analysis, assigned, at, name);
+        let entry = found.entry(name.clone()).or_insert((types, from_api));
+        entry.1 &= from_api;
     }
     for mixin in analysis.mixins.get(&at).or_else(|| layer.mixins.get(&at)).into_iter().flatten().rev() {
         if let Some(mixin) = mixin.named.identity() {
-            own_fields(analysis, mixin, found, depth + 1);
+            own_fields(analysis, assigned, mixin, found, depth + 1);
         }
     }
     // Then what the metatable's `__index` table gives, as a class's methods
@@ -459,8 +463,23 @@ fn own_fields(analysis: &Analysis, at: TableId, found: &mut HashMap<String, Type
         .and_then(|metatable| field(metatable, "__index"))
         .and_then(|index| index.named.identity());
     if let Some(index) = index {
-        own_fields(analysis, index, found, depth + 1);
+        own_fields(analysis, assigned, index, found, depth + 1);
     }
+}
+
+/// Whether code of the project's sets field `name` of `at`, or of the table
+/// it's a copy of, as `CopyTable` gives a copy the original's fields
+fn assigned_on(analysis: &Analysis, assigned: &HashSet<(TableId, &str)>, mut at: TableId, name: &str) -> bool {
+    for _ in 0..16 {
+        if assigned.contains(&(at, name)) {
+            return true
+        }
+        match analysis.copies.get(&at).or_else(|| analysis.layer.copies.get(&at)) {
+            Some(&source) if source != at => at = source,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// A function's signature, or a value's type, for showing beside a candidate
@@ -634,6 +653,23 @@ mod tests {
         assert!(names.contains(&"SetPoint") && c.candidates[2..].iter().all(|c| c.from_api));
         let c = complete_at("local f = CreateFrame('Frame')\nfunction f:Zap() end\nf:|");
         assert_eq!(names_of(&c)[0], "Zap");
+        // Calling the API's methods doesn't make them the project's
+        let c = complete_at("local f = CreateFrame('Frame')\nf:SetPoint('TOP')\nf.zed = f:GetWidth()\nf:Hide()\nf.|");
+        assert_eq!(names_of(&c)[..1], ["zed"], "{:?}", names_of(&c));
+        assert!(c.candidates[1..].iter().all(|c| c.from_api));
+        // Nor do the fields Blizzard's functions set
+        let c = complete_at("local c = CreateColor(1, 1, 1)\nc.y = 1\nc.|");
+        assert_eq!(names_of(&c)[..1], ["y"], "{:?}", names_of(&c));
+        assert!(names_of(&c).contains(&"r") && c.candidates[1..].iter().all(|c| c.from_api));
+        let c = complete_at("local f = CreateFrame('Frame', nil, UIParent, 'BackdropTemplate')\nf:SetBackdrop({})\nf.y = 2\nf.|");
+        assert!(c.candidates.iter().all(|c| c.from_api == (c.name != "y")), "{:?}", names_of(&c));
+        // But those of the project's mixins and the originals of copies do
+        let c = complete_at("local M = { a = 1 }\nfunction M:Go() end\nlocal c = CreateFromMixins(M, ColorMixin)\nc:SetRGB(1, 1, 1)\nlocal d = CopyTable({ b = 1 })\nc.|");
+        assert_eq!(names_of(&c)[..2], ["Go", "a"], "{:?}", names_of(&c));
+        assert!(c.candidates[2..].iter().all(|c| c.from_api));
+        let c = complete_at("local d = CopyTable({ b = 1 })\nd.|");
+        assert_eq!(names_of(&c), ["b"]);
+        assert!(!c.candidates[0].from_api);
     }
 
     #[test]

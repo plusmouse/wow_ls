@@ -3205,6 +3205,18 @@ impl Analysis {
         sites
     }
 
+    /// The fields of tables that the files, or an addon depended on, assign
+    /// somewhere: unlike `fields`, not those only Blizzard's functions give
+    /// them, as `r` is set by `CreateColor`
+    pub fn assigned_fields(&self) -> HashSet<(TableId, &str)> {
+        let own = self.field_references.iter()
+            .filter(|f| f.write)
+            .filter_map(|f| Some((f.table?, f.name())));
+        let layered = self.layer.field_sites.iter()
+            .flat_map(|(&at, fields)| fields.iter().filter(|(_, sites)| !sites.is_empty()).map(move |(name, _)| (at, name.as_str())));
+        own.chain(layered).collect()
+    }
+
     /// Where field `name` of `table` is assigned. As for reading it, the
     /// writes to tables of unknown identity are the fallback
     fn field_sites(&self, table: Option<TableId>, name: &str) -> Vec<Site> {
