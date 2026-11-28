@@ -13,8 +13,8 @@
 //You should have received a copy of the GNU General Public License
 //along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
-use lsp_types::{request, Diagnostic, DiagnosticSeverity, PublishDiagnosticsParams, Range, Uri};
+use lsp_server::{Connection, Message, Notification};
+use lsp_types::{Diagnostic, DiagnosticSeverity, PublishDiagnosticsParams, Range, Uri};
 
 /// Publishes a document's syntax errors, along with `warnings` (byte ranges
 /// and messages) found by type analysis
@@ -61,7 +61,8 @@ pub fn publish(connection: &Connection, uri: Uri, text: &str, warnings: &[(rowan
         method: String::from("textDocument/publishDiagnostics"),
         params: encoded,
     };
-    connection.sender.send(Message::Notification(not));
+    // Fails only once the client has gone, when there's no one to tell
+    let _ = connection.sender.send(Message::Notification(not));
 }
 
 /// Publishes an XML document's parse errors, each at a byte offset into `text`

@@ -79,6 +79,20 @@ pub(super) fn intersect(ty: Type, set: TypeSet) -> Type {
     if narrowed.set == TypeSet::NEVER { Type::of(set) } else { narrowed }
 }
 
+/// The type set `type(x)` names
+pub(super) fn type_name_set(name: &str) -> Option<TypeSet> {
+    Some(match name {
+        "nil" => TypeSet::NIL,
+        "boolean" => TypeSet::BOOLEAN,
+        "number" => TypeSet::NUMBER,
+        "string" => TypeSet::STRING,
+        "function" => TypeSet::FUNCTION,
+        "table" => TypeSet::TABLE,
+        "userdata" | "thread" => TypeSet::OTHER,
+        _ => return None,
+    })
+}
+
 impl<'a> Walker<'a> {
     /// Runs `f` with locals narrowed to the types given. Afterwards each is
     /// what it was before, with anything `f` assigned it, as if never narrowed

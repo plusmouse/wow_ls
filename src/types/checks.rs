@@ -95,20 +95,6 @@ pub(super) fn operation_tree(operands: &mut std::vec::IntoIter<Expression>, oper
     Some(left)
 }
 
-/// The type set `type(x)` names
-pub(super) fn type_name_set(name: &str) -> Option<TypeSet> {
-    Some(match name {
-        "nil" => TypeSet::NIL,
-        "boolean" => TypeSet::BOOLEAN,
-        "number" => TypeSet::NUMBER,
-        "string" => TypeSet::STRING,
-        "function" => TypeSet::FUNCTION,
-        "table" => TypeSet::TABLE,
-        "userdata" | "thread" => TypeSet::OTHER,
-        _ => return None,
-    })
-}
-
 impl<'a> Walker<'a> {
     /// Reports `receiver:method()` when the receiver is one WoW type whose
     /// methods are known, and none of them (nor any function the addon puts in

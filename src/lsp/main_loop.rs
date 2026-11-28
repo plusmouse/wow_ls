@@ -760,9 +760,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                 };
                 // ...
             }
-            Message::Response(resp) => {
-                //eprintln!("got response: {resp:?}");
-            }
+            Message::Response(_) => {}
             Message::Notification(not) if not.method == "exit" => {
                 return if shutting_down { Ok(()) } else { Err("exit without shutdown".into()) };
             }

@@ -64,7 +64,6 @@ pub enum TokenKind {
     Identifier,
     String{validity: token_validity::String, modifier: token_modifier::String},
     Number{validity: token_validity::Number, modifier: token_modifier::Number},
-    EoF,
     Dot, //.
     DoubleDot, //..
     TripleDot, //...
@@ -111,21 +110,6 @@ impl<'a> Generator<'a> {
             chars: text.chars(),
             position: 0,
             peek_cache: None,
-        }
-    }
-
-    pub fn process_all(&mut self) -> Vec<Token> {
-        let mut res: Vec<Token> = Vec::new();
-
-        loop {
-            let token = self.next_token();
-            match token {
-                Some(t) => res.push(t),
-                None => {
-                    res.push(Token { kind: TokenKind::EoF, start: self.position, end: self.position});
-                    return res
-                }
-            }
         }
     }
 

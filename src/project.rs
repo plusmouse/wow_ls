@@ -475,6 +475,7 @@ pub fn is_xml(path: &Path) -> bool {
 
 /// The Lua and XML files a `.toc` lists that load in the current game version,
 /// as written (relative to its folder)
+#[cfg(test)]
 pub fn toc_files(text: &str) -> Vec<PathBuf> {
     toc_entries(text).into_iter().filter(|entry| entry.loads).map(|entry| entry.file).collect()
 }

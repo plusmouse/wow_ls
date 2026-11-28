@@ -545,7 +545,6 @@ impl<'a> Generator<'a> {
         const MULT_PRIORITY: usize = 6;
         const UNARY_PRIORITY: usize = 7;
         const HAT_PRIORITY: usize = 8;
-        const COLON_PRIORITY: usize = 9;
         fn close_nodes(priority: usize, is_open: &mut [bool; 8], builder: &mut GreenNodeBuilder) {
             for j in (priority)..8 {
                 if is_open[j] {

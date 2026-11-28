@@ -216,38 +216,14 @@ impl Analysis {
             // the one before had too: both sides of the cycle, which only
             // grows, so it settles
             let repeat = !seen.insert(next.fingerprint());
-            if ((repeat && !combining) || std::env::var_os("SHOW_EVERY_WALK").is_some()) && !settled && std::env::var_os("SHOW_COMBINING").is_some() {
-                eprintln!("COMBINING{} starts at walk {walks}", if repeat && !combining { "" } else { " (every walk)" }); eprintln!("  at walk {walks} (phase {}), {} keys changed:", if unstored_unknown { 2 } else { 1 }, changed.len());
-                let at = |l: &Location| -> String {
-                    let text = files.get(l.file.0 as usize).map(|f| f.root.text().to_string()).unwrap_or_default();
-                    let o = usize::from(l.offset).min(text.len());
-                    let line = text[..o].matches('\n').count() + 1;
-                    let start = text[..o].rfind('\n').map_or(0, |i| i + 1);
-                    let end = text[o..].find('\n').map_or(text.len(), |i| o + i);
-                    format!("f{}:{} slot {:x} `{}`", l.file.0, line, l.slot, text[start..end].trim())
-                };
-                let name_of = |h: u64| -> String {
-                    result.fields.values().flat_map(|m| m.keys()).chain(result.any_table_fields.keys()).chain(result.function_fields.iter())
-                        .find(|n| name_key(n) == h).cloned()
-                        .or_else(|| next.fields.values().flat_map(|m| m.keys()).find(|n| name_key(n) == h).cloned())
-                        .or_else(|| next.field_references.iter().map(|f| f.name()).find(|n| name_key(n) == h).map(str::to_string))
-                        .unwrap_or_else(|| format!("#{h:x}"))
-                };
-                let describe = |r: &Read| -> String { match r {
-                    Read::Binding(id) => { let b = &next.bindings[*id]; format!("Binding {} {:?} f{} decl {:?}: {} -> {}  [{:?} -> {:?}]", b.name, b.kind, b.file.0, b.declaration.map(|d| at(&Location { file: b.file, offset: d.start(), slot: 0 })), result.bindings.get(*id).map(|o| next.describe(o.types)).unwrap_or_default(), next.describe(b.types), result.bindings.get(*id).map(|o| o.types), b.types) }
-                    Read::Field(l, h) => { let n = name_of(*h); let o = result.fields.get(l).and_then(|m| m.get(&n)).copied(); let v = next.fields.get(l).and_then(|m| m.get(&n)).copied(); format!("Field {} of {}: {} -> {}  [{:?} -> {:?}]", n, at(l), o.map(|t| next.describe(t)).unwrap_or_default(), v.map(|t| next.describe(t)).unwrap_or_default(), o, v) }
-                    Read::AnyTableField(h) => format!("AnyTableField {}", name_of(*h)),
-                    Read::FunctionField(h) => format!("FunctionField {}", name_of(*h)),
-                    Read::Fields(l) => format!("Fields of {}", at(l)),
-                    Read::Entries(l) => format!("Entries of {}", at(l)),
-                    Read::Parent(l) => format!("Parent of {}", at(l)),
-                    Read::Function(l) => format!("Function {}", at(l)),
-                    Read::ParameterTypes(l) => format!("ParameterTypes {}", at(l)),
-                    other => format!("{other:?}"),
-                } };
-                let mut keys: Vec<String> = changed.iter().map(describe).collect();
-                keys.sort();
-                for k in keys.iter().take(40) { eprintln!("    {k}"); }
+            // For tracing what keeps walks from settling: with SHOW_COMBINING,
+            // what changed in the walk that started combining (or, with
+            // SHOW_EVERY_WALK too, in every walk)
+            let every_walk = std::env::var_os("SHOW_EVERY_WALK").is_some();
+            if ((repeat && !combining) || every_walk) && !settled && std::env::var_os("SHOW_COMBINING").is_some() {
+                eprintln!("COMBINING{} starts at walk {walks}", if repeat && !combining { "" } else { " (every walk)" });
+                eprintln!("  at walk {walks} (phase {}), {} keys changed:", if unstored_unknown { 2 } else { 1 }, changed.len());
+                next.show_changed(&result, files, &changed);
             }
             combining |= repeat;
             cycled |= repeat && !settled;
@@ -286,6 +262,56 @@ impl Analysis {
         result.cycled = cycled;
         result.complete();
         result
+    }
+
+    /// Prints the keys `changed` from `previous`, as `SHOW_COMBINING` does
+    fn show_changed(&self, previous: &Analysis, files: &[SourceFile], changed: &HashSet<Read>) {
+        let at = |l: &Location| -> String {
+            let text = files.get(l.file.0 as usize).map(|f| f.root.text().to_string()).unwrap_or_default();
+            let o = usize::from(l.offset).min(text.len());
+            let line = text[..o].matches('\n').count() + 1;
+            let start = text[..o].rfind('\n').map_or(0, |i| i + 1);
+            let end = text[o..].find('\n').map_or(text.len(), |i| o + i);
+            format!("f{}:{} slot {:x} `{}`", l.file.0, line, l.slot, text[start..end].trim())
+        };
+        let name_of = |h: u64| -> String {
+            previous.fields.values().flat_map(|m| m.keys()).chain(previous.any_table_fields.keys()).chain(previous.function_fields.iter())
+                .find(|n| name_key(n) == h).cloned()
+                .or_else(|| self.fields.values().flat_map(|m| m.keys()).find(|n| name_key(n) == h).cloned())
+                .or_else(|| self.field_references.iter().map(|f| f.name()).find(|n| name_key(n) == h).map(str::to_string))
+                .unwrap_or_else(|| format!("#{h:x}"))
+        };
+        let describe = |r: &Read| -> String {
+            match r {
+                Read::Binding(id) => {
+                    let b = &self.bindings[*id];
+                    let declared = b.declaration.map(|d| at(&Location { file: b.file, offset: d.start(), slot: 0 }));
+                    let before = previous.bindings.get(*id).map(|o| o.types);
+                    format!("Binding {} {:?} f{} decl {:?}: {} -> {}  [{:?} -> {:?}]", b.name, b.kind, b.file.0, declared,
+                        before.map(|t| self.describe(t)).unwrap_or_default(), self.describe(b.types), before, b.types)
+                }
+                Read::Field(l, h) => {
+                    let n = name_of(*h);
+                    let o = previous.fields.get(l).and_then(|m| m.get(&n)).copied();
+                    let v = self.fields.get(l).and_then(|m| m.get(&n)).copied();
+                    format!("Field {} of {}: {} -> {}  [{:?} -> {:?}]", n, at(l),
+                        o.map(|t| self.describe(t)).unwrap_or_default(), v.map(|t| self.describe(t)).unwrap_or_default(), o, v)
+                }
+                Read::AnyTableField(h) => format!("AnyTableField {}", name_of(*h)),
+                Read::FunctionField(h) => format!("FunctionField {}", name_of(*h)),
+                Read::Fields(l) => format!("Fields of {}", at(l)),
+                Read::Entries(l) => format!("Entries of {}", at(l)),
+                Read::Parent(l) => format!("Parent of {}", at(l)),
+                Read::Function(l) => format!("Function {}", at(l)),
+                Read::ParameterTypes(l) => format!("ParameterTypes {}", at(l)),
+                other => format!("{other:?}"),
+            }
+        };
+        let mut keys: Vec<String> = changed.iter().map(describe).collect();
+        keys.sort();
+        for k in keys.iter().take(40) {
+            eprintln!("    {k}");
+        }
     }
 
     /// What only the result shows, not needed between walks: done once, for
@@ -675,34 +701,14 @@ impl Analysis {
     pub(super) fn combine_inputs(&mut self, other: &Analysis) {
         for (at, members) in &other.stand_ins {
             let mine = self.stand_ins.entry(*at).or_default();
-            for &member in members {
-                if !mine.contains(&member) {
-                    mine.push(member);
-                }
-            }
+            add_new(mine, members);
             mine.sort();
         }
-        for (at, fields) in &other.fields {
-            let mine = self.fields.entry(*at).or_default();
-            for (name, &ty) in fields {
-                *mine.entry(name.clone()).or_default() |= ty;
-            }
-        }
-        for (at, &ty) in &other.parents {
-            *self.parents.entry(*at).or_default() |= ty;
-        }
-        for (key, values) in &other.triggered {
-            self.triggered.entry(*key)
-                .and_modify(|all| *all = all.union(values))
-                .or_insert_with(|| values.clone());
-        }
+        join_fields(&mut self.fields, &other.fields);
+        join_types(&mut self.parents, &other.parents);
+        join_values(&mut self.triggered, &other.triggered);
         for (at, mixins) in &other.mixins {
-            let mine = self.mixins.entry(*at).or_default();
-            for mixin in mixins {
-                if !mine.contains(mixin) {
-                    mine.push(*mixin);
-                }
-            }
+            add_new(self.mixins.entry(*at).or_default(), mixins);
         }
         for (at, &(named, extended)) in &other.mixed_into {
             match self.mixed_into.get(at).copied() {
@@ -714,36 +720,16 @@ impl Analysis {
         }
         for (at, tables) in &other.mixin_copies {
             let mine = self.mixin_copies.entry(*at).or_default();
-            for table in tables {
-                if !mine.contains(table) {
-                    mine.push(*table);
-                }
-            }
+            add_new(mine, tables);
             mine.sort();
         }
-        for (at, &ty) in &other.pool_objects {
-            *self.pool_objects.entry(*at).or_default() |= ty;
-        }
-        for (name, &ty) in &other.any_table_fields {
-            *self.any_table_fields.entry(name.clone()).or_default() |= ty;
-        }
+        join_types(&mut self.pool_objects, &other.pool_objects);
+        join_types(&mut self.any_table_fields, &other.any_table_fields);
         self.opened_types.extend(other.opened_types.iter().copied());
         self.function_fields.extend(other.function_fields.iter().cloned());
-        for (at, entries) in &other.entries {
-            let mine = self.entries.entry(*at).or_default();
-            mine.keys |= entries.keys;
-            mine.values |= entries.values;
-        }
-        for (at, &ty) in &other.metatables {
-            *self.metatables.entry(*at).or_default() |= ty;
-        }
-        for (id, values) in &other.vararg_values {
-            let combined = match self.vararg_values.get(id) {
-                Some(mine) => mine.union(values),
-                None => values.clone(),
-            };
-            self.vararg_values.insert(*id, combined);
-        }
+        join_entries(&mut self.entries, &other.entries);
+        join_types(&mut self.metatables, &other.metatables);
+        join_values(&mut self.vararg_values, &other.vararg_values);
         for (id, theirs) in &other.functions {
             let Some(mine) = self.functions.get_mut(id) else {
                 self.functions.insert(*id, theirs.clone());

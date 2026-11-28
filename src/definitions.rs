@@ -91,7 +91,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::types::{HashMap, HashSet, FunctionInfo, FunctionRef, NamedRef, Parameter, Type, TypeSet, Values};
+use crate::types::{HashMap, HashSet, FunctionInfo, NamedRef, Parameter, Type, TypeSet, Values};
 
 pub type BuiltinId = u32;
 pub type NamedId = u32;
@@ -348,6 +348,7 @@ impl Definitions {
     }
 
     /// The function at a path like `string.format`
+    #[cfg(test)]
     pub fn function_at(&self, path: &str) -> Option<&FunctionInfo> {
         let mut parts = path.split('.');
         let mut ty = self.global(parts.next()?)?;
@@ -355,17 +356,13 @@ impl Definitions {
             ty = self.field(ty, part)?;
         }
         match ty.function {
-            FunctionRef::Builtin(id) => self.function(id),
+            crate::types::FunctionRef::Builtin(id) => self.function(id),
             _ => None,
         }
     }
 
     pub fn function(&self, id: BuiltinId) -> Option<&FunctionInfo> {
         self.functions.get(id as usize)
-    }
-
-    pub fn len(&self) -> usize {
-        self.functions.len()
     }
 
     pub fn named_type(&self, id: NamedId) -> Option<&NamedType> {
@@ -412,6 +409,7 @@ impl Definitions {
         Definitions::from_values(&files)
     }
 
+    #[cfg(test)]
     pub fn from_json(text: &str) -> Result<Definitions, String> {
         let root: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
         Definitions::from_values(&[("definitions".to_string(), root)])
@@ -790,13 +788,8 @@ impl Definitions {
     /// its element. An object with nothing of its own is just of that type.
     /// Also whether every method it has is known: it isn't when it's a kind
     /// of object that isn't a known type, or something it inherits or mixes in
-    /// isn't known
-    fn object_node(&mut self, node: &Value, into: Option<NamedId>, parent: Option<NamedId>, building: &mut Templates) -> Option<(NamedId, bool)> {
-        self.object_node_at(node, into, parent, None, building)
-    }
-
-    /// `object_node` for an object sites name `path` (`template:T.Key`, or a
-    /// frame's name), for finding where its members are
+    /// isn't known. `path` is what sites name the object (`template:T.Key`,
+    /// or a frame's name), for finding where its members are
     fn object_node_at(&mut self, node: &Value, into: Option<NamedId>, parent: Option<NamedId>, path: Option<&str>, building: &mut Templates) -> Option<(NamedId, bool)> {
         let strings = |key: &str| -> Vec<String> {
             node.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
@@ -1492,6 +1485,7 @@ pub fn load(explicit: Option<&Path>) -> Definitions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::FunctionRef;
 
     #[test]
     fn parses_functions() {
@@ -1749,7 +1743,7 @@ mod tests {
             "frames": {"Driver": {"type": "Button", "mixins": ["DriverMixin"]}}
         }"#).unwrap();
         let returned = |name: &str| match definitions.global(name).unwrap().function {
-            crate::types::FunctionRef::Builtin(id) => definitions.function(id).unwrap().returns.values[0],
+            FunctionRef::Builtin(id) => definitions.function(id).unwrap().returns.values[0],
             _ => panic!("{name} isn't a function"),
         };
         let (rack, driver) = (returned("GetRack"), returned("GetDriver"));

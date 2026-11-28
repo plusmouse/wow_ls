@@ -20,8 +20,6 @@ use std::env;
 
 mod syntax;
 mod lsp;
-mod state;
-mod diagnostics;
 mod types;
 mod definitions;
 mod project;
@@ -34,21 +32,14 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && args[1] == "evaluate" {
         let filename = args.get(2).map(String::as_str).unwrap_or("tests/functioncall.lua");
-        //let s = std::fs::read_to_string("../wow-ui-source/full.lua")?;
         let s = std::fs::read_to_string(filename)?;
         let mut a = syntax::syntax::Generator::new(&s);
-        let numbers = line_numbers::LinePositions::from(s.as_str());
-        let before = std::time::Instant::now();
         let res = a.process_all();
         let root = syntax::syntax::SyntaxNode::new_root(res.clone());
-        let dur  = std::time::Instant::now() - before;
         syntax::debug::print_tree(&res);
-        //println!("{:#?}", res);
         let mut errors = a.errors().clone();
         errors.extend(syntax::checks::check(&root));
         println!("{:#?}", errors);
-        //println!("{:?}", numbers.from_offset(a.errors()[0].start));
-        //println!("syntax: {:?}", dur);
         Ok(())
     } else if args.len() > 2 && args[1] == "types" {
         // A `.lua` file on its own, or a `.toc` for every file of its addon together

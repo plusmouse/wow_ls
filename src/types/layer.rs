@@ -171,45 +171,20 @@ impl Layer {
     /// Adds what `other` makes visible: both addons are loaded
     pub fn add(&mut self, other: &Layer) {
         for (at, members) in &other.stand_ins {
-            let mine = self.stand_ins.entry(*at).or_default();
-            for &member in members {
-                if !mine.contains(&member) {
-                    mine.push(member);
-                }
-            }
+            add_new(self.stand_ins.entry(*at).or_default(), members);
         }
-        for (name, &ty) in &other.globals {
-            *self.globals.entry(name.clone()).or_default() |= ty;
-        }
+        join_types(&mut self.globals, &other.globals);
         for (id, info) in &other.functions {
             self.functions.entry(*id).or_insert_with(|| info.clone());
         }
-        for (at, fields) in &other.fields {
-            let mine = self.fields.entry(*at).or_default();
-            for (name, &ty) in fields {
-                *mine.entry(name.clone()).or_default() |= ty;
-            }
-        }
-        for (name, &ty) in &other.any_table_fields {
-            *self.any_table_fields.entry(name.clone()).or_default() |= ty;
-        }
+        join_fields(&mut self.fields, &other.fields);
+        join_types(&mut self.any_table_fields, &other.any_table_fields);
         self.opened_types.extend(other.opened_types.iter().copied());
         self.function_fields.extend(other.function_fields.iter().cloned());
-        for (at, entries) in &other.entries {
-            let mine = self.entries.entry(*at).or_default();
-            mine.keys |= entries.keys;
-            mine.values |= entries.values;
-        }
-        for (at, &ty) in &other.metatables {
-            *self.metatables.entry(*at).or_default() |= ty;
-        }
+        join_entries(&mut self.entries, &other.entries);
+        join_types(&mut self.metatables, &other.metatables);
         for (at, mixins) in &other.mixins {
-            let mine = self.mixins.entry(*at).or_default();
-            for mixin in mixins {
-                if !mine.contains(mixin) {
-                    mine.push(*mixin);
-                }
-            }
+            add_new(self.mixins.entry(*at).or_default(), mixins);
         }
         for (at, &target) in &other.mixed_into {
             self.mixed_into.entry(*at).or_insert(target);
@@ -220,17 +195,9 @@ impl Layer {
         for (copy, source) in &other.copies {
             self.copies.entry(*copy).or_insert(*source);
         }
-        for (at, &ty) in &other.parents {
-            *self.parents.entry(*at).or_default() |= ty;
-        }
-        for (key, values) in &other.triggered {
-            self.triggered.entry(*key)
-                .and_modify(|all| *all = all.union(values))
-                .or_insert_with(|| values.clone());
-        }
-        for (at, &ty) in &other.pool_objects {
-            *self.pool_objects.entry(*at).or_default() |= ty;
-        }
+        join_types(&mut self.parents, &other.parents);
+        join_values(&mut self.triggered, &other.triggered);
+        join_types(&mut self.pool_objects, &other.pool_objects);
         for (at, name) in &other.table_names {
             self.table_names.entry(*at).or_insert_with(|| name.clone());
         }
