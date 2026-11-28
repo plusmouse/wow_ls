@@ -332,13 +332,13 @@ impl<'a> Walker<'a> {
         };
         let mut returns = match callee.function {
             FunctionRef::One(id) => {
-                self.note_loop_call(call, id, &arguments, offset);
+                self.note_loop_call(call, id, arguments, offset);
                 // A method is given a `self`: what it's called on, or the first argument
                 if callee_method {
                     let passed = if is_method { receiver.unwrap_or(Type::UNKNOWN) } else { argument_types.get(0) };
                     self.apply(Write::SelfPassed(id, passed, true));
                 }
-                match self.pending_call(id, &arguments, &parameter_types, callee_method, is_method) {
+                match self.pending_call(id, arguments, &parameter_types, callee_method, is_method) {
                     Some(pending) => {
                         self.pending_calls.push(pending);
                         let index = self.pending_calls.len() - 1;
@@ -353,7 +353,7 @@ impl<'a> Walker<'a> {
                 let mut returns = self.returns_of(id);
                 for (slot, fresh) in fresh_returns.iter().enumerate() {
                     if let (Some(fresh), Some(&value)) = (fresh, returns.values.get(slot)) {
-                        returns.values[slot] = self.fresh_object(call, slot, value, fresh, &parameter_types, &arguments, offset, None);
+                        returns.values[slot] = self.fresh_object(call, slot, value, fresh, &parameter_types, arguments, offset, None);
                     }
                 }
                 // A loop over this call gets what one over the function's
@@ -363,13 +363,13 @@ impl<'a> Walker<'a> {
                 }
                 returns
             }
-            _ => self.select(callee, &arguments, &argument_types)
-                .or_else(|| self.library_returns(callee, &arguments, &argument_types))
-                .or_else(|| self.create_frame(call, callee, &arguments, &argument_types))
+            _ => self.select(callee, arguments, argument_types)
+                .or_else(|| self.library_returns(callee, arguments, argument_types))
+                .or_else(|| self.create_frame(call, callee, arguments, argument_types))
                 .or_else(|| self.create_table(call, callee))
-                .or_else(|| self.create_pool(call, callee, &arguments, &argument_types))
-                .or_else(|| self.mix(call, callee, &arguments, &argument_types))
-                .or_else(|| self.copy_table(call, callee, &arguments, &argument_types))
+                .or_else(|| self.create_pool(call, callee, arguments, argument_types))
+                .or_else(|| self.mix(call, callee, arguments, argument_types))
+                .or_else(|| self.copy_table(call, callee, arguments, argument_types))
                 .unwrap_or_else(|| {
                     // A definition's function returning a new table at each
                     // call, with arguments mixed in
@@ -377,7 +377,7 @@ impl<'a> Walker<'a> {
                     let mut returns = documented.clone();
                     for (slot, fresh) in fresh_returns.iter().enumerate() {
                         if let (Some(fresh), Some(&value)) = (fresh, returns.values.get(slot)) {
-                            returns.values[slot] = self.fresh_object(call, slot, value, fresh, &argument_types, &arguments, 0, builtin);
+                            returns.values[slot] = self.fresh_object(call, slot, value, fresh, argument_types, arguments, 0, builtin);
                         }
                     }
                     returns
@@ -393,7 +393,7 @@ impl<'a> Walker<'a> {
             (false, false) => None,
         };
         if !field_writes.is_empty() || !forwarded_calls.is_empty() {
-            let passing = self.passing(passed.0, &settled_parameters, self_value, &returns, &arguments, passed.1);
+            let passing = self.passing(passed.0, &settled_parameters, self_value, &returns, arguments, passed.1);
             let method = call.method_name().map(|name| name.text().to_string());
             self.apply_summaries(&field_writes, &forwarded_calls, method.as_deref().map(|name| (name, callee.function)), &passing, &mut vec![callee.function]);
         }

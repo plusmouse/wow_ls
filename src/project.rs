@@ -158,7 +158,7 @@ impl Addon {
 
     pub fn contains(&self, file: &Path) -> bool {
         let file = normalise(file);
-        self.files.iter().any(|f| *f == file)
+        self.files.contains(&file)
     }
 
     /// Analyses the addon's own files together, seeing what the addons it

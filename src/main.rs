@@ -31,7 +31,7 @@ mod generate;
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && args[1] == "evaluate" {
-        let filename = args.get(2).map(String::as_str).unwrap_or("tests/functioncall.lua");
+        let filename = args.get(2).map_or("tests/functioncall.lua", String::as_str);
         let s = std::fs::read_to_string(filename)?;
         let mut a = syntax::syntax::Generator::new(&s);
         let res = a.process_all();

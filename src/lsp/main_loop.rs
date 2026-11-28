@@ -258,7 +258,7 @@ impl Workspace {
     /// files with an error now or before, and `path`, are published
     fn publish_xml(&mut self, connection: &Connection, path: Option<&Path>) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = self.xml_errors.iter().map(|e| e.path.clone()).collect();
-        paths.extend(self.xml_published.drain(..));
+        paths.append(&mut self.xml_published);
         paths.extend(path.map(Path::to_path_buf));
         paths.sort();
         paths.dedup();
@@ -587,7 +587,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
             owe(&mut owed, workspace.finish(done, &connection, &definitions));
             continue
         }
-        let event = match queue.pending.pop_front().map(|msg| Ok(Event::Message(msg))).unwrap_or_else(|| queue.inbox.try_recv()) {
+        let event = match queue.pending.pop_front().map_or_else(|| queue.inbox.try_recv(), |msg| Ok(Event::Message(msg))) {
             Ok(event) => event,
             Err(TryRecvError::Disconnected) => break,
             Err(TryRecvError::Empty) => {
@@ -660,17 +660,12 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                                 continue;
                             };
                             let offset = position::offset_of(s, pos);
-                            let mut lexer = syntax::Generator::new(&s);
+                            let mut lexer = syntax::Generator::new(s);
                             let all = SyntaxNode::new_root(lexer.process_all());
                             let token = all.token_at_offset(offset);
-                            let node;
-                            match token.clone() {
-                                TokenAtOffset::Single(t) => {
-                                    node = t.parent().unwrap();
-                                }
-                                TokenAtOffset::Between(_, t2) => {
-                                    node = t2.parent().unwrap();
-                                }
+                            let node = match token.clone() {
+                                TokenAtOffset::Single(t) => t.parent().unwrap(),
+                                TokenAtOffset::Between(_, t2) => t2.parent().unwrap(),
                                 TokenAtOffset::None => {
                                     let result = Some(Hover{contents: HoverContents::Scalar(MarkedString::String(String::from("ERROR: UNKNOWN"))), range: None});
                                     let result = serde_json::to_value(&result).unwrap();
@@ -682,7 +677,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                                     connection.sender.send(Message::Response(resp))?;
                                     continue;
                                 }
-                            }
+                            };
                             let definitions = loaded_definitions
                                 .get_or_insert_with(load_definitions)
                                 .clone();
@@ -694,7 +689,7 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                             let (output, text_range) = match analysis.hover(file, offset) {
                                 Some(hover) => hover,
                                 None => {
-                                    let n = node.ancestors().filter(|a| a.kind() != SyntaxKind::Identifier).nth(0);
+                                    let n = node.ancestors().find(|a| a.kind() != SyntaxKind::Identifier);
                                     let output = match n {
                                         Some(n) => format!("{:?} {}", n.kind(), n.text()),
                                         None => String::from("")

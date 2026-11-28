@@ -76,10 +76,7 @@ impl AstNode for FunctionDefinition {
 }
 impl FunctionDefinition {
     pub fn is_local(&self) -> bool {
-        match self.node.first_child_or_token_by_kind(&|k| k == SyntaxKind::LocalKeyword) {
-            Some(_) => true,
-            _ => false,
-        }
+        self.node.first_child_or_token_by_kind(&|k| k == SyntaxKind::LocalKeyword).is_some()
     }
     pub fn identifier(&self) -> Option<Identifier> {
         self.node.children().find_map(Identifier::cast)
@@ -316,10 +313,7 @@ impl Literal {
         })
     }
     pub fn is_nil(&self) -> bool {
-        self.node.children_with_tokens().any(|t| match t.kind() {
-            SyntaxKind::NilKeyword => true,
-            _ => false
-        })
+        self.node.children_with_tokens().any(|t| matches!(t.kind(), SyntaxKind::NilKeyword))
     }
 }
 

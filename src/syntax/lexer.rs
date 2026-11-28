@@ -138,7 +138,7 @@ impl<'a> Generator<'a> {
             Some(_) => self.peek_cache,
             None => {
                 self.peek_cache = self.next_char();
-                return self.peek_cache
+                self.peek_cache
             }
         }
     }
@@ -147,31 +147,31 @@ impl<'a> Generator<'a> {
         let (start, ch, end) = self.next_char()?;
 
         match ch {
-            '.' => return self.scan_dot(start, end),
-            '(' => return Some(Token{ kind: TokenKind::LeftBracket, start, end}),
-            ')' => return Some(Token{ kind: TokenKind::RightBracket, start, end}),
-            '{' => return Some(Token{ kind: TokenKind::LeftCurlyBracket, start, end}),
-            '}' => return Some(Token{ kind: TokenKind::RightCurlyBracket, start, end}),
-            '[' => return self.scan_open_square_bracket(start, end),
-            ']' => return Some(Token{ kind: TokenKind::RightSquareBracket, start, end}),
-            '-' => return self.scan_minus(start, end),
-            '+' => return Some(Token{ kind: TokenKind::Plus, start, end}),
-            '*' => return Some(Token{ kind: TokenKind::Asterisk, start, end}),
-            '/' => return Some(Token{ kind: TokenKind::Slash, start, end}),
-            '%' => return Some(Token{ kind: TokenKind::Modulo, start, end}),
-            ';' => return Some(Token{ kind: TokenKind::Semicolon, start, end}),
-            ':' => return Some(Token{ kind: TokenKind::Colon, start, end}),
-            ',' => return Some(Token{ kind: TokenKind::Comma, start, end}),
-            '=' => return self.scan_equals(start, end),
-            '<' => return self.scan_less_than(start, end),
-            '>' => return self.scan_greater_than(start, end),
-            '~' => return self.scan_tilde(start, end),
-            '#' => return Some(Token{ kind: TokenKind::Hash, start, end}),
-            '^' => return Some(Token{ kind: TokenKind::Hat, start, end}),
-            '0'..='9' => return self.scan_number(start, ch, end),
-            '"' => return self.scan_simple_string(start, ch, end),
-            '\'' => return self.scan_simple_string(start, ch, end),
-            '\n' => return Some(Token{ kind: TokenKind::Newline, start, end}),
+            '.' => self.scan_dot(start, end),
+            '(' => Some(Token{ kind: TokenKind::LeftBracket, start, end}),
+            ')' => Some(Token{ kind: TokenKind::RightBracket, start, end}),
+            '{' => Some(Token{ kind: TokenKind::LeftCurlyBracket, start, end}),
+            '}' => Some(Token{ kind: TokenKind::RightCurlyBracket, start, end}),
+            '[' => self.scan_open_square_bracket(start, end),
+            ']' => Some(Token{ kind: TokenKind::RightSquareBracket, start, end}),
+            '-' => self.scan_minus(start, end),
+            '+' => Some(Token{ kind: TokenKind::Plus, start, end}),
+            '*' => Some(Token{ kind: TokenKind::Asterisk, start, end}),
+            '/' => Some(Token{ kind: TokenKind::Slash, start, end}),
+            '%' => Some(Token{ kind: TokenKind::Modulo, start, end}),
+            ';' => Some(Token{ kind: TokenKind::Semicolon, start, end}),
+            ':' => Some(Token{ kind: TokenKind::Colon, start, end}),
+            ',' => Some(Token{ kind: TokenKind::Comma, start, end}),
+            '=' => self.scan_equals(start, end),
+            '<' => self.scan_less_than(start, end),
+            '>' => self.scan_greater_than(start, end),
+            '~' => self.scan_tilde(start, end),
+            '#' => Some(Token{ kind: TokenKind::Hash, start, end}),
+            '^' => Some(Token{ kind: TokenKind::Hat, start, end}),
+            '0'..='9' => self.scan_number(start, ch, end),
+            '"' => self.scan_simple_string(start, ch, end),
+            '\'' => self.scan_simple_string(start, ch, end),
+            '\n' => Some(Token{ kind: TokenKind::Newline, start, end}),
             '\r' => {
                 if let Some((_, ch, end)) = self.peek_char()
                     && ch == '\n' {
@@ -182,11 +182,11 @@ impl<'a> Generator<'a> {
             }
             _ => {
                 if ch.is_alphabetic() || ch == '_' {
-                    return self.scan_identifier(start, end)
+                    self.scan_identifier(start, end)
                 } else if ch.is_whitespace() {
-                    return self.scan_whitespace(start, end)
+                    self.scan_whitespace(start, end)
                 } else {
-                    return Some(Token{ kind: TokenKind::Invalid, start, end})
+                    Some(Token{ kind: TokenKind::Invalid, start, end})
                 }
             }
         }
@@ -197,14 +197,9 @@ impl<'a> Generator<'a> {
             match ch {
                 '.' => {
                     self.next_char();
-                    if let Some((_, ch, end)) = self.peek_char() {
-                        match ch {
-                            '.' => {
-                                self.next_char();
-                                return Some(Token{ kind: TokenKind::TripleDot, start, end })
-                            }
-                            _ => ()
-                        }
+                    if let Some((_, '.', end)) = self.peek_char() {
+                        self.next_char();
+                        return Some(Token{ kind: TokenKind::TripleDot, start, end })
                     }
                     return Some(Token{ kind: TokenKind::DoubleDot, start, end })
                 }
@@ -212,7 +207,7 @@ impl<'a> Generator<'a> {
                 _ => ()
             }
         }
-        return Some(Token{ kind: TokenKind::Dot, start, end })
+        Some(Token{ kind: TokenKind::Dot, start, end })
     }
 
     fn scan_open_square_bracket(&mut self, start: usize, end: usize) -> Option<Token> {
@@ -222,7 +217,7 @@ impl<'a> Generator<'a> {
                 _ => return Some(Token{ kind: TokenKind::LeftSquareBracket, start, end })
             }
         }
-        return Some(Token{ kind: TokenKind::LeftSquareBracket, start, end })
+        Some(Token{ kind: TokenKind::LeftSquareBracket, start, end })
     }
 
     fn scan_long_bracket_string(&mut self, start: usize) -> Option<Token> {
@@ -278,7 +273,7 @@ impl<'a> Generator<'a> {
                 }
             }
         }
-        return Some(Token{
+        Some(Token{
             kind: TokenKind::String { validity: token_validity::String::NotTerminated, modifier: token_modifier::String::LongBrackets },
             start,
             end,
@@ -338,14 +333,11 @@ impl<'a> Generator<'a> {
         // `0x` and an exponent need digits after them
         let mut needs_digit = false;
         match ch {
-            '0' => match self.peek_char() {
-                Some((_, 'x' | 'X', x_end)) => {
-                    self.next_char();
-                    end = x_end;
-                    needs_digit = true;
-                    modifier = token_modifier::Number::Hex;
-                },
-                _ => (),
+            '0' => if let Some((_, 'x' | 'X', x_end)) = self.peek_char() {
+                self.next_char();
+                end = x_end;
+                needs_digit = true;
+                modifier = token_modifier::Number::Hex;
             },
             '.' => modifier = token_modifier::Number::Decimal,
             _ => ()
@@ -367,12 +359,10 @@ impl<'a> Generator<'a> {
                         } else if end - start > 0 && (ch == 'E' || ch == 'e') {
                             modifier = token_modifier::Number::Exponential;
                             needs_digit = true;
-                            match self.peek_char() { // Eat + or - at the start of the exponent
-                                Some((_, '+' | '-', sign_end)) => {
-                                    self.next_char();
-                                    end = sign_end;
-                                }
-                                _ => ()
+                            // Eat + or - at the start of the exponent
+                            if let Some((_, '+' | '-', sign_end)) = self.peek_char() {
+                                self.next_char();
+                                end = sign_end;
                             }
                         } else if !ch.is_numeric() {
                             validity = token_validity::Number::Invalid;
@@ -382,12 +372,10 @@ impl<'a> Generator<'a> {
                         if ch == 'E' || ch == 'e' {
                             modifier = token_modifier::Number::Exponential;
                             needs_digit = true;
-                            match self.peek_char() { // Eat + or - at the start of the exponent
-                                Some((_, '+' | '-', sign_end)) => {
-                                    self.next_char();
-                                    end = sign_end;
-                                }
-                                _ => ()
+                            // Eat + or - at the start of the exponent
+                            if let Some((_, '+' | '-', sign_end)) = self.peek_char() {
+                                self.next_char();
+                                end = sign_end;
                             }
                         } else if !ch.is_numeric() {
                             validity = token_validity::Number::Invalid;
@@ -420,7 +408,7 @@ impl<'a> Generator<'a> {
                 break
             }
         }
-        return Some(Token { kind: TokenKind::Whitespace, start, end })
+        Some(Token { kind: TokenKind::Whitespace, start, end })
     }
 
     fn scan_identifier(&mut self, start: usize, end: usize) -> Option<Token> {
@@ -433,7 +421,7 @@ impl<'a> Generator<'a> {
                 break
             }
         }
-        return Some(Token { kind: TokenKind::Identifier, start, end })
+        Some(Token { kind: TokenKind::Identifier, start, end })
     }
 
     fn scan_equals(&mut self, start: usize, end: usize) -> Option<Token> {
@@ -442,7 +430,7 @@ impl<'a> Generator<'a> {
             self.next_char();
             return Some(Token{ kind: TokenKind::EqualsBoolean, start, end})
         }
-        return Some(Token{ kind: TokenKind::Assign, start, end})
+        Some(Token{ kind: TokenKind::Assign, start, end})
     }
 
     fn scan_less_than(&mut self, start: usize, end: usize) -> Option<Token> {
@@ -451,7 +439,7 @@ impl<'a> Generator<'a> {
             self.next_char();
             return Some(Token{ kind: TokenKind::LessThanOrEquals, start, end})
         }
-        return Some(Token{ kind: TokenKind::LessThan, start, end})
+        Some(Token{ kind: TokenKind::LessThan, start, end})
     }
 
     fn scan_greater_than(&mut self, start: usize, end: usize) -> Option<Token> {
@@ -460,7 +448,7 @@ impl<'a> Generator<'a> {
             self.next_char();
             return Some(Token{ kind: TokenKind::GreaterThanOrEquals, start, end})
         }
-        return Some(Token{ kind: TokenKind::GreaterThan, start, end })
+        Some(Token{ kind: TokenKind::GreaterThan, start, end })
     }
 
     fn scan_tilde(&mut self, start: usize, end: usize) -> Option<Token> {
@@ -469,16 +457,15 @@ impl<'a> Generator<'a> {
             self.next_char();
             return Some(Token{ kind: TokenKind::NotEqualsBoolean, start, end})
         }
-        return Some(Token{ kind: TokenKind::Invalid, start, end})
+        Some(Token{ kind: TokenKind::Invalid, start, end})
     }
 
     fn scan_simple_string(&mut self, start: usize, terminator: char, _end: usize) -> Option<Token> {
-        let modifier;
-        if terminator == '\'' {
-            modifier = token_modifier::String::Quotes
+        let modifier = if terminator == '\'' {
+            token_modifier::String::Quotes
         } else {
-            modifier = token_modifier::String::DoubleQuotes
-        }
+            token_modifier::String::DoubleQuotes
+        };
         let mut seen_escape = false;
         let mut last_stable_pos = start + 1;
         while let Some((_, ch, end)) = self.peek_char() {
@@ -501,7 +488,7 @@ impl<'a> Generator<'a> {
             }
             self.next_char();
         }
-        return Some(Token{
+        Some(Token{
             kind: TokenKind::String { validity: token_validity::String::NotTerminated, modifier},
             start, end: last_stable_pos,
         })

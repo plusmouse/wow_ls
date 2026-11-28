@@ -250,7 +250,7 @@ pub struct Generator<'a> {
 impl<'a> Generator<'a> {
     pub fn new(text: &'a str) -> Generator<'a> {
         Generator {
-            text: text,
+            text,
             lexer: TokenGenerator::new(text),
             builder: GreenNodeBuilder::new(),
             errors: Vec::new(),
@@ -266,19 +266,19 @@ impl<'a> Generator<'a> {
     fn next_raw_token(&mut self) -> Option<Token> {
         if let Some(t) = self.token_cache {
             self.token_cache = None;
-            return Some(t)
+            Some(t)
         } else {
-            return self.lexer.next_token()
+            self.lexer.next_token()
         }
     }
 
     #[inline]
     fn peek_raw_token(&mut self) -> Option<Token> {
         if let Some(t) = self.token_cache {
-            return Some(t)
+            Some(t)
         } else {
             self.token_cache = self.lexer.next_token();
-            return self.token_cache
+            self.token_cache
         }
     }
 
@@ -288,7 +288,7 @@ impl<'a> Generator<'a> {
         if let Some(t) = self.peek_raw_token() {
             end = t.start;
         }
-        return end
+        end
     }
 
     pub fn process_all(&mut self) -> rowan::GreenNode {
@@ -300,7 +300,7 @@ impl<'a> Generator<'a> {
             self.builder.finish_node();
         }
         let b = std::mem::take(&mut self.builder);
-        return b.finish()
+        b.finish()
     }
 
     fn eat_whitespace(&mut self) {
@@ -428,13 +428,13 @@ impl<'a> Generator<'a> {
         self.builder.finish_node();
 
         if terminate_next {
-            return ExpressionKind::FunctionCall
+            ExpressionKind::FunctionCall
         } else if !multiple_ids {
-            return ExpressionKind::Name
+            ExpressionKind::Name
         } else if !id_expected {
-            return ExpressionKind::Identifier
+            ExpressionKind::Identifier
         } else {
-            return ExpressionKind::None
+            ExpressionKind::None
         }
     }
 
@@ -449,7 +449,7 @@ impl<'a> Generator<'a> {
                     self.builder.start_node(to_raw(SyntaxKind::Literal));
                     self.builder.token(to_raw(SyntaxKind::Number), &self.text[t.start..t.end]);
                     self.builder.finish_node();
-                    return ExpressionKind::Literal
+                    ExpressionKind::Literal
                 },
                 TokenKind::String{validity, modifier: _} => {
                     if validity == token_validity::String::NotTerminated {
@@ -459,12 +459,12 @@ impl<'a> Generator<'a> {
                     self.builder.start_node(to_raw(SyntaxKind::Literal));
                     self.builder.token(to_raw(SyntaxKind::String), &self.text[t.start..t.end]);
                     self.builder.finish_node();
-                    return ExpressionKind::Literal
+                    ExpressionKind::Literal
                 },
                 TokenKind::TripleDot => {
                     self.next_raw_token();
                     self.builder.token(to_raw(SyntaxKind::TripleDot), &self.text[t.start..t.end]);
-                    return ExpressionKind::Nested
+                    ExpressionKind::Nested
                 },
                 TokenKind::Identifier | TokenKind::LeftBracket => {
                     let text = &self.text[t.start..t.end];
@@ -472,14 +472,14 @@ impl<'a> Generator<'a> {
                     match keyword_kind {
                         SyntaxKind::Name => {
                             self.next_raw_token();
-                            return self.scan_prefix_expression(&t)
+                            self.scan_prefix_expression(&t)
                         },
                         SyntaxKind::NilKeyword | SyntaxKind::FalseKeyword | SyntaxKind::TrueKeyword => {
                             self.next_raw_token();
                             self.builder.start_node(to_raw(SyntaxKind::Literal));
                             self.builder.token(to_raw(keyword_kind), text);
                             self.builder.finish_node();
-                            return ExpressionKind::Literal
+                            ExpressionKind::Literal
                         }
                         SyntaxKind::FunctionKeyword => {
                             self.next_raw_token();
@@ -488,14 +488,14 @@ impl<'a> Generator<'a> {
                             if self.scan_parameters() {
                                 self.scan_block(Some(SyntaxKind::EndKeyword), &t);
                                 self.builder.finish_node();
-                                return ExpressionKind::Literal
+                                ExpressionKind::Literal
                             } else {
                                 self.builder.finish_node();
-                                return ExpressionKind::None
+                                ExpressionKind::None
                             }
                         }
                         _ => {
-                            return ExpressionKind::None
+                            ExpressionKind::None
                         }
                     }
                 },
@@ -520,14 +520,14 @@ impl<'a> Generator<'a> {
                         self.builder.finish_node();
                         return ExpressionKind::None
                     }
-                    return ExpressionKind::Literal
+                    ExpressionKind::Literal
                 }
                 _ => {
-                    return ExpressionKind::None
+                    ExpressionKind::None
                 },
             }
         } else {
-            return ExpressionKind::None
+            ExpressionKind::None
         }
     }
 
@@ -815,7 +815,7 @@ impl<'a> Generator<'a> {
             group_kind = ExpressionKind::None;
         }
         close_nodes(0, &mut is_open, &mut self.builder);
-        return group_kind
+        group_kind
     }
 
     fn scan_expression_list(&mut self) -> bool {
@@ -846,7 +846,7 @@ impl<'a> Generator<'a> {
                 break
             }
         }
-        return true
+        true
     }
 
     /// `( exp )`, with the opening bracket already consumed
@@ -993,7 +993,7 @@ impl<'a> Generator<'a> {
             SyntaxKind::DoKeyword => {
                 self.builder.start_node(to_raw(SyntaxKind::DoBlock));
                 self.builder.token(to_raw(SyntaxKind::DoKeyword), text);
-                self.scan_block(Some(SyntaxKind::EndKeyword), &token);
+                self.scan_block(Some(SyntaxKind::EndKeyword), token);
                 self.builder.finish_node();
             },
             SyntaxKind::BreakKeyword => {
@@ -1011,12 +1011,12 @@ impl<'a> Generator<'a> {
                             self.next_raw_token();
                             self.scan_function_identifier(&token, text);
                             if self.scan_parameters() {
-                                self.scan_block(Some(SyntaxKind::EndKeyword), &keyword_token);
+                                self.scan_block(Some(SyntaxKind::EndKeyword), keyword_token);
                             }
                         }
                         TokenKind::LeftBracket => {
                             if self.scan_parameters() {
-                                self.scan_block(Some(SyntaxKind::EndKeyword), &keyword_token);
+                                self.scan_block(Some(SyntaxKind::EndKeyword), keyword_token);
                             }
                         }
                         _ => {
@@ -1027,7 +1027,7 @@ impl<'a> Generator<'a> {
                 self.builder.finish_node();
             }
             SyntaxKind::IfKeyword => {
-                self.scan_if_block(&token);
+                self.scan_if_block(token);
             }
             SyntaxKind::WhileKeyword => {
                 self.builder.start_node(to_raw(SyntaxKind::WhileLoop));
@@ -1045,11 +1045,9 @@ impl<'a> Generator<'a> {
                         if keyword_kind == SyntaxKind::DoKeyword {
                             self.next_raw_token();
                             self.builder.token(to_raw(SyntaxKind::DoKeyword), &self.text[t.start..t.end]);
-                            self.scan_block(Some(SyntaxKind::EndKeyword), &token);
+                            self.scan_block(Some(SyntaxKind::EndKeyword), token);
                         }
                     }
-                } else {
-
                 }
                 self.builder.finish_node();
             }
@@ -1057,7 +1055,7 @@ impl<'a> Generator<'a> {
                 self.builder.start_node(to_raw(SyntaxKind::RepeatUntilLoop));
                 self.builder.token(to_raw(SyntaxKind::RepeatKeyword), text);
                 self.eat_whitespace();
-                self.scan_block(Some(SyntaxKind::UntilKeyword), &token);
+                self.scan_block(Some(SyntaxKind::UntilKeyword), token);
                 self.eat_whitespace();
                 if self.scan_expression() == ExpressionKind::None {
                     let end = self.get_current_position();
@@ -1117,7 +1115,7 @@ impl<'a> Generator<'a> {
                                     self.next_raw_token();
                                     self.builder.token(to_raw(SyntaxKind::DoKeyword), text);
                                     self.eat_whitespace();
-                                    self.scan_block(Some(SyntaxKind::EndKeyword), &token);
+                                    self.scan_block(Some(SyntaxKind::EndKeyword), token);
                                 }
                             }
                             self.builder.finish_node();
@@ -1140,7 +1138,6 @@ impl<'a> Generator<'a> {
                         self.errors.push(Error { start: token.start, end: t.end, kind: ErrorKind::UnexpectedOperator });
                         // Kept in the tree, or every later position would drift
                         self.builder.token(to_raw(SyntaxKind::Invalid), text);
-                        return;
                     } else {
                         let keyword = str_to_keyword(text);
                         if keyword == SyntaxKind::FunctionKeyword {
@@ -1158,7 +1155,7 @@ impl<'a> Generator<'a> {
                                     self.builder.token(to_raw(SyntaxKind::Name), text);
                                 }
                                 if self.scan_parameters() {
-                                    self.scan_block(Some(SyntaxKind::EndKeyword), &keyword_token);
+                                    self.scan_block(Some(SyntaxKind::EndKeyword), keyword_token);
                                 }
                             }
                             self.builder.finish_node();
@@ -1166,7 +1163,7 @@ impl<'a> Generator<'a> {
                             self.builder.token(to_raw(keyword), text);
                             self.errors.push(Error { start: token.start, end: t.end, kind: ErrorKind::UnexpectedKeyword });
                         } else {
-                            self.scan_name_list(&t, &text, &[]);
+                            self.scan_name_list(&t, text, &[]);
                             self.eat_whitespace();
                             // `local a, b` without `=` is still a declaration, so it gets the same node
                             self.builder.start_node_at(checkpoint, to_raw(SyntaxKind::LocalAssignStatement));
@@ -1295,7 +1292,7 @@ impl<'a> Generator<'a> {
             t = token;
         } else {
             self.builder.finish_node();
-            if let Some(_) = terminator {
+            if terminator.is_some() {
                 self.errors.push(Error{ start: start_token.start, end: start_token.end, kind: ErrorKind::NotClosedBlock });
             }
             return
@@ -1325,7 +1322,7 @@ impl<'a> Generator<'a> {
             if let Some(token) = self.next_raw_token() {
                 t = token;
             } else {
-                if let Some(_) = terminator {
+                if terminator.is_some() {
                     self.errors.push(Error{ start: start_token.start, end: start_token.end, kind: ErrorKind::NotClosedBlock });
                     break
                 }
@@ -1518,82 +1515,78 @@ impl<'a> Generator<'a> {
         self.eat_whitespace();
         self.builder.start_node(to_raw(SyntaxKind::ParameterList));
         let mut result = false;
-        if let Some(token) = self.peek_raw_token() {
-            match token.kind {
-                TokenKind::LeftBracket => {
-                    self.builder.token(to_raw(SyntaxKind::LeftBracket), &self.text[token.start..token.end]);
-                    self.next_raw_token();
-                    let mut expecting_closure = false;
-                    let mut expecting_terminator = false;
-                    let mut seen_parameter = false;
-                    self.eat_whitespace();
-                    let mut comma_point = self.get_current_position();
-                    while let Some(token) = self.peek_raw_token()  {
-                        let text = &self.text[token.start..token.end];
-                        match token.kind {
-                            TokenKind::Identifier => {
-                                if expecting_terminator {
-                                    self.errors.push(Error { start: comma_point, end: comma_point + 1, kind: ErrorKind::ExpectingClosingBracket });
-                                    break;
-                                }
-                                if expecting_closure && seen_parameter {
-                                    self.errors.push(Error { start: comma_point, end: comma_point + 1, kind: ErrorKind::ExpectingCommaOrBracket });
-                                    break;
-                                }
-                                comma_point = token.end;
-                                seen_parameter = true;
-                                let keyword_type= str_to_keyword(text);
-                                if keyword_type != SyntaxKind::Name {
-                                    self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::UnexpectedKeyword });
-                                    self.builder.token(to_raw(keyword_type), text);
-                                } else {
-                                    self.builder.token(to_raw(SyntaxKind::Parameter), text);
-                                }
-                                expecting_closure = true;
-                                self.next_raw_token();
-                            },
-                            TokenKind::Comma => {
-                                if expecting_terminator {
-                                    self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::ExpectingClosingBracket });
-                                }
-                                if !expecting_closure {
-                                    self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::UnexpectedOperator });
-                                }
-                                expecting_closure = false;
-                                self.builder.token(to_raw(SyntaxKind::Comma), text);
-                                self.next_raw_token();
-                            }
-                            TokenKind::RightBracket => {
-                                if !expecting_closure && !expecting_terminator && seen_parameter {
-                                    self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::ExpectingName });
-                                }
-                                self.builder.token(to_raw(SyntaxKind::RightBracket), text);
-                                self.next_raw_token();
-                                result = true;
-                                break;
-                            }
-                            TokenKind::TripleDot => {
-                                if expecting_closure && seen_parameter {
-                                    self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::UnexpectedOperator });
-                                }
-                                self.builder.token(to_raw(SyntaxKind::ParameterVarArgs), text);
-                                expecting_terminator = true;
-                                self.next_raw_token();
-                            }
-                            _ => {
-                                self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::UnexpectedOperator });
-                                break;
-                            }
-                        };
-                        self.eat_whitespace();
+        if let Some(token) = self.peek_raw_token()
+            && token.kind == TokenKind::LeftBracket {
+            self.builder.token(to_raw(SyntaxKind::LeftBracket), &self.text[token.start..token.end]);
+            self.next_raw_token();
+            let mut expecting_closure = false;
+            let mut expecting_terminator = false;
+            let mut seen_parameter = false;
+            self.eat_whitespace();
+            let mut comma_point = self.get_current_position();
+            while let Some(token) = self.peek_raw_token()  {
+                let text = &self.text[token.start..token.end];
+                match token.kind {
+                    TokenKind::Identifier => {
+                        if expecting_terminator {
+                            self.errors.push(Error { start: comma_point, end: comma_point + 1, kind: ErrorKind::ExpectingClosingBracket });
+                            break;
+                        }
+                        if expecting_closure && seen_parameter {
+                            self.errors.push(Error { start: comma_point, end: comma_point + 1, kind: ErrorKind::ExpectingCommaOrBracket });
+                            break;
+                        }
+                        comma_point = token.end;
+                        seen_parameter = true;
+                        let keyword_type= str_to_keyword(text);
+                        if keyword_type != SyntaxKind::Name {
+                            self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::UnexpectedKeyword });
+                            self.builder.token(to_raw(keyword_type), text);
+                        } else {
+                            self.builder.token(to_raw(SyntaxKind::Parameter), text);
+                        }
+                        expecting_closure = true;
+                        self.next_raw_token();
+                    },
+                    TokenKind::Comma => {
+                        if expecting_terminator {
+                            self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::ExpectingClosingBracket });
+                        }
+                        if !expecting_closure {
+                            self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::UnexpectedOperator });
+                        }
+                        expecting_closure = false;
+                        self.builder.token(to_raw(SyntaxKind::Comma), text);
+                        self.next_raw_token();
                     }
-                },
-                _ => ()
+                    TokenKind::RightBracket => {
+                        if !expecting_closure && !expecting_terminator && seen_parameter {
+                            self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::ExpectingName });
+                        }
+                        self.builder.token(to_raw(SyntaxKind::RightBracket), text);
+                        self.next_raw_token();
+                        result = true;
+                        break;
+                    }
+                    TokenKind::TripleDot => {
+                        if expecting_closure && seen_parameter {
+                            self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::UnexpectedOperator });
+                        }
+                        self.builder.token(to_raw(SyntaxKind::ParameterVarArgs), text);
+                        expecting_terminator = true;
+                        self.next_raw_token();
+                    }
+                    _ => {
+                        self.errors.push(Error { start: token.start, end: token.end, kind: ErrorKind::UnexpectedOperator });
+                        break;
+                    }
+                };
+                self.eat_whitespace();
             }
         }
         self.builder.finish_node();
         self.eat_whitespace();
-        return result
+        result
     }
 
     /// `trivia_after_first` is whitespace the caller already consumed after the first name

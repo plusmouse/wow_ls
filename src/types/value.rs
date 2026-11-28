@@ -253,7 +253,7 @@ pub(super) fn union_all(types: impl IntoIterator<Item = Type>) -> Option<Type> {
             [one] => NamedRef::Table(*one),
             _ => NamedRef::several_tables(tables),
         };
-        joined = joined | Type { named, ..Type::default() };
+        joined |= Type { named, ..Type::default() };
     }
     Some(joined)
 }
@@ -269,7 +269,7 @@ pub(super) fn many_tables(named: NamedRef) -> bool {
 /// The identity of a new table the definitions' function `function` returns
 /// at a call at `at`, in return position `slot`, if it can have one
 pub(super) fn family_member(at: Location, function: BuiltinId, slot: usize) -> Option<Location> {
-    let function = u32::try_from(function).ok().filter(|&f| f < MOST_FAMILIES)?;
+    let function = Some(function).filter(|&f| f < MOST_FAMILIES)?;
     let slot = u32::try_from(slot).ok().filter(|&s| s + 1 < 1 << FAMILY_SHIFT)?;
     Some(Location { slot: FAMILY_MEMBER | function << FAMILY_SHIFT | (slot + 1), ..at })
 }
