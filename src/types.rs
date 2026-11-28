@@ -1483,6 +1483,9 @@ pub struct FieldReference {
     pub write: bool,
     /// A read that's directly called: `f` in `t.f(x)` or `t:f(x)`
     pub callee: bool,
+    /// A read whose value is only tested or worked out from, as in `if
+    /// t.f then` or `not t.f`, so a function it holds goes nowhere else
+    pub tested: bool,
     /// For a callee, what this call returns when that's more than the function
     /// says (a pool's `Acquire` giving the pool's object)
     pub call_returns: Option<Values>,
@@ -4429,7 +4432,7 @@ impl<'a> Walker<'a> {
         // Methods `ForwardedCall`s stand for: resolved by each call to the
         // function calling them, if every one is seen
         let mut forwarded: Vec<(&str, FunctionId)> = Vec::new();
-        for field in self.field_references.iter().filter(|f| !f.write) {
+        for field in self.field_references.iter().filter(|f| !f.write && !f.tested) {
             match (field.types.function, field.forwarded) {
                 (FunctionRef::One(function), _) if !field.callee => { escaped.insert(function); }
                 // Each of several it may be: called, each gets what's
@@ -5486,7 +5489,7 @@ impl<'a> Walker<'a> {
     /// entry. `base` is what the field is on
     fn field_reference(&mut self, access: &SyntaxNode, name: &SyntaxToken, base: Type, types: Type, write: bool) {
         let table = base.named.identity();
-        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: crate::syntax::SyntaxNodePtr::new(access), token: name.green().to_owned(), types, table, base: base.named, write, callee: false, call_returns: None, forwarded: None });
+        self.field_references.push(FieldReference { file: self.file, range: name.text_range(), access: crate::syntax::SyntaxNodePtr::new(access), token: name.green().to_owned(), types, table, base: base.named, write, callee: false, tested: !write && only_tested(access), call_returns: None, forwarded: None });
     }
 
     /// The field read just recorded is the function being called
@@ -9523,6 +9526,30 @@ fn string_field_name(literal: &str) -> Option<&str> {
     (starts_well && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')).then_some(name)
 }
 
+/// Whether what `node` gives is only tested (as an `if`'s or `while`'s
+/// condition is) or worked out from (by an operator other than `and` and
+/// `or`, which may give it itself), so it goes nowhere else
+fn only_tested(node: &SyntaxNode) -> bool {
+    let mut node = node.clone();
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            SyntaxKind::Expression | SyntaxKind::GroupedExpression => {}
+            SyntaxKind::BinaryExpression => {
+                let logical = parent.children_with_tokens().filter_map(|t| t.into_token()).all(|t| {
+                    matches!(t.kind(), SyntaxKind::AndKeyword | SyntaxKind::OrKeyword | SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::Comment)
+                });
+                if !logical {
+                    return true
+                }
+            }
+            SyntaxKind::UnaryExpression | SyntaxKind::Condition => return true,
+            _ => return false,
+        }
+        node = parent;
+    }
+    false
+}
+
 /// Whether every path through the block ends in a `return`. Conservative:
 /// loops and `error()` calls count as possibly falling through
 /// An `if` statement being walked: what each older variable it changed held
@@ -10286,6 +10313,21 @@ mod tests {
         let source = "local t = {} t.cb = function(x) return x end t.cb = function(y) return y end local h = t.cb h(1) Unknown(h)";
         assert_eq!(types_of(source, "x"), ["unknown"; 2]);
         assert_eq!(types_of(source, "y"), ["unknown"; 2]);
+    }
+
+    #[test]
+    fn fields_only_tested_dont_let_functions_escape() {
+        // `x.track` may be the function stored as `t.track`, but testing it
+        // calls nothing and passes it nowhere
+        let source = "local t = {} t.track = function(item) return item end
+            local function use(x) if x.track then end if not x.track then end end
+            use(Unknown) t.track(1)";
+        assert_eq!(types_of(source, "item"), ["number"; 2]);
+        // Given on, though, it could be called anywhere
+        let source = "local t = {} t.track = function(item) return item end
+            local function use(x) local f = x.track and x.track Unknown(f) end
+            use(Unknown) t.track(1)";
+        assert_eq!(types_of(source, "item"), ["unknown"; 2]);
     }
 
     #[test]
