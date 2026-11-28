@@ -76,10 +76,9 @@ pub fn defined_names(document: &roxmltree::Document) -> Vec<(String, bool)> {
     fn visit(node: roxmltree::Node, in_template: bool, names: &mut Vec<(String, bool)>) {
         for child in node.children().filter(|n| n.is_element()) {
             let in_template = in_template || child.attribute("virtual").is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
-            if let Some(name) = child.attribute("name").map(str::trim).filter(|n| !n.is_empty()) {
-                if !name.to_ascii_lowercase().contains("$parent") {
-                    names.push((name.to_string(), !in_template));
-                }
+            if let Some(name) = child.attribute("name").map(str::trim).filter(|n| !n.is_empty())
+                && !name.to_ascii_lowercase().contains("$parent") {
+                names.push((name.to_string(), !in_template));
             }
             visit(child, in_template, names);
         }
@@ -458,13 +457,12 @@ fn lua_at(text: &str, range: std::ops::Range<usize>) -> String {
             rest = end;
             continue
         }
-        if rest.starts_with('&') {
-            if let Some((entity, c)) = rest.find(';').filter(|&end| end < 12).and_then(|end| Some((&rest[..=end], entity(&rest[1..end])?))) {
-                lua.push(c);
-                lua.extend(std::iter::repeat_n(' ', entity.len() - c.len_utf8()));
-                rest = &rest[entity.len()..];
-                continue
-            }
+        if rest.starts_with('&')
+            && let Some((entity, c)) = rest.find(';').filter(|&end| end < 12).and_then(|end| Some((&rest[..=end], entity(&rest[1..end])?))) {
+            lua.push(c);
+            lua.extend(std::iter::repeat_n(' ', entity.len() - c.len_utf8()));
+            rest = &rest[entity.len()..];
+            continue
         }
         let c = rest.chars().next().unwrap_or_default();
         lua.push(c);

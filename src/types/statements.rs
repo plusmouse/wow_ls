@@ -44,19 +44,16 @@ impl<'a> Walker<'a> {
 
     pub(super) fn statement(&mut self, statement: &Statement) {
         let tracked = !self.deps.get_mut().is_empty();
-        if tracked {
-            if let Some(body) = self.deps.get_mut().last_mut() {
-                body.levels.push(DepLevel::default());
-            }
+        if tracked
+            && let Some(body) = self.deps.get_mut().last_mut() {
+            body.levels.push(DepLevel::default());
         }
         self.statement_walked(statement);
-        if tracked {
-            if let Some(body) = self.deps.get_mut().last_mut() {
-                if let Some(mut level) = body.levels.pop() {
-                    level.signature |= matches!(statement, Statement::Return(_));
-                    body.resolve(level);
-                }
-            }
+        if tracked
+            && let Some(body) = self.deps.get_mut().last_mut()
+            && let Some(mut level) = body.levels.pop() {
+            level.signature |= matches!(statement, Statement::Return(_));
+            body.resolve(level);
         }
     }
 
@@ -142,11 +139,10 @@ impl<'a> Walker<'a> {
             Statement::FunctionCall(call) => {
                 self.function_call(call);
                 // Past `assert(v)`, `v` is true: otherwise it raised an error
-                if self.calls_library_global(call, "assert") {
-                    if let Some(condition) = call.arguments().first() {
-                        for (target, ty) in self.narrowing(condition).when_true {
-                            self.narrow(&target, ty);
-                        }
+                if self.calls_library_global(call, "assert")
+                    && let Some(condition) = call.arguments().first() {
+                    for (target, ty) in self.narrowing(condition).when_true {
+                        self.narrow(&target, ty);
                     }
                 }
             }
@@ -398,10 +394,9 @@ impl<'a> Walker<'a> {
             }
             Statement::Return(s) => {
                 for expression in s.expressions().iter().flat_map(loop_operands) {
-                    if let Some(index) = self.own_parameter_read(&expression) {
-                        if let Some(returned) = self.returned_parameters.last_mut() {
-                            returned.push(index);
-                        }
+                    if let Some(index) = self.own_parameter_read(&expression)
+                        && let Some(returned) = self.returned_parameters.last_mut() {
+                        returned.push(index);
                     }
                 }
                 let returned_fields: Vec<Option<ReturnedField>> = s.expressions().iter().map(|e| self.returned_field(e)).collect();

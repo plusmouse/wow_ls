@@ -230,17 +230,16 @@ impl BodyInfluences {
         let mut reads_of = |dep: &Arc<Dep>| found.entry(Arc::as_ptr(dep)).or_insert_with(|| body.final_reads(dep, &closed)).clone();
         for (index, write) in self.own_writes.iter().enumerate() {
             // Its own signature: what its returns, requirements and calls read
-            if let Write::Function(written, _) = &**write {
-                if *written == id {
-                    influences.push((Read::Function(id), signature.clone()));
-                    // Its parameters' types: what calls pass (their own
-                    // influence) and what the body requires of them
-                    influences.push((Read::ParameterTypes(id), requirements.clone()));
-                    influences.push((Read::CallCycle(id), calls.clone()));
-                    // Whether it's a method is how it's written, which reads nothing
-                    influences.push((Read::Method(id), Arc::from([])));
-                    continue
-                }
+            if let Write::Function(written, _) = &**write
+                && *written == id {
+                influences.push((Read::Function(id), signature.clone()));
+                // Its parameters' types: what calls pass (their own
+                // influence) and what the body requires of them
+                influences.push((Read::ParameterTypes(id), requirements.clone()));
+                influences.push((Read::CallCycle(id), calls.clone()));
+                // Whether it's a method is how it's written, which reads nothing
+                influences.push((Read::Method(id), Arc::from([])));
+                continue
             }
             let deps = match body.write_deps.get(index) {
                 Some(Some(dep)) => reads_of(dep),

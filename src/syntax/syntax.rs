@@ -1038,15 +1038,14 @@ impl<'a> Generator<'a> {
                 self.builder.finish_node();
                 if is_expression {
                     self.eat_whitespace();
-                    if let Some(t) = self.peek_raw_token() {
-                        if t.kind == TokenKind::Identifier {
-                            let text = &self.text[t.start..t.end];
-                            let keyword_kind = str_to_keyword(text);
-                            if keyword_kind == SyntaxKind::DoKeyword {
-                                self.next_raw_token();
-                                self.builder.token(to_raw(SyntaxKind::DoKeyword), &self.text[t.start..t.end]);
-                                self.scan_block(Some(SyntaxKind::EndKeyword), &token);
-                            }
+                    if let Some(t) = self.peek_raw_token()
+                        && t.kind == TokenKind::Identifier {
+                        let text = &self.text[t.start..t.end];
+                        let keyword_kind = str_to_keyword(text);
+                        if keyword_kind == SyntaxKind::DoKeyword {
+                            self.next_raw_token();
+                            self.builder.token(to_raw(SyntaxKind::DoKeyword), &self.text[t.start..t.end]);
+                            self.scan_block(Some(SyntaxKind::EndKeyword), &token);
                         }
                     }
                 } else {
@@ -1148,19 +1147,18 @@ impl<'a> Generator<'a> {
                             self.builder.start_node_at(checkpoint, to_raw(SyntaxKind::FunctionDefinition));
                             self.builder.token(to_raw(SyntaxKind::FunctionKeyword), text);
                             self.eat_whitespace();
-                            if let Some(t) = self.peek_raw_token() {
-                                if t.kind == TokenKind::Identifier {
-                                    self.next_raw_token();
-                                    let text = &self.text[t.start..t.end];
-                                    let keyword = str_to_keyword(text);
-                                    if keyword != SyntaxKind::Name {
-                                        self.builder.token(to_raw(keyword), text);
-                                    } else {
-                                        self.builder.token(to_raw(SyntaxKind::Name), text);
-                                    }
-                                    if self.scan_parameters() {
-                                        self.scan_block(Some(SyntaxKind::EndKeyword), &keyword_token);
-                                    }
+                            if let Some(t) = self.peek_raw_token()
+                                && t.kind == TokenKind::Identifier {
+                                self.next_raw_token();
+                                let text = &self.text[t.start..t.end];
+                                let keyword = str_to_keyword(text);
+                                if keyword != SyntaxKind::Name {
+                                    self.builder.token(to_raw(keyword), text);
+                                } else {
+                                    self.builder.token(to_raw(SyntaxKind::Name), text);
+                                }
+                                if self.scan_parameters() {
+                                    self.scan_block(Some(SyntaxKind::EndKeyword), &keyword_token);
                                 }
                             }
                             self.builder.finish_node();
@@ -1172,14 +1170,13 @@ impl<'a> Generator<'a> {
                             self.eat_whitespace();
                             // `local a, b` without `=` is still a declaration, so it gets the same node
                             self.builder.start_node_at(checkpoint, to_raw(SyntaxKind::LocalAssignStatement));
-                            if let Some(t) = self.peek_raw_token() {
-                                if t.kind == TokenKind::Assign {
-                                    self.builder.token(to_raw(SyntaxKind::Assign), &self.text[t.start..t.end]);
-                                    self.next_raw_token();
-                                    self.builder.start_node(to_raw(SyntaxKind::ExpressionList));
-                                    self.scan_expression_list();
-                                    self.builder.finish_node();
-                                }
+                            if let Some(t) = self.peek_raw_token()
+                                && t.kind == TokenKind::Assign {
+                                self.builder.token(to_raw(SyntaxKind::Assign), &self.text[t.start..t.end]);
+                                self.next_raw_token();
+                                self.builder.start_node(to_raw(SyntaxKind::ExpressionList));
+                                self.scan_expression_list();
+                                self.builder.finish_node();
                             }
                             self.builder.finish_node();
                         }
@@ -1190,10 +1187,9 @@ impl<'a> Generator<'a> {
                 self.builder.start_node(to_raw(SyntaxKind::ReturnStatement));
                 self.builder.token(to_raw(SyntaxKind::ReturnKeyword), &self.text[token.start..token.end]);
                 self.eat_whitespace();
-                if let Some(t) = self.peek_raw_token() {
-                    if t.kind != TokenKind::Identifier || str_to_keyword(&self.text[t.start..t.end]) != SyntaxKind::EndKeyword {
-                        self.scan_expression_list();
-                    }
+                if let Some(t) = self.peek_raw_token()
+                    && (t.kind != TokenKind::Identifier || str_to_keyword(&self.text[t.start..t.end]) != SyntaxKind::EndKeyword) {
+                    self.scan_expression_list();
                 }
                 self.builder.finish_node();
             }
@@ -1277,13 +1273,12 @@ impl<'a> Generator<'a> {
         self.builder.finish_node();
         if expression_kind != ExpressionKind::None {
             self.eat_whitespace();
-            if let Some(t) = self.peek_raw_token() {
-                if t.kind == TokenKind::RightSquareBracket {
-                    let text = &self.text[t.start..t.end];
-                    self.builder.token(to_raw(SyntaxKind::RightSquareBracket), text);
-                    self.next_raw_token();
-                    return
-                }
+            if let Some(t) = self.peek_raw_token()
+                && t.kind == TokenKind::RightSquareBracket {
+                let text = &self.text[t.start..t.end];
+                self.builder.token(to_raw(SyntaxKind::RightSquareBracket), text);
+                self.next_raw_token();
+                return
             }
         }
         let pos = self.get_current_position();

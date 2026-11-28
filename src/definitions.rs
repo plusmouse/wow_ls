@@ -880,10 +880,9 @@ impl Definitions {
             }
             complete &= !self.open_mixins.contains(mixin);
         }
-        if into.is_none() {
-            if let Some(path) = path {
-                self.type_paths.insert(id, path.to_string());
-            }
+        if into.is_none()
+            && let Some(path) = path {
+            self.type_paths.insert(id, path.to_string());
         }
         if mixins.is_empty() {
             self.type_mixins.remove(&id);

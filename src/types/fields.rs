@@ -74,12 +74,10 @@ impl<'a> Walker<'a> {
         if let Some(declared) = self.definitions.field(base, name) {
             // A value the definitions don't know the type of: what this table
             // was given, if anything
-            if declared.set == TypeSet::UNKNOWN {
-                if let (Some(prior), Some(at)) = (self.prior, base.named.identity()) {
-                    if let Some(own) = self.own_field(prior, at, name, 0) {
-                        return own
-                    }
-                }
+            if declared.set == TypeSet::UNKNOWN
+                && let (Some(prior), Some(at)) = (self.prior, base.named.identity())
+                && let Some(own) = self.own_field(prior, at, name, 0) {
+                return own
             }
             return declared
         }
@@ -247,10 +245,9 @@ impl<'a> Walker<'a> {
     /// Field `name` (`__index`, `__call`, ...) of table `table`'s metatable
     pub(super) fn metamethod(&self, prior: &Analysis, table: TableId, name: &str, depth: usize) -> Option<Type> {
         self.note(Read::Metatable(table));
-        if let Some(metatable) = self.layer.metatables.get(&table).and_then(|m| m.named.identity()) {
-            if !prior.metatables.contains_key(&table) {
-                return self.own_field(prior, metatable, name, depth + 1)
-            }
+        if let Some(metatable) = self.layer.metatables.get(&table).and_then(|m| m.named.identity())
+            && !prior.metatables.contains_key(&table) {
+            return self.own_field(prior, metatable, name, depth + 1)
         }
         let metatable = prior.metatables.get(&table)?.named.identity()?;
         self.own_field(prior, metatable, name, depth + 1)
@@ -348,22 +345,21 @@ impl<'a> Walker<'a> {
     /// stand-in, `value`'s tables go straight into what it stands for, rather
     /// than through a set of them
     pub(super) fn joined_at(&mut self, place: Place, before: Type, value: Type, record: bool) -> Type {
-        if let NamedRef::Table(at) = before.named {
-            if is_stand_in(at) && matches!(value.named, NamedRef::Table(_) | NamedRef::Tables(_)) && at == stand_in(place) {
-                let tables: Vec<TableId> = value.named.identities().into_iter().filter(|&t| t != at).collect();
-                let known = self.stand_ins.get_mut().entry(at).or_default();
-                let mut added: Vec<TableId> = tables.into_iter().filter(|t| known.binary_search(t).is_err()).collect();
-                added.sort();
-                added.dedup();
-                if !added.is_empty() {
-                    known.extend(added.iter().copied());
-                    known.sort();
-                    if record {
-                        self.record_write(Write::StandIn(at, added));
-                    }
+        if let NamedRef::Table(at) = before.named
+            && is_stand_in(at) && matches!(value.named, NamedRef::Table(_) | NamedRef::Tables(_)) && at == stand_in(place) {
+            let tables: Vec<TableId> = value.named.identities().into_iter().filter(|&t| t != at).collect();
+            let known = self.stand_ins.get_mut().entry(at).or_default();
+            let mut added: Vec<TableId> = tables.into_iter().filter(|t| known.binary_search(t).is_err()).collect();
+            added.sort();
+            added.dedup();
+            if !added.is_empty() {
+                known.extend(added.iter().copied());
+                known.sort();
+                if record {
+                    self.record_write(Write::StandIn(at, added));
                 }
-                return before | Type { named: NamedRef::None, ..value }
             }
+            return before | Type { named: NamedRef::None, ..value }
         }
         self.stored(place, before | value, record)
     }
@@ -373,10 +369,9 @@ impl<'a> Walker<'a> {
     /// read doesn't make a set that size
     pub(super) fn read_through(&self, place: Place, found: Type) -> Type {
         let (ty, _) = kept_at(&mut self.stand_ins.borrow_mut(), place, found);
-        if let NamedRef::Table(at) = ty.named {
-            if is_stand_in(at) {
-                self.note(Read::StandIn(at));
-            }
+        if let NamedRef::Table(at) = ty.named
+            && is_stand_in(at) {
+            self.note(Read::StandIn(at));
         }
         ty
     }
@@ -496,10 +491,9 @@ impl<'a> Walker<'a> {
     pub(super) fn record_write(&mut self, write: Write) {
         // Only the innermost: each body's writes join its parent's when it ends
         let Some(innermost) = self.frames.last_mut() else { return };
-        if let Write::Binding(id, _) = write {
-            if id >= innermost.bindings_start {
-                return
-            }
+        if let Write::Binding(id, _) = write
+            && id >= innermost.bindings_start {
+            return
         }
         let write = Arc::new(write);
         innermost.own_writes.push(write.clone());
@@ -524,16 +518,14 @@ impl<'a> Walker<'a> {
 
     /// Ends it: what it declared depends on what it read, and on `also`
     pub(super) fn end_declaration(&mut self, also: Option<Read>) {
-        if let Some(body) = self.deps.get_mut().last_mut() {
-            if body.levels.len() > 1 {
-                if let Some(mut level) = body.levels.pop() {
-                    if let Some(also) = also {
-                        let number = body.key(&also);
-                        level.reads.push(number);
-                    }
-                    body.resolve(level);
-                }
+        if let Some(body) = self.deps.get_mut().last_mut()
+            && body.levels.len() > 1
+            && let Some(mut level) = body.levels.pop() {
+            if let Some(also) = also {
+                let number = body.key(&also);
+                level.reads.push(number);
             }
+            body.resolve(level);
         }
     }
 
@@ -576,10 +568,9 @@ impl<'a> Walker<'a> {
         if let Some(parent) = self.frames.last_mut() {
             for write in writes {
                 // An assignment to a variable the parent declared is the parent's own
-                if let Write::Binding(id, _) = **write {
-                    if id >= parent.bindings_start {
-                        continue
-                    }
+                if let Write::Binding(id, _) = **write
+                    && id >= parent.bindings_start {
+                    continue
                 }
                 parent.writes.push(write.clone());
             }

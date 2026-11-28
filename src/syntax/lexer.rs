@@ -173,11 +173,10 @@ impl<'a> Generator<'a> {
             '\'' => return self.scan_simple_string(start, ch, end),
             '\n' => return Some(Token{ kind: TokenKind::Newline, start, end}),
             '\r' => {
-                if let Some((_, ch, end)) = self.peek_char() {
-                    if ch == '\n' {
-                        self.next_char();
-                        return Some(Token{ kind: TokenKind::Newline, start, end})
-                    }
+                if let Some((_, ch, end)) = self.peek_char()
+                    && ch == '\n' {
+                    self.next_char();
+                    return Some(Token{ kind: TokenKind::Newline, start, end})
                 }
                 self.scan_whitespace(start, end)
             }
@@ -257,21 +256,10 @@ impl<'a> Generator<'a> {
                             }
                         }
                     }
-                    if opening_counter == closing_counter {
-                        if let Some((_, ch, end_2)) = self.peek_char() {
-                            if ch == ']' {
-                                end = end_2;
-                                self.next_char();
-                                return Some(Token{
-                                    kind: TokenKind::String { validity: token_validity::String::Valid, modifier: token_modifier::String::LongBrackets },
-                                    start,
-                                    end,
-                                })
-                            }
-                        }
-                    }
-                } else if let Some((_, ch, end)) = self.peek_char() {
-                    if ch == ']' {
+                    if opening_counter == closing_counter
+                        && let Some((_, ch, end_2)) = self.peek_char()
+                        && ch == ']' {
+                        end = end_2;
                         self.next_char();
                         return Some(Token{
                             kind: TokenKind::String { validity: token_validity::String::Valid, modifier: token_modifier::String::LongBrackets },
@@ -279,6 +267,14 @@ impl<'a> Generator<'a> {
                             end,
                         })
                     }
+                } else if let Some((_, ch, end)) = self.peek_char()
+                    && ch == ']' {
+                    self.next_char();
+                    return Some(Token{
+                        kind: TokenKind::String { validity: token_validity::String::Valid, modifier: token_modifier::String::LongBrackets },
+                        start,
+                        end,
+                    })
                 }
             }
         }
@@ -291,45 +287,44 @@ impl<'a> Generator<'a> {
     }
 
     fn scan_minus(&mut self, start: usize, end: usize) -> Option<Token> {
-        if let Some((_, ch, _)) = self.peek_char() {
-            if ch == '-' {
-                self.next_char();
-                if let Some((pos, ch, end)) = self.peek_char() {
-                    if ch == '[' {
-                        self.next_char();
-                        let multiline = self.scan_long_bracket_string(pos);
-                        if let Some(t) = multiline {
-                            match t.kind {
-                                TokenKind::String { validity: token_validity::String::NotTerminated, modifier: _} => {
-                                    return Some(Token{
-                                        kind: TokenKind::Comment { validity: token_validity::Comment::NotTerminated, modifier: token_modifier::Comment::Multiline },
-                                        start, end: t.end,
-                                    })
-                                }
-                                TokenKind::Invalid => (),
-                                _ => return Some(Token{
-                                        kind: TokenKind::Comment { validity: token_validity::Comment::Valid, modifier: token_modifier::Comment::Multiline },
-                                        start, end: t.end,
-                                    })
+        if let Some((_, ch, _)) = self.peek_char()
+            && ch == '-' {
+            self.next_char();
+            if let Some((pos, ch, end)) = self.peek_char() {
+                if ch == '[' {
+                    self.next_char();
+                    let multiline = self.scan_long_bracket_string(pos);
+                    if let Some(t) = multiline {
+                        match t.kind {
+                            TokenKind::String { validity: token_validity::String::NotTerminated, modifier: _} => {
+                                return Some(Token{
+                                    kind: TokenKind::Comment { validity: token_validity::Comment::NotTerminated, modifier: token_modifier::Comment::Multiline },
+                                    start, end: t.end,
+                                })
                             }
+                            TokenKind::Invalid => (),
+                            _ => return Some(Token{
+                                    kind: TokenKind::Comment { validity: token_validity::Comment::Valid, modifier: token_modifier::Comment::Multiline },
+                                    start, end: t.end,
+                                })
+                        }
 
-                        }
                     }
-                    // A bare `--` ends before the line break, which is lexed as its own token
-                    let mut end = if ch == '\r' || ch == '\n' { pos } else { end };
-                    while let Some((_, ch, end_2)) = self.peek_char() {
-                        if ch == '\r' || ch == '\n' {
-                            break;
-                        } else {
-                            end = end_2;
-                            self.next_char();
-                        }
-                    }
-                    return Some(Token{
-                        kind: TokenKind::Comment { validity: token_validity::Comment::Valid, modifier: token_modifier::Comment::Oneline },
-                        start, end,
-                    })
                 }
+                // A bare `--` ends before the line break, which is lexed as its own token
+                let mut end = if ch == '\r' || ch == '\n' { pos } else { end };
+                while let Some((_, ch, end_2)) = self.peek_char() {
+                    if ch == '\r' || ch == '\n' {
+                        break;
+                    } else {
+                        end = end_2;
+                        self.next_char();
+                    }
+                }
+                return Some(Token{
+                    kind: TokenKind::Comment { validity: token_validity::Comment::Valid, modifier: token_modifier::Comment::Oneline },
+                    start, end,
+                })
             }
         }
         Some(Token{ kind: TokenKind::Minus, start, end })
@@ -442,41 +437,37 @@ impl<'a> Generator<'a> {
     }
 
     fn scan_equals(&mut self, start: usize, end: usize) -> Option<Token> {
-        if let Some((_, ch, end)) = self.peek_char() {
-            if ch == '=' {
-                self.next_char();
-                return Some(Token{ kind: TokenKind::EqualsBoolean, start, end})
-            }
+        if let Some((_, ch, end)) = self.peek_char()
+            && ch == '=' {
+            self.next_char();
+            return Some(Token{ kind: TokenKind::EqualsBoolean, start, end})
         }
         return Some(Token{ kind: TokenKind::Assign, start, end})
     }
 
     fn scan_less_than(&mut self, start: usize, end: usize) -> Option<Token> {
-        if let Some((_, ch, end)) = self.peek_char() {
-            if ch == '=' {
-                self.next_char();
-                return Some(Token{ kind: TokenKind::LessThanOrEquals, start, end})
-            }
+        if let Some((_, ch, end)) = self.peek_char()
+            && ch == '=' {
+            self.next_char();
+            return Some(Token{ kind: TokenKind::LessThanOrEquals, start, end})
         }
         return Some(Token{ kind: TokenKind::LessThan, start, end})
     }
 
     fn scan_greater_than(&mut self, start: usize, end: usize) -> Option<Token> {
-        if let Some((_, ch, end)) = self.peek_char() {
-            if ch == '=' {
-                self.next_char();
-                return Some(Token{ kind: TokenKind::GreaterThanOrEquals, start, end})
-            }
+        if let Some((_, ch, end)) = self.peek_char()
+            && ch == '=' {
+            self.next_char();
+            return Some(Token{ kind: TokenKind::GreaterThanOrEquals, start, end})
         }
         return Some(Token{ kind: TokenKind::GreaterThan, start, end })
     }
 
     fn scan_tilde(&mut self, start: usize, end: usize) -> Option<Token> {
-        if let Some((_, ch, end)) = self.peek_char() {
-            if ch == '=' {
-                self.next_char();
-                return Some(Token{ kind: TokenKind::NotEqualsBoolean, start, end})
-            }
+        if let Some((_, ch, end)) = self.peek_char()
+            && ch == '=' {
+            self.next_char();
+            return Some(Token{ kind: TokenKind::NotEqualsBoolean, start, end})
         }
         return Some(Token{ kind: TokenKind::Invalid, start, end})
     }

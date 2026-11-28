@@ -102,13 +102,11 @@ impl<'a> Walker<'a> {
             return
         }
         let mut dep = Dep::of(&level.reads[scope.reads..], &level.locals[scope.locals..]);
-        if let Some(callee) = callee {
-            if let Some(&function) = body.key_numbers.get(&Read::Function(callee)) {
-                if dep.reads.remove(function) {
-                    let method = body.key(&Read::Method(callee));
-                    dep.reads.insert(method);
-                }
-            }
+        if let Some(callee) = callee
+            && let Some(&function) = body.key_numbers.get(&Read::Function(callee))
+            && dep.reads.remove(function) {
+            let method = body.key(&Read::Method(callee));
+            dep.reads.insert(method);
         }
         let dep = Arc::new(dep);
         for write in writes {
@@ -191,10 +189,9 @@ impl<'a> Walker<'a> {
             (callee, _) => callee,
         };
         // Which function it calls depends only on what was read so far
-        if let (Some(scope), Some(body)) = (self.call_scopes.last_mut(), self.deps.get_mut().last()) {
-            if let Some(level) = body.levels.get(scope.level).filter(|_| body.levels.len() == scope.level + 1) {
-                scope.callee = Some((level.reads.len(), level.locals.len()));
-            }
+        if let (Some(scope), Some(body)) = (self.call_scopes.last_mut(), self.deps.get_mut().last())
+            && let Some(level) = body.levels.get(scope.level).filter(|_| body.levels.len() == scope.level + 1) {
+            scope.callee = Some((level.reads.len(), level.locals.len()));
         }
         let arguments = call.arguments();
         let argument_types = self.expression_values(&arguments);

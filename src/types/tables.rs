@@ -46,10 +46,9 @@ impl<'a> Walker<'a> {
                         for argument in n.children().filter_map(Expression::cast) {
                             self.expression(&argument);
                         }
-                    } else if first || in_brackets || n.kind() != SyntaxKind::Identifier {
-                        if let Some(e) = Expression::cast(n) {
-                            self.expression(&e);
-                        }
+                    } else if (first || in_brackets || n.kind() != SyntaxKind::Identifier)
+                        && let Some(e) = Expression::cast(n) {
+                        self.expression(&e);
                     }
                 }
             }
@@ -70,13 +69,12 @@ impl<'a> Walker<'a> {
             // `{ x }` is an array item, whose identifier is a value, not a key
             let keyed = field.children_with_tokens().any(|c| c.kind() == SyntaxKind::Assign);
             // A last item of `...` or a call is every value it gives
-            if !keyed && Some(&field) == last_field.as_ref() {
-                if let Some(e) = field.children().find_map(Expression::cast).filter(|e| matches!(e, Expression::VarArgs(_) | Expression::FunctionCall(_))) {
-                    let values = self.expression_values(std::slice::from_ref(&e));
-                    let all = values.values.iter().fold(values.rest, |all, &v| all | v);
-                    self.entry_write(table, Type::of(TypeSet::NUMBER), all);
-                    continue
-                }
+            if !keyed && Some(&field) == last_field.as_ref()
+                && let Some(e) = field.children().find_map(Expression::cast).filter(|e| matches!(e, Expression::VarArgs(_) | Expression::FunctionCall(_))) {
+                let values = self.expression_values(std::slice::from_ref(&e));
+                let all = values.values.iter().fold(values.rest, |all, &v| all | v);
+                self.entry_write(table, Type::of(TypeSet::NUMBER), all);
+                continue
             }
             let mut in_brackets = false;
             let mut after_assign = false;
@@ -132,11 +130,10 @@ impl<'a> Walker<'a> {
     /// The key in `t[key]`: a string literal that could be a field name is
     /// that field, and anything else is read for its type
     pub(super) fn index_key(&mut self, key: &Expression) -> Key {
-        if let Expression::Literal(literal) = key {
-            if let Some(name) = literal.get_string().as_deref().and_then(string_field_name) {
-                let token = literal.syntax().descendants_with_tokens().filter_map(|e| e.into_token()).find(|t| t.kind() == SyntaxKind::String);
-                return Key::Name(name.to_string(), token)
-            }
+        if let Expression::Literal(literal) = key
+            && let Some(name) = literal.get_string().as_deref().and_then(string_field_name) {
+            let token = literal.syntax().descendants_with_tokens().filter_map(|e| e.into_token()).find(|t| t.kind() == SyntaxKind::String);
+            return Key::Name(name.to_string(), token)
         }
         Key::Other(self.expression(key))
     }

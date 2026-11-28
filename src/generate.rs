@@ -131,10 +131,9 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path, colors
     for (path, text) in &texts {
         let document = xml::parse(text).map_err(|e| format!("{}: {e}", path.display()))?;
         for node in document.root_element().descendants().filter(|n| n.is_element()) {
-            if node.attribute("intrinsic").is_some_and(|v| v.eq_ignore_ascii_case("true")) {
-                if let Some(name) = node.attribute("name") {
-                    kinds.intrinsics.insert(name.to_string(), node.tag_name().name().to_string());
-                }
+            if node.attribute("intrinsic").is_some_and(|v| v.eq_ignore_ascii_case("true"))
+                && let Some(name) = node.attribute("name") {
+                kinds.intrinsics.insert(name.to_string(), node.tag_name().name().to_string());
             }
         }
     }
@@ -154,10 +153,9 @@ pub fn templates(source: &Path, definitions_directory: &Path, out: &Path, colors
         all_objects.extend(objects.iter().cloned());
         for object in objects {
             let Some(name) = object.name.clone() else { continue };
-            if object.is_virtual || object.intrinsic {
-                if templates.insert(name.clone(), object.clone()).is_some() {
-                    report.duplicates.push(name.clone());
-                }
+            if (object.is_virtual || object.intrinsic)
+                && templates.insert(name.clone(), object.clone()).is_some() {
+                report.duplicates.push(name.clone());
             }
             // An intrinsic is an element to use, not a frame. A named font is
             // made even when it's virtual, as `GameFontHighlight` is, to be

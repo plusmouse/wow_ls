@@ -145,12 +145,10 @@ impl Analysis {
         };
         add_sites(&mut sites, layered.map_or(&[], Vec::as_slice));
         // A field `CopyTable` gave a copy is where the original's is set
-        if sites.is_empty() {
-            if let Some(source) = holder.and_then(|at| self.copies.get(&at).or_else(|| self.layer.copies.get(&at))) {
-                if Some(*source) != table {
-                    return self.field_sites(Some(*source), name)
-                }
-            }
+        if sites.is_empty()
+            && let Some(source) = holder.and_then(|at| self.copies.get(&at).or_else(|| self.layer.copies.get(&at)))
+            && Some(*source) != table {
+            return self.field_sites(Some(*source), name)
         }
         sites
     }

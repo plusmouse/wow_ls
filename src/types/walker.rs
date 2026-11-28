@@ -372,10 +372,9 @@ impl<'a> Walker<'a> {
         // Outside any body: only a body's reads are recorded. A body's are
         // its numbered keys, joined with those of the functions inside it
         // once it's done (see `function_body`)
-        if self.deps.borrow().is_empty() {
-            if let Some(innermost) = self.reads.borrow_mut().last_mut() {
-                innermost.insert(read);
-            }
+        if self.deps.borrow().is_empty()
+            && let Some(innermost) = self.reads.borrow_mut().last_mut() {
+            innermost.insert(read);
         }
     }
 
@@ -617,10 +616,9 @@ impl<'a> Walker<'a> {
         // accounted for by `only_called`)
         for reference in self.references.iter().filter(|r| !r.write && !r.callee) {
             for function in reference.types.function.alternatives() {
-                if let FunctionRef::One(id) = function {
-                    if self.assigned_to.get(&id) != Some(&reference.binding) {
-                        escaped.insert(id);
-                    }
+                if let FunctionRef::One(id) = function
+                    && self.assigned_to.get(&id) != Some(&reference.binding) {
+                    escaped.insert(id);
                 }
             }
         }
@@ -932,21 +930,18 @@ impl<'a> Walker<'a> {
     /// Sets a binding's current type, noting the type before when in a loop
     pub(super) fn set_current(&mut self, id: BindingId, types: Type) {
         let types = self.stored(self.binding_place(id), types, true);
-        if let Some(body) = self.deps.get_mut().last_mut() {
-            if id >= body.bindings_start && self.bindings[id].kind != BindingKind::Global {
-                if let Some(level) = body.levels.last_mut() {
-                    level.bindings.push(id);
-                }
-            }
+        if let Some(body) = self.deps.get_mut().last_mut()
+            && id >= body.bindings_start && self.bindings[id].kind != BindingKind::Global
+            && let Some(level) = body.levels.last_mut() {
+            level.bindings.push(id);
         }
         if self.loop_depth > 0 && self.current[id] != types {
             self.loop_log.push((id, self.current[id]));
         }
         // What it held before the `if` being walked changed it
-        if let Some(join) = self.joins.last_mut() {
-            if id < join.bindings && !join.before.contains_key(&id) {
-                join.before.insert(id, (self.current[id], join.fell_through));
-            }
+        if let Some(join) = self.joins.last_mut()
+            && id < join.bindings && !join.before.contains_key(&id) {
+            join.before.insert(id, (self.current[id], join.fell_through));
         }
         self.current[id] = types;
     }

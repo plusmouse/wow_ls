@@ -170,10 +170,9 @@ impl<'a> Walker<'a> {
     /// be named, so it may have any
     pub(super) fn open(&mut self, ty: Type) {
         for object in ty.named.alternatives() {
-            if let NamedRef::One(id) | NamedRef::Extended(id) = object {
-                if self.definitions.has_fixed_fields(id) {
-                    self.apply(Write::Opened(id));
-                }
+            if let NamedRef::One(id) | NamedRef::Extended(id) = object
+                && self.definitions.has_fixed_fields(id) {
+                self.apply(Write::Opened(id));
             }
         }
     }

@@ -291,10 +291,9 @@ impl<'a> Walker<'a> {
             if let Some(reference) = self.references.iter_mut().rev().find(|r| r.file == self.file && range.contains_range(r.range)) {
                 reference.callee = true;
             }
-        } else if field_access(identifier.syntax()).is_some() {
-            if let Some(field) = self.field_references.iter_mut().rev().find(|f| f.file == self.file && !f.write && range.contains_range(f.range)) {
-                field.callee = true;
-            }
+        } else if field_access(identifier.syntax()).is_some()
+            && let Some(field) = self.field_references.iter_mut().rev().find(|f| f.file == self.file && !f.write && range.contains_range(f.range)) {
+            field.callee = true;
         }
     }
 

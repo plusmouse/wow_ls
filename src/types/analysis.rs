@@ -468,11 +468,10 @@ impl Analysis {
             for (key, deps) in record.own_influences.get() {
                 let Read::Entries(to) = key else { continue };
                 for dep in deps.iter() {
-                    if let Read::Entries(from) = dep {
-                        if from != to {
-                            let (from, to) = (node(*from, &mut nodes, &mut edges), node(*to, &mut nodes, &mut edges));
-                            edges[from].push(to);
-                        }
+                    if let Read::Entries(from) = dep
+                        && from != to {
+                        let (from, to) = (node(*from, &mut nodes, &mut edges), node(*to, &mut nodes, &mut edges));
+                        edges[from].push(to);
                     }
                 }
             }

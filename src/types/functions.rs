@@ -47,10 +47,9 @@ impl<'a> Walker<'a> {
         self.reads.borrow_mut().push(Default::default());
         let bindings_start = self.bindings.len();
         // The statement defining a method decides what its `self` is
-        if self_type.is_some() {
-            if let Some(level) = self.deps.get_mut().last_mut().and_then(|body| body.levels.last_mut()) {
-                level.self_types.push(id);
-            }
+        if self_type.is_some()
+            && let Some(level) = self.deps.get_mut().last_mut().and_then(|body| body.levels.last_mut()) {
+            level.self_types.push(id);
         }
         self.deps.get_mut().push(BodyDeps { bindings_start, levels: vec![DepLevel::default()], ..BodyDeps::default() });
         self.walk_function_body(def, self_type, id);

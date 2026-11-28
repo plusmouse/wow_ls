@@ -43,10 +43,9 @@ impl<'a> Walker<'a> {
         });
         self.current.push(types);
         // A local starts with what its declaring statement read
-        if kind != BindingKind::Global {
-            if let Some(level) = self.deps.get_mut().last_mut().and_then(|body| body.levels.last_mut()) {
-                level.bindings.push(id);
-            }
+        if kind != BindingKind::Global
+            && let Some(level) = self.deps.get_mut().last_mut().and_then(|body| body.levels.last_mut()) {
+            level.bindings.push(id);
         }
         id
     }

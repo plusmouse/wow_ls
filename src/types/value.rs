@@ -624,10 +624,9 @@ impl NamedRef {
         // Several of a family are its identity
         let families: Vec<Option<NamedRef>> = objects.iter().map(|o| o.in_family()).collect();
         for (i, object) in objects.iter_mut().enumerate() {
-            if let Some(family) = families[i] {
-                if families.iter().enumerate().any(|(j, f)| j != i && *f == Some(family)) {
-                    *object = family;
-                }
+            if let Some(family) = families[i]
+                && families.iter().enumerate().any(|(j, f)| j != i && *f == Some(family)) {
+                *object = family;
             }
         }
         objects.sort();

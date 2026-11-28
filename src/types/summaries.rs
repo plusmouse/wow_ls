@@ -117,10 +117,9 @@ impl<'a> Walker<'a> {
         for value in loop_operands(value) {
             if let Some(index) = self.own_parameter_read(&value) {
                 self.add_loop_edge(LoopEdge::ParameterToField(index, on.clone(), field.to_string()));
-            } else if let Expression::FunctionCall(call) = &value {
-                if let Some(&callee) = self.callees.get(&(self.file, call.syntax().text_range())) {
-                    self.add_loop_edge(LoopEdge::ReturnToField(callee, on.clone(), field.to_string()));
-                }
+            } else if let Expression::FunctionCall(call) = &value
+                && let Some(&callee) = self.callees.get(&(self.file, call.syntax().text_range())) {
+                self.add_loop_edge(LoopEdge::ReturnToField(callee, on.clone(), field.to_string()));
             }
         }
     }
@@ -207,12 +206,11 @@ impl<'a> Walker<'a> {
             return None
         }
         let caller = self.function_ranges.last().map(|&(_, function)| function)?;
-        if let Expression::Identifier(identifier) = expression {
-            if let Some(name) = identifier.simple_name() {
-                let self_binding = self.self_bindings.last().copied().flatten();
-                if self_binding.is_some() && self.local_binding(name.text()) == self_binding {
-                    return Some(Ok(On::SelfValue))
-                }
+        if let Expression::Identifier(identifier) = expression
+            && let Some(name) = identifier.simple_name() {
+            let self_binding = self.self_bindings.last().copied().flatten();
+            if self_binding.is_some() && self.local_binding(name.text()) == self_binding {
+                return Some(Ok(On::SelfValue))
             }
         }
         if let Some((_, index)) = self.parameter_read(expression).filter(|&(function, _)| function == caller) {
@@ -417,10 +415,9 @@ impl<'a> Walker<'a> {
     /// walk, never settling
     pub(super) fn add_forwarded(&mut self, call: ForwardedCall) {
         self.deps_to_signature();
-        if let Some(calls) = self.forwarded.last_mut() {
-            if !calls.contains(&call) {
-                calls.push(call);
-            }
+        if let Some(calls) = self.forwarded.last_mut()
+            && !calls.contains(&call) {
+            calls.push(call);
         }
     }
 

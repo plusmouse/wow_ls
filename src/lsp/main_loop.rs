@@ -772,18 +772,17 @@ fn main_loop(connection: Connection, definitions_path: Option<PathBuf>, ui_sourc
                                     }
                                 }
                             }
-                            if let Some(l) = language.get(&params.text_document.uri.to_string()) {
-                                if l == "lua" || path.as_deref().is_some_and(project::is_xml) {
-                                    text.remove(&params.text_document.uri.to_string());
-                                    text.insert(params.text_document.uri.to_string(), params.content_changes[0].text.clone());
-                                    match &path {
-                                        // Before the addons depending on it
-                                        Some(path) => {
-                                            owed.retain(|owed| owed != path);
-                                            owed.insert(0, path.clone());
-                                        }
-                                        None => diagnostics::publish(&connection, params.text_document.uri, &params.content_changes[0].text, &[]),
+                            if let Some(l) = language.get(&params.text_document.uri.to_string())
+                                && (l == "lua" || path.as_deref().is_some_and(project::is_xml)) {
+                                text.remove(&params.text_document.uri.to_string());
+                                text.insert(params.text_document.uri.to_string(), params.content_changes[0].text.clone());
+                                match &path {
+                                    // Before the addons depending on it
+                                    Some(path) => {
+                                        owed.retain(|owed| owed != path);
+                                        owed.insert(0, path.clone());
                                     }
+                                    None => diagnostics::publish(&connection, params.text_document.uri, &params.content_changes[0].text, &[]),
                                 }
                             }
                         }
