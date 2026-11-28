@@ -8971,6 +8971,9 @@ impl<'a> Walker<'a> {
     /// variable's stand-in for a table it doesn't know may hold anything, as
     /// a field read through it falls back on fields of that name elsewhere
     fn entries_within(&self, prior: &Analysis, at: TableId, depth: usize, known: bool) -> Option<Entries> {
+        // What it holds is read, whether it's the table asked about or one
+        // reached through it (a mixin, or a stand-in's member)
+        self.note(Read::Entries(at));
         // A stand-in: what any table it stands for holds, and what's put
         // through it
         if is_stand_in(at) && depth <= 16 {
@@ -9676,6 +9679,26 @@ mod tests {
             .filter(|(k, _)| k == key)
             .flat_map(|(_, deps)| deps.iter().cloned())
             .collect()
+    }
+
+    #[test]
+    fn reading_a_copy_reads_what_its_function_made() {
+        // `TableKeys` returns a new table each call, holding what `keys`
+        // does: so a body iterating one reads `keys`, and must be walked
+        // again when that changes, not replayed
+        let analysis = keeping_records(|| analyse_with("local function TableKeys(original)
+                local keys = {}
+                for key in pairs(original) do table.insert(keys, key) end
+                return keys
+            end
+            local function Days(h)
+                local days = TableKeys(h)
+                for _, day in ipairs(days) do local d = day end
+            end
+            Days({ x = 1 })", &library()));
+        let (keys, days) = (table_of(&analysis, "keys"), function_of(&analysis, "Days"));
+        let record = analysis.records.get(&days).expect("a record");
+        assert!(record.reads.contains(&Read::Entries(keys)));
     }
 
     #[test]
